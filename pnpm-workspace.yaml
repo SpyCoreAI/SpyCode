@@ -1,0 +1,6 @@
+# Single-package root — this file carries pnpm settings for the mirror.
+# esbuild (tsup/vitest toolchain) and keytar (optional OS keychain binding)
+# need their install scripts; everything else stays script-blocked.
+allowBuilds:
+  esbuild: true
+  keytar: true

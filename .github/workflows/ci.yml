@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      # standalone: pnpm runs on its own bundled runtime — pnpm 11.6+ needs
+      # newer node builtins than the node 20 matrix entry provides. The
+      # project itself still builds and tests on the matrix node version.
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+          standalone: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm build
+      - run: pnpm test
