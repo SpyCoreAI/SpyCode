@@ -64,7 +64,7 @@
     "mime-types": "^2.1.35",
     "ora": "^7.0.1",
     "react": "^19.2.6",
-    "undici": "^6.27.0"
+    "undici": "^6.28.1"
   },
   "optionalDependencies": {
     "keytar": "^7.9.0"
