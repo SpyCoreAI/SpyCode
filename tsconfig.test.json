@@ -1,0 +1,56 @@
+{
+  // Type-check the TESTS as well as src. The base tsconfig excludes `tests/`
+  // (it is the BUILD config — rootDir ./src, emits ./dist), and vitest does no
+  // type-checking at all, so without this config a test file could carry real
+  // type errors and still ship green. That gap is how FIX BATCH 2's wire-cap
+  // regression reached HEAD unnoticed. `pnpm lint` now runs BOTH configs.
+  //
+  // rootDir is widened to the monorepo root for exactly one reason:
+  // tests/contract.test.ts deliberately imports the SERVER's
+  // `server/src/lib/openapi-schemas.ts` — the single source of truth the
+  // contract test exists to pin. That file has ZERO imports, so widening pulls
+  // in exactly one extra file and no server dependency graph (verified with
+  // --listFiles). rootDir is inert under noEmit; it is widened here only to
+  // silence TS6059, never to relax the BUILD's src-only boundary — the base
+  // `tsc --noEmit` still runs first in `lint` and still enforces rootDir ./src,
+  // which is what keeps src/** from importing outside itself and breaking the
+  // published bundle.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "../..",
+    // ⭐ F-2c-14 §1 — TypeScript resolves `node_modules` by walking UP from the
+    // importing file. `tests/cli-gates/` sits at the monorepo root, whose
+    // node_modules carries only `turbo`, so every bare specifier the gates
+    // import (`vitest`, `commander`, `typescript`) failed TS2307 the moment
+    // they were added to this project — while vitest itself resolved them
+    // perfectly at run time, because Vite resolves from the CONFIG root. Two
+    // resolvers, two answers; this reconciles them.
+    //
+    // ⭐⭐ NAMED, NOT A WILDCARD — AND THE WILDCARD WAS TRIED AND MEASURED FIRST.
+    // `"*": ["./node_modules/*", "*"]` looks driftless and is actively wrong: it
+    // resolves `react` to the JS package and stops TypeScript consulting
+    // `@types/react` the normal way, which turned this project from 0 errors to
+    // 118 across `src/**` (TS7016 on react, mime-types, react/jsx-runtime, and
+    // the implicit-any cascade behind them). A list that goes stale LOUDLY —
+    // a new import in a gate is an immediate TS2307 naming the module — beats a
+    // wildcard that silently changes how every other file resolves.
+    "baseUrl": ".",
+    "paths": {
+      "vitest": ["./node_modules/vitest"],
+      "commander": ["./node_modules/commander"],
+      "typescript": ["./node_modules/typescript"]
+    }
+  },
+  // ⭐⭐ F-2c-14 §1 — `../../tests/cli-gates/**/*` IS NOT OPTIONAL, AND ITS
+  // ABSENCE WAS MEASURED RATHER THAN IMAGINED. The five repo-scoped gates moved
+  // out of `tests/` so they would stop being published to the public mirror.
+  // They are still RUN — `vitest.config.ts` includes them — but `--listFiles`
+  // showed them type-checked by NOTHING the moment they moved: this project's
+  // include list is package-relative, and vitest does no type-checking at all.
+  // A gate that moves and quietly loses its typecheck is the same class as one
+  // that moves and quietly stops running. rootDir is already the monorepo root
+  // (see above), so this costs nothing but the line.
+  "include": ["src/**/*", "tests/**/*", "../../tests/cli-gates/**/*"],
+  "exclude": ["node_modules", "dist"]
+}
