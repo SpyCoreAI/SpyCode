@@ -1,0 +1,677 @@
+{
+  "strings": {
+    "39b1d1bb5fa01cb2": "You are SpyCode, SpyCore's autonomous coding agent, running in a sandboxed terminal session in this directory:\n  <CWD>\n\nAccomplish the user's TASK: explore the project with the read tools, MODIFY files with write_file / edit_file, and run shell commands with run_command (build, test, lint, git, install, …). When you are done, give a clear final answer. The file tools cannot reach outside the working directory; run_command runs a shell there, so keep its commands inside it too.\n\n# Tools\nCall the available tools directly using your native tool-calling. You may call several at once; their results are sent back to you and you continue. When the task is complete, reply with your FINAL answer as plain text and call NO tool - that ends the session.\n\n# Editing files\n- Use edit_file for small, targeted changes and write_file for new files or full rewrites.\n- edit_file does an exact string replace: old_str MUST occur EXACTLY once in the file. Include enough surrounding context to make it unique. If it matches 0 or many times the edit is rejected - add more context and retry.\n- read a file before editing it so old_str matches byte-for-byte.\n- Every write is shown to the user as a diff and applied only after they approve. A write may come back \"rejected by user\" or \"approval required\" - if so, do not blindly retry the identical write; adjust or move on.\n\n# Running commands\n- Use run_command for build/test/lint/git/install and other shell tasks. PREFER the dedicated file tools (read_file/write_file/edit_file/grep/glob) over cat/sed/find/echo-to-file - they are safer and need no shell.\n- Every command is shown to the user for approval before it runs, exactly like a write; it may come back rejected - adapt rather than re-running the same command.\n- Avoid destructive commands; obviously catastrophic ones (e.g. rm -rf /) are hard-blocked.\n\n# Constraints\n- Paths are relative to the working directory; \"..\" escapes and absolute paths outside it are rejected.\n- Sensitive paths (.env, private keys, .git, .ssh, and anything in .spycoreignore) are blocked for BOTH reading and writing by every tool that takes a path. run_command is the exception: it runs a shell, so it is bounded by the approval gate and the catastrophic-command guard, NOT by this rule. Do not use it to read or write a sensitive path.\n- Read tools hide .gitignore'd files and node_modules/.git/build/dist.\n- You have a budget of 6 tool-calling turns - be efficient; prefer repo_map / glob / grep to orient before reading whole files.\n- Only ever refer to models by their public SpyCore names."
+  },
+  "value": {
+    "run": {
+      "events": [
+        {
+          "type": "skill_notice",
+          "level": "warn",
+          "text": "Project skills in .spycore/skills/ were skipped: this workspace is not trusted. Run `spycore mcp trust` in this directory to enable them (only trust repositories you know)."
+        },
+        {
+          "type": "assistant_token",
+          "turn": 1,
+          "chunk": "Checking the workspace."
+        },
+        {
+          "type": "tool_call_started",
+          "turn": 1,
+          "index": 0,
+          "name": "read_file"
+        },
+        {
+          "type": "tool_call_started",
+          "turn": 1,
+          "index": 1,
+          "name": "read_file"
+        },
+        {
+          "type": "tool_call_started",
+          "turn": 1,
+          "index": 2,
+          "name": "read_file"
+        },
+        {
+          "type": "tool_call_started",
+          "turn": 1,
+          "index": 3,
+          "name": "list_dir"
+        },
+        {
+          "type": "narration",
+          "turn": 1,
+          "text": "Checking the workspace."
+        },
+        {
+          "type": "tool_call",
+          "turn": 1,
+          "index": 0,
+          "tool": "read_file",
+          "arg": "",
+          "args": {}
+        },
+        {
+          "type": "tool_result",
+          "turn": 1,
+          "index": 0,
+          "tool": "read_file",
+          "ok": false,
+          "summary": "invalid arguments"
+        },
+        {
+          "type": "tool_call",
+          "turn": 1,
+          "index": 1,
+          "tool": "read_file",
+          "arg": "",
+          "args": {}
+        },
+        {
+          "type": "tool_result",
+          "turn": 1,
+          "index": 1,
+          "tool": "read_file",
+          "ok": false,
+          "summary": "invalid arguments"
+        },
+        {
+          "type": "tool_call",
+          "turn": 1,
+          "index": 2,
+          "tool": "read_file",
+          "arg": "alpha.txt",
+          "args": {
+            "path": "alpha.txt"
+          }
+        },
+        {
+          "type": "tool_call",
+          "turn": 1,
+          "index": 3,
+          "tool": "list_dir",
+          "arg": ".",
+          "args": {}
+        },
+        {
+          "type": "tool_result",
+          "turn": 1,
+          "index": 2,
+          "tool": "read_file",
+          "ok": true,
+          "summary": "2 lines"
+        },
+        {
+          "type": "tool_result",
+          "turn": 1,
+          "index": 3,
+          "tool": "list_dir",
+          "ok": true,
+          "summary": "4 entries"
+        },
+        {
+          "type": "tool_call_started",
+          "turn": 2,
+          "index": 0,
+          "name": "write_file"
+        },
+        {
+          "type": "tool_call_started",
+          "turn": 2,
+          "index": 1,
+          "name": "read_file"
+        },
+        {
+          "type": "tool_call_started",
+          "turn": 2,
+          "index": 2,
+          "name": "grep"
+        },
+        {
+          "type": "tool_call_started",
+          "turn": 2,
+          "index": 3,
+          "name": "list_dir"
+        },
+        {
+          "type": "tool_call_started",
+          "turn": 2,
+          "index": 4,
+          "name": "read_file"
+        },
+        {
+          "type": "tool_call",
+          "turn": 2,
+          "index": 0,
+          "tool": "write_file",
+          "arg": "notes.txt",
+          "args": {
+            "path": "notes.txt",
+            "content": "pinned\n"
+          }
+        },
+        {
+          "type": "tool_result",
+          "turn": 2,
+          "index": 0,
+          "tool": "write_file",
+          "ok": true,
+          "summary": "+1",
+          "kind": "applied",
+          "added": 1,
+          "removed": 0,
+          "isNew": true
+        },
+        {
+          "type": "tool_call",
+          "turn": 2,
+          "index": 1,
+          "tool": "read_file",
+          "arg": "beta.txt",
+          "args": {
+            "path": "beta.txt"
+          }
+        },
+        {
+          "type": "tool_call",
+          "turn": 2,
+          "index": 2,
+          "tool": "grep",
+          "arg": "\"beta\"",
+          "args": {
+            "pattern": "beta"
+          }
+        },
+        {
+          "type": "tool_call",
+          "turn": 2,
+          "index": 3,
+          "tool": "list_dir",
+          "arg": "src",
+          "args": {
+            "path": "src"
+          }
+        },
+        {
+          "type": "tool_result",
+          "turn": 2,
+          "index": 1,
+          "tool": "read_file",
+          "ok": true,
+          "summary": "3 lines"
+        },
+        {
+          "type": "tool_result",
+          "turn": 2,
+          "index": 2,
+          "tool": "grep",
+          "ok": true,
+          "summary": "2 matches in 1 file"
+        },
+        {
+          "type": "tool_result",
+          "turn": 2,
+          "index": 3,
+          "tool": "list_dir",
+          "ok": true,
+          "summary": "1 entry"
+        },
+        {
+          "type": "tool_call_cap",
+          "turn": 2,
+          "cap": 4,
+          "skipped": 1
+        },
+        {
+          "type": "parse_error",
+          "turn": 3,
+          "message": "empty reply - nudging once"
+        },
+        {
+          "type": "assistant_token",
+          "turn": 4,
+          "chunk": "Finished natively."
+        },
+        {
+          "type": "final",
+          "text": "Finished natively."
+        }
+      ],
+      "result": {
+        "reachedMaxTurns": false,
+        "cancelled": false,
+        "events": [
+          {
+            "type": "skill_notice",
+            "level": "warn",
+            "text": "Project skills in .spycore/skills/ were skipped: this workspace is not trusted. Run `spycore mcp trust` in this directory to enable them (only trust repositories you know)."
+          },
+          {
+            "type": "assistant_token",
+            "turn": 1,
+            "chunk": "Checking the workspace."
+          },
+          {
+            "type": "tool_call_started",
+            "turn": 1,
+            "index": 0,
+            "name": "read_file"
+          },
+          {
+            "type": "tool_call_started",
+            "turn": 1,
+            "index": 1,
+            "name": "read_file"
+          },
+          {
+            "type": "tool_call_started",
+            "turn": 1,
+            "index": 2,
+            "name": "read_file"
+          },
+          {
+            "type": "tool_call_started",
+            "turn": 1,
+            "index": 3,
+            "name": "list_dir"
+          },
+          {
+            "type": "narration",
+            "turn": 1,
+            "text": "Checking the workspace."
+          },
+          {
+            "type": "tool_call",
+            "turn": 1,
+            "index": 0,
+            "tool": "read_file",
+            "arg": "",
+            "args": {}
+          },
+          {
+            "type": "tool_result",
+            "turn": 1,
+            "index": 0,
+            "tool": "read_file",
+            "ok": false,
+            "summary": "invalid arguments"
+          },
+          {
+            "type": "tool_call",
+            "turn": 1,
+            "index": 1,
+            "tool": "read_file",
+            "arg": "",
+            "args": {}
+          },
+          {
+            "type": "tool_result",
+            "turn": 1,
+            "index": 1,
+            "tool": "read_file",
+            "ok": false,
+            "summary": "invalid arguments"
+          },
+          {
+            "type": "tool_call",
+            "turn": 1,
+            "index": 2,
+            "tool": "read_file",
+            "arg": "alpha.txt",
+            "args": {
+              "path": "alpha.txt"
+            }
+          },
+          {
+            "type": "tool_call",
+            "turn": 1,
+            "index": 3,
+            "tool": "list_dir",
+            "arg": ".",
+            "args": {}
+          },
+          {
+            "type": "tool_result",
+            "turn": 1,
+            "index": 2,
+            "tool": "read_file",
+            "ok": true,
+            "summary": "2 lines"
+          },
+          {
+            "type": "tool_result",
+            "turn": 1,
+            "index": 3,
+            "tool": "list_dir",
+            "ok": true,
+            "summary": "4 entries"
+          },
+          {
+            "type": "tool_call_started",
+            "turn": 2,
+            "index": 0,
+            "name": "write_file"
+          },
+          {
+            "type": "tool_call_started",
+            "turn": 2,
+            "index": 1,
+            "name": "read_file"
+          },
+          {
+            "type": "tool_call_started",
+            "turn": 2,
+            "index": 2,
+            "name": "grep"
+          },
+          {
+            "type": "tool_call_started",
+            "turn": 2,
+            "index": 3,
+            "name": "list_dir"
+          },
+          {
+            "type": "tool_call_started",
+            "turn": 2,
+            "index": 4,
+            "name": "read_file"
+          },
+          {
+            "type": "tool_call",
+            "turn": 2,
+            "index": 0,
+            "tool": "write_file",
+            "arg": "notes.txt",
+            "args": {
+              "path": "notes.txt",
+              "content": "pinned\n"
+            }
+          },
+          {
+            "type": "tool_result",
+            "turn": 2,
+            "index": 0,
+            "tool": "write_file",
+            "ok": true,
+            "summary": "+1",
+            "kind": "applied",
+            "added": 1,
+            "removed": 0,
+            "isNew": true
+          },
+          {
+            "type": "tool_call",
+            "turn": 2,
+            "index": 1,
+            "tool": "read_file",
+            "arg": "beta.txt",
+            "args": {
+              "path": "beta.txt"
+            }
+          },
+          {
+            "type": "tool_call",
+            "turn": 2,
+            "index": 2,
+            "tool": "grep",
+            "arg": "\"beta\"",
+            "args": {
+              "pattern": "beta"
+            }
+          },
+          {
+            "type": "tool_call",
+            "turn": 2,
+            "index": 3,
+            "tool": "list_dir",
+            "arg": "src",
+            "args": {
+              "path": "src"
+            }
+          },
+          {
+            "type": "tool_result",
+            "turn": 2,
+            "index": 1,
+            "tool": "read_file",
+            "ok": true,
+            "summary": "3 lines"
+          },
+          {
+            "type": "tool_result",
+            "turn": 2,
+            "index": 2,
+            "tool": "grep",
+            "ok": true,
+            "summary": "2 matches in 1 file"
+          },
+          {
+            "type": "tool_result",
+            "turn": 2,
+            "index": 3,
+            "tool": "list_dir",
+            "ok": true,
+            "summary": "1 entry"
+          },
+          {
+            "type": "tool_call_cap",
+            "turn": 2,
+            "cap": 4,
+            "skipped": 1
+          },
+          {
+            "type": "parse_error",
+            "turn": 3,
+            "message": "empty reply - nudging once"
+          },
+          {
+            "type": "assistant_token",
+            "turn": 4,
+            "chunk": "Finished natively."
+          },
+          {
+            "type": "final",
+            "text": "Finished natively."
+          }
+        ],
+        "changedFiles": 1,
+        "conversationId": "cnv_1",
+        "budgetStop": null,
+        "finalText": "Finished natively.",
+        "turns": 4,
+        "toolCalls": 8
+      },
+      "turns": [
+        {
+          "conversationId": "cnv_1",
+          "model": "charon",
+          "message": "TASK: Write the pinned note natively.",
+          "system": "@@golden-ref:39b1d1bb5fa01cb2",
+          "tools": [
+            "read_file",
+            "list_dir",
+            "glob",
+            "grep",
+            "repo_map",
+            "diagnostics",
+            "load_skill",
+            "web_search",
+            "fetch_url",
+            "write_file",
+            "edit_file",
+            "run_command",
+            "delegate"
+          ]
+        },
+        {
+          "conversationId": "cnv_1",
+          "model": "charon",
+          "message": "",
+          "tools": [
+            "read_file",
+            "list_dir",
+            "glob",
+            "grep",
+            "repo_map",
+            "diagnostics",
+            "load_skill",
+            "web_search",
+            "fetch_url",
+            "write_file",
+            "edit_file",
+            "run_command",
+            "delegate"
+          ],
+          "toolResults": [
+            {
+              "id": "c1",
+              "name": "read_file",
+              "content": "Error: read_file arguments were not valid JSON (<ENGINE_JSON_ERROR_1>). Re-issue the call with valid JSON arguments."
+            },
+            {
+              "id": "c2",
+              "name": "read_file",
+              "content": "Error: read_file arguments were not a JSON object. Re-issue the call with valid JSON arguments."
+            },
+            {
+              "id": "c3",
+              "name": "read_file",
+              "content": "alpha line\n"
+            },
+            {
+              "id": "c4",
+              "name": "list_dir",
+              "content": ".spycore/\nalpha.txt\nbeta.txt\nsrc/"
+            }
+          ]
+        },
+        {
+          "conversationId": "cnv_1",
+          "model": "charon",
+          "message": "Tool-call cap reached (4 calls this turn) - 1 further call skipped. Continue with the results so far.",
+          "tools": [
+            "read_file",
+            "list_dir",
+            "glob",
+            "grep",
+            "repo_map",
+            "diagnostics",
+            "load_skill",
+            "web_search",
+            "fetch_url",
+            "write_file",
+            "edit_file",
+            "run_command",
+            "delegate"
+          ],
+          "toolResults": [
+            {
+              "id": "c5",
+              "name": "write_file",
+              "content": "Applied write_file to notes.txt (1 line(s) added, 0 removed)."
+            },
+            {
+              "id": "c6",
+              "name": "read_file",
+              "content": "beta one\nbeta two\n"
+            },
+            {
+              "id": "c7",
+              "name": "grep",
+              "content": "beta.txt:1:beta one\nbeta.txt:2:beta two"
+            },
+            {
+              "id": "c8",
+              "name": "list_dir",
+              "content": "gamma.ts"
+            }
+          ]
+        },
+        {
+          "conversationId": "cnv_1",
+          "model": "charon",
+          "message": "Your reply was empty. Continue the TASK now: call the next tool, or give your final answer as plain text.",
+          "tools": [
+            "read_file",
+            "list_dir",
+            "glob",
+            "grep",
+            "repo_map",
+            "diagnostics",
+            "load_skill",
+            "web_search",
+            "fetch_url",
+            "write_file",
+            "edit_file",
+            "run_command",
+            "delegate"
+          ]
+        }
+      ],
+      "opened": [
+        {
+          "model": "charon"
+        }
+      ],
+      "approvals": [
+        {
+          "kind": "write",
+          "tool": "write_file",
+          "path": "notes.txt",
+          "isNew": true,
+          "added": 1,
+          "removed": 0,
+          "diff": [
+            {
+              "kind": "hunk",
+              "text": "@@ -1,0 +1,1 @@"
+            },
+            {
+              "kind": "add",
+              "text": "pinned"
+            }
+          ],
+          "truncated": false,
+          "hiddenLines": 0
+        }
+      ],
+      "runStates": [
+        {
+          "conversationId": "cnv_1",
+          "nativeTools": true,
+          "turnsCompleted": 0
+        },
+        {
+          "conversationId": "cnv_1",
+          "nativeTools": true,
+          "turnsCompleted": 1
+        },
+        {
+          "conversationId": "cnv_1",
+          "nativeTools": true,
+          "turnsCompleted": 2
+        },
+        {
+          "conversationId": "cnv_1",
+          "nativeTools": true,
+          "turnsCompleted": 3
+        }
+      ],
+      "journal": [
+        {
+          "task": "Write the pinned note natively.",
+          "changes": [
+            {
+              "path": "<CWD>/notes.txt",
+              "op": "create",
+              "before": null,
+              "after": "pinned\n",
+              "afterSha": "dbdbfc4eea60c31dfdb68830dcf4393aa7e1fb5b64af6377e444c6c42e909203"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

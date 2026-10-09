@@ -1,0 +1,12 @@
+# Single-package root — this file carries pnpm settings for the mirror.
+# esbuild (tsup/vitest toolchain) and keytar (optional OS keychain binding)
+# need their install scripts; everything else stays script-blocked.
+allowBuilds:
+  esbuild: true
+  keytar: true
+
+# Security pins (2026-10-04): force patched transitive deps. Lives here (not in
+# package.json) because pnpm v11 ignores the package.json "pnpm" field.
+overrides:
+  fast-uri: 3.1.8
+  braces: 3.0.3
