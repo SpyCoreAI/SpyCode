@@ -1,0 +1,9 @@
+node_modules/
+build/
+dist/
+coverage/
+.vitest-cache/
+*.log
+*.tsbuildinfo
+.env
+.env.local

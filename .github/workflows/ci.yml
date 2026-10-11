@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# M-4 - every third-party action is pinned to an immutable commit SHA, with the
+# release tag in a trailing comment for readability. A mutable tag can be
+# repointed after the fact; a SHA cannot. Bump deliberately, SHA + comment
+# together.
+
+jobs:
+  test:
+    # M-6 - the suite runs on all three supported platforms, not just Ubuntu.
+    # Windows runs via the suite's own `skipIf(win32)` guards for POSIX-only
+    # assertions; native Windows remains otherwise untested per SECURITY.md.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest, windows-latest]
+        node-version: [20, 22]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # standalone: pnpm runs on its own bundled runtime — pnpm 11.6+ needs
+      # newer node builtins than the node 20 matrix entry provides. The
+      # project itself still builds and tests on the matrix node version.
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        with:
+          version: 11
+          standalone: true
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm build
+      - run: pnpm test
+
+  coverage:
+    # M-6 - the coverage gate: fails below the floors pinned in
+    # vitest.config.ts (set from measured suite coverage - the gate pins "no
+    # regression", not an aspirational number).
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        with:
+          version: 11
+          standalone: true
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test:coverage
+
+  audit:
+    # M-6 - the mandatory dependency audit. `dependency-audit.mjs` fails on any
+    # high/critical advisory except the single known-patched one
+    # (braces@3.0.3 / GHSA-vfj7-8cjw-p6xm), and only while the backport patch
+    # is actually wired. The licenses check keeps THIRD-PARTY-LICENSES fresh
+    # (L-9); the pack-verify self-test is pure (no pack, no network).
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        with:
+          version: 11
+          standalone: true
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: node scripts/dependency-audit.mjs
+      - run: node scripts/gen-third-party-licenses.mjs --check
+      - run: sh scripts/pack-verify.sh --self-test

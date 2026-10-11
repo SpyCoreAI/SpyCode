@@ -1,0 +1,23 @@
+# Identity denylist for the packed-artifact scan (scripts/pack-verify.sh, stage 3).
+#
+# ERE patterns, one per line. Comments (#) and blank lines are stripped by the
+# loader. The scan is case-insensitive.
+#
+# PURPOSE: SpyCode never names the underlying models or providers on any
+# user-facing surface - only SpyCore's own model names (charon, styx, hermes,
+# minos, hephaestus) and the BYOK providers the user configures themselves
+# (openai, anthropic, gemini, together, groq is NOT one of them) may appear.
+# A packed artifact containing any of the patterns below has leaked an
+# underlying identity and must fail the pack gate.
+#
+# NOTE: provider names a user can legitimately configure (openai, anthropic,
+# gemini, together) are DELIBERATELY absent - they are user-chosen BYOK
+# configuration, not underlying identities.
+
+qwen
+kimi
+moonshot
+deepseek
+groq
+mistral
+llama
