@@ -26,16 +26,21 @@ import { describe, expect, test } from 'vitest';
  */
 const SCRIPT = fileURLToPath(new URL('../scripts/audit-resolved-install.mjs', import.meta.url));
 /**
- * The instrument is plain `.mjs` and carries no declaration file, so the
- * specifier stays a computed string: a literal would make `tsc` demand one
- * (TS7016). It is a plain RELATIVE specifier, not a `file:` URL: vitest's
- * dynamic import of a `file:///C:/...` URL throws a bare SyntaxError on
- * Windows (round-2 CI: both import legs failed in 2-16ms with no stack),
- * while the same script runs fine under plain node there (the self-test leg
- * above passed in the same run). A relative specifier goes through the
- * module graph every other import in this suite uses.
+ * The specifier is a STATIC LITERAL, deliberately — not a computed string.
+ * Vite's import-analysis can only rewrite a literal: it resolves this to the
+ * root-relative `/scripts/audit-resolved-install.mjs` at transform time, so
+ * the runner never resolves a path at run time. A computed specifier is
+ * invisible to import-analysis and is resolved at run time against the test
+ * file's own path, which on Windows is a drive-letter path — both the
+ * round-2 `file:` URL form and the round-3 relative form failed identically
+ * in CI with a bare SyntaxError and no stack. The literal keeps this import
+ * on the same path every other dynamic import in this suite uses.
+ *
+ * The `.mjs` carries no declaration file, so a literal would make `tsc`
+ * demand one (TS7016); the sibling `scripts/audit-resolved-install.d.mts`
+ * supplies it. (A `.d.ts` does not work for a `.mjs` module — the
+ * declaration must be `.d.mts`.)
  */
-const SCRIPT_SPECIFIER = '../scripts/audit-resolved-install.mjs';
 
 describe('audit-resolved-install - the published-manifest advisory instrument', () => {
   test('its self-test passes, and reports how many cases actually RAN', () => {
@@ -56,9 +61,7 @@ describe('audit-resolved-install - the published-manifest advisory instrument', 
    * summary line.
    */
   test('a payload it cannot read is REFUSED, never read as a clean zero', async () => {
-    const mod = (await import(SCRIPT_SPECIFIER)) as unknown as {
-      verdictFrom: (p: unknown) => { ok: boolean; reason: string | null; findings: unknown[] };
-    };
+    const mod = await import('../scripts/audit-resolved-install.mjs');
     for (const malformed of [null, [], {}, { vulnerabilities: null }, { metadata: {} }, 'x', 7]) {
       const v = mod.verdictFrom(malformed);
       expect(v.ok, `must refuse ${JSON.stringify(malformed)}`).toBe(false);
@@ -81,9 +84,7 @@ describe('audit-resolved-install - the published-manifest advisory instrument', 
    * which is the exact confusion it was built to end.
    */
   test('the probe manifest is the PUBLISHED one - prod + optional, never dev', async () => {
-    const mod = (await import(SCRIPT_SPECIFIER)) as unknown as {
-      publishedManifest: (p: unknown) => Record<string, unknown>;
-    };
+    const mod = await import('../scripts/audit-resolved-install.mjs');
     const pkg = JSON.parse(readFileSync(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8')) as {
       dependencies?: Record<string, string>;
       optionalDependencies?: Record<string, string>;

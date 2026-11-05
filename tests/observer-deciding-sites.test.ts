@@ -1,5 +1,5 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
 
@@ -69,7 +69,7 @@ describe(' : every deciding site for the workspace observer', () => {
           // above the read, because the call is wrapped across lines.
           const near = lines.slice(Math.max(0, i - 2), i + 1).join(' ');
           readers.push({
-            file: f.replace(`${SRC}/`, ''),
+            file: relative(SRC, f).replace(/\\/g, '/'),
             line: i + 1,
             text: l.trim(),
             delegates: near.includes('resolveObserveWorkspaceEnabled('),
@@ -134,7 +134,7 @@ describe(' : every deciding site for the workspace observer', () => {
     for (const f of files) {
       const lines = readFileSync(f, 'utf8').split('\n');
       lines.forEach((l, i) => {
-        if (l.includes(KEY) && l.includes('!== false')) offenders.push(`${f.replace(`${SRC}/`, '')}:${i + 1}  ${l.trim()}`);
+        if (l.includes(KEY) && l.includes('!== false')) offenders.push(`${relative(SRC, f).replace(/\\/g, '/')}:${i + 1}  ${l.trim()}`);
       });
     }
     expect(offenders, `the old \`!== false\` predicate survives:\n${offenders.join('\n')}`).toEqual([]);

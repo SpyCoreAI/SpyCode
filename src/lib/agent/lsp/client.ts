@@ -534,17 +534,26 @@ export class LspClient {
 
 /** Convert a `file://` URI back to a filesystem path (best-effort). */
 function uriToPath(uri: string): string {
+  let u: URL;
   try {
-    const u = new URL(uri);
+    u = new URL(uri);
+  } catch {
+    return uri;
+  }
+  if (u.protocol !== 'file:') return uri;
+  try {
     // `u.pathname` is a URI path, not a filesystem path: on Windows it keeps
     // the leading slash of the drive (`/C:/...`), so a hand-rolled decode
     // returns a path no Windows API recognises. `fileURLToPath` is the
     // platform-correct conversion (drive letter, UNC, percent-decoding).
-    if (u.protocol === 'file:') return fileURLToPath(u);
+    return fileURLToPath(u);
   } catch {
-    /* fall through */
+    // A drive-less POSIX-style URI such as `file:///tmp/a.ts` has no Windows
+    // equivalent: `fileURLToPath` throws ERR_INVALID_FILE_URL_PATH there
+    // ("File URL path must be absolute"). The decoded pathname is still the
+    // best-effort path, and the exact value a POSIX server would report.
+    return decodeURIComponent(u.pathname);
   }
-  return uri;
 }
 
 /**
