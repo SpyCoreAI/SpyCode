@@ -1,0 +1,23 @@
+# Single-package root — this file carries pnpm settings for the mirror.
+# esbuild (tsup/vitest toolchain) and keytar (optional OS keychain binding)
+# need their install scripts; everything else stays script-blocked.
+allowBuilds:
+  esbuild: true
+  keytar: true
+
+# Security pins (2026-10-04): force patched transitive deps. Lives here (not in
+# package.json) because pnpm v11 ignores the package.json "pnpm" field.
+overrides:
+  fast-uri: 3.1.8
+  # braces: NO published release fixes GHSA-vfj7-8cjw-p6xm (every release
+  # through 3.0.3 is affected; there is no 3.0.4 on npm). The 3.0.3 pin stays
+  # and the fix is backported via patchedDependencies below
+  # (patches/braces@3.0.3.patch: upstream PR micromatch/braces#72 - a 100-deep
+  # nesting cap in parse plus depth guards and AST cycle detection in
+  # expand/compile/stringify).
+  braces: 3.0.3
+
+# Backported security fixes for pinned transitive deps (pnpm v11 reads this
+# from pnpm-workspace.yaml, not from the package.json "pnpm" field).
+patchedDependencies:
+  braces@3.0.3: patches/braces@3.0.3.patch
