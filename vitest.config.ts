@@ -46,19 +46,24 @@ export default defineConfig({
     /**
      * M-6 - the coverage gate. `pnpm test:coverage` (CI `coverage` job) fails
      * below these floors. They are set from the measured suite coverage
-     * (2026-10-11: lines 67.17, functions 82.85, branches 87.32, statements
-     * 67.17), so the gate pins "no regression" rather than an aspirational
-     * number: a PR that drops coverage below the floor turns this red.
+     * (2026-11-05, vitest 4: lines 69.1, functions 71.72, branches 63.57,
+     * statements 68.89), so the gate pins "no regression" rather than an
+     * aspirational number: a PR that drops coverage below the floor turns
+     * this red. Recalibrated for vitest 4: its v8 provider uses AST-based
+     * remapping and measures accurately, while vitest 3's v8-to-istanbul
+     * inflated the numbers with false positives (files with 0% lines
+     * reported 100% branches/functions). The floors follow the true
+     * measurement; the gate itself is unchanged.
      */
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json-summary'],
       include: ['src/**/*.ts', 'src/**/*.tsx'],
       thresholds: {
-        lines: 67,
-        functions: 82,
-        branches: 87,
-        statements: 67,
+        lines: 68,
+        functions: 71,
+        branches: 63,
+        statements: 68,
       },
     },
   },

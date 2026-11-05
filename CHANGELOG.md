@@ -26,8 +26,15 @@ changes in this release.
   `fs.existsSync()` bypass). 3.2.7 was the last 3.x release, so no 3.x bump
   could clear the advisories; the vitest range is `~4.0.0` to hold the 4.0.x
   line, whose vite range stays on 7.x - `^4.0.0` would float to the 4.1 line,
-  whose vite range admits 8.x. Gate semantics unchanged: no new exceptions,
-  no floor changes.
+  whose vite range admits 8.x. Gate semantics unchanged: no new exceptions.
+- **Coverage floors recalibrated for vitest 4.** The new major version's v8
+  provider uses AST-based remapping and measures coverage accurately; the
+  previous release's remapping inflated the numbers with false positives
+  (files with 0% lines reported 100% branches/functions). The floors are
+  re-baselined to the accurate measurement (2026-11-05: lines 69.1, functions
+  71.72, branches 63.57, statements 68.89): lines 68, statements 68,
+  functions 71, branches 63. The gate still pins "no regression", from the
+  true baseline.
 - **Vitest 4 test compatibility.** Two tests replaced a persistent mock
   override with one-shot overrides (a persistent override is no longer
   undone between tests, so it kept answering every later test in the file),
