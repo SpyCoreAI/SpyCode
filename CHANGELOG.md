@@ -10,9 +10,12 @@ CI repair for the 0.9.8 release. Clears the six high/critical advisories the
 audit gate caught on main (two critical tinypool RCEs, one vite advisory,
 three undici advisories) by moving undici to 6.29.1 and vitest to 4.1.12,
 which drops tinypool from the tree and resolves vite 7.3.7, and clears the
-critical UI server advisory the round 2 audit caught on the 4.0 line. Fixes the sixteen
-Windows test failures from the same run: four POSIX-only tests are now skipped
-on Windows, nine probes are rewritten in the repo's cross-platform script-file
+critical UI server advisory the round 2 audit caught on the 4.0 line. Fixes the
+Windows test failures from the same run (sixteen at first, eighteen once the
+worker lived long enough to run the later files, then a worker death with
+zero failed tests): four POSIX-only tests are now skipped
+on Windows, and the three SIGINT-cancellation tests are skipped on Windows
+too (their synthetic signal emission kills the vitest worker there), nine probes are rewritten in the repo's cross-platform script-file
 idiom, one real product bug is fixed - task-memory paths now use forward
 slashes on every platform - and the 1MB output-cap test's generator is
 rewritten the same way with a 30s timeout matching its command budget. No flag
@@ -57,7 +60,12 @@ changes in this release.
   matching its command budget. The resolved-install instrument's two Windows
   failures were the script's shebang, emitted mid-file by Vite's SSR transform
   on CRLF checkouts — the shebang is removed (the script is never executed
-  directly).
+  directly). The three SIGINT-cancellation tests are skipped on Windows:
+  their synthetic `process.emit('SIGINT')` kills the vitest worker there -
+  deterministic across four CI runs, the job failing with 0 failed tests and
+  one worker-exited error, this file the only one with no summary line - and
+  this is the only file in the suite that emits SIGINT. The cancel path
+  itself is platform-neutral and stays covered on Linux/macOS.
 - **Task-memory paths.** `summarizeTouchedFiles` now emits forward-slash
   paths on every platform (`relPath` normalizes with the existing `toPosix`
   helper). On Windows it previously emitted backslashes into the user-facing

@@ -244,7 +244,18 @@ describe('drift prompt on a TTY', () => {
 });
 
 describe('SIGINT cancellation', () => {
-  test('a SIGINT between turns cancels the run', async () => {
+  // Windows: these three tests deliver Ctrl+C as a synthetic
+  // `process.emit('SIGINT')` inside the vitest worker, and that emission
+  // kills the worker on Windows. Deterministic across four consecutive
+  // branch CI runs: the job fails with 0 failed tests and one unhandled
+  // error, "[vitest-pool]: Worker forks emitted error", and this file is
+  // the only one with no summary line - 8 of its 14 tests report, 6 never
+  // run. This is the only file in the suite that emits SIGINT, and the
+  // worker dies with no JS error reported (vitest forwards uncaught
+  // exceptions, so none occurred). The product behaviour is platform-neutral
+  // - one AbortController line plus signal checks - and stays covered on
+  // Linux/macOS; the emission technique is what Windows cannot run.
+  test.skipIf(process.platform === 'win32')('a SIGINT between turns cancels the run', async () => {
     await setToken();
     let calls = 0;
     const base = scripted([
@@ -267,7 +278,7 @@ describe('SIGINT cancellation', () => {
     expect(stderr()).toContain('Interrupted.');
   });
 
-  test('a SIGINT during the plan phase cancels the plan', async () => {
+  test.skipIf(process.platform === 'win32')('a SIGINT during the plan phase cancels the plan', async () => {
     await setToken();
     writeFileSync(join(workDir, 'x.txt'), 'x\n');
     let calls = 0;
@@ -291,7 +302,7 @@ describe('SIGINT cancellation', () => {
     expect(stderr()).toContain('Interrupted.');
   });
 
-  test('a SIGINT-cancelled plan in JSON mode reports cancelled structurally', async () => {
+  test.skipIf(process.platform === 'win32')('a SIGINT-cancelled plan in JSON mode reports cancelled structurally', async () => {
     await setToken();
     writeFileSync(join(workDir, 'x.txt'), 'x\n');
     let calls = 0;
