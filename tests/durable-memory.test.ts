@@ -48,7 +48,12 @@ describe('appendDurableMemory', () => {
     expect(raw).toContain('- user prefers tabs');
     expect(raw).not.toContain('abcdefghijklmnop1234');
     expect(raw).toContain('redacted');
-    expect(statSync(join(durableMemoryDir(d), 'MEMORY.md')).mode & 0o777).toBe(0o600);
+    // Windows has no POSIX modes: Node reports 0o666 for every file whatever
+    // was requested. Only the mode assertion is POSIX-only; the bulleted,
+    // redaction-scrubbed content above still runs on Windows.
+    if (process.platform !== 'win32') {
+      expect(statSync(join(durableMemoryDir(d), 'MEMORY.md')).mode & 0o777).toBe(0o600);
+    }
   });
 
   test('the cap throws - never silent deletion', () => {

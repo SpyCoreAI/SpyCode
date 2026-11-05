@@ -85,7 +85,11 @@ describe('fireHookEvent outcomes', () => {
   });
 
   test('fail-open exit uses stdout when stderr is empty, and no suffix when both are empty', async () => {
-    let r = await fireHookEvent(sessionWith('echo out; exit 3'), 'pre-tool');
+    // `;` is not a separator under cmd.exe: `echo out; exit 3` prints the
+    // literal `out; exit 3` and exits 0, so no `exited 3` notice ever fires.
+    // The Windows spelling chains with `&`; `exit 3` is a builtin on both.
+    const failing = process.platform === 'win32' ? 'echo out & exit 3' : 'echo out; exit 3';
+    let r = await fireHookEvent(sessionWith(failing), 'pre-tool');
     expect(r.notices.some((n) => n.includes('exited 3') && n.includes(': out'))).toBe(true);
     r = await fireHookEvent(sessionWith('exit 3'), 'pre-tool');
     const notice = r.notices.find((n) => n.includes('exited 3'))!;

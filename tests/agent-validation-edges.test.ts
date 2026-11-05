@@ -172,9 +172,14 @@ describe('agent leftover arms', () => {
   test('a failing verify with output prints the tail', async () => {
     await setToken();
     responder = scripted([{ reply: 'Done.' }]);
+    // `;` is not a separator under cmd.exe: `echo oops; false` prints the
+    // literal `oops; false` and exits 0, so the verify passes and no exit
+    // code is ever set. The Windows spelling chains with `&` and fails with
+    // a builtin instead of relying on a POSIX `false` binary.
+    const verifyCmd = process.platform === 'win32' ? 'echo oops & exit 1' : 'echo oops; false';
     await runAgentCli([
       'do a thing', '--model', 'styx', '--yes',
-      '--verify', 'echo oops; false', '--verify-attempts', '1',
+      '--verify', verifyCmd, '--verify-attempts', '1',
     ]);
     expect(stderr()).toMatch(/oops/);
     expect(process.exitCode).toBe(1);

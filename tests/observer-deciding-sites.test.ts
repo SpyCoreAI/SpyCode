@@ -100,7 +100,14 @@ describe(' : every deciding site for the workspace observer', () => {
     // VALUE, not by inspection. The resolver lives in the shared run-config
     // (v0.9.1: extracted from commands/agent.ts so chat and agent cannot
     // diverge); agent.ts re-exports it for its own tests.
-    const resolver = readFileSync(join(SRC, 'lib', 'agent', 'run-config.ts'), 'utf8');
+    // F-2c-11 §3: a value read from repository text and compared against a
+    // pattern containing a literal newline is CRLF-normalised at the read -
+    // Git checks this repository out with CRLF on Windows, where `'\n}\n'`
+    // matches nothing and the vacuity guard below reads a 2-char slice.
+    const resolver = readFileSync(join(SRC, 'lib', 'agent', 'run-config.ts'), 'utf8').replace(
+      /\r\n/g,
+      '\n',
+    );
     const body = resolver.slice(resolver.indexOf('export function resolveObserveWorkspaceEnabled'));
     const decl = body.slice(0, body.indexOf('\n}\n') + 3);
     expect(decl.length, 'VACUITY: the resolver was not found in the source').toBeGreaterThan(40);

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import { Command } from 'commander';
 import { freshConfigDir } from './helpers.js';
 import { configureOutput } from '../src/lib/output.js';
@@ -161,6 +161,8 @@ describe('spycore init', () => {
     expect(payload.force).toBe(false);
     expect(payload.files.map((f) => f.file).sort()).toEqual([...FILES].sort());
     expect(payload.files.every((f) => f.action === 'created' && f.existed === false)).toBe(true);
-    expect(payload.files.every((f) => f.path.endsWith(`/${f.file}`))).toBe(true);
+    // Paths are built with the platform separator, so a `/`-joined suffix
+    // never matches on Windows.
+    expect(payload.files.every((f) => f.path.endsWith(`${sep}${f.file}`))).toBe(true);
   });
 });

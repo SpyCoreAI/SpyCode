@@ -1081,7 +1081,20 @@ export function runShellCommand(
     const child = spawn(command, {
       cwd,
       shell: true,
-      detached: true,
+      // Windows has no process groups to signal, so `detached` buys nothing
+      // there and only changes how the child's console is allocated - the
+      // same decision hooks.ts documents for its own executor. A detached
+      // cmd.exe on Windows loses the piped stdout of the children it spawns
+      // (round-2 Windows CI: node-script children exited with the right code
+      // and `(no output)`, and a 2MB flood stalled past 30s against 3.1s on
+      // Linux), while the hooks executor - same shell, same pipes, detached
+      // off - captures the identical commands. `windowsHide` matches both
+      // sibling executors. POSIX keeps its own process group so timeout and
+      // abort can SIGTERM/SIGKILL the whole tree; on Windows the kill falls
+      // back to the child alone, exactly as the hooks executor's killTree
+      // does.
+      detached: process.platform !== 'win32',
+      windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
       // H-16: the agent's shell never inherits secret-keyed env entries.
       env: buildSubprocessEnv(),

@@ -146,7 +146,10 @@ describe('bucketByRecency', () => {
 });
 
 describe('createExclusiveTempWriteStream', () => {
-  test('creates a 0600 file and returns a working stream', async () => {
+  // Windows has no POSIX modes: Node reports 0o666 for every file whatever
+  // was requested, so the 0600 assertion is POSIX-only. (Same shape as the
+  // provider-config 0600 test, skipped on win32 in round 1.)
+  test.skipIf(process.platform === 'win32')('creates a 0600 file and returns a working stream', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'spy-tmpws-'));
     try {
       const { stream, path } = createExclusiveTempWriteStream(dir, 'up');

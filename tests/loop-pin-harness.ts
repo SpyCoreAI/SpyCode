@@ -164,6 +164,13 @@ export function scrubPaths<T>(value: T, dirs: Record<string, string>): T {
     spellings.push([dir, label]);
     const viaTmp = dir.replace(/^\/private\//, '/');
     if (viaTmp !== dir) spellings.push([viaTmp, label]);
+    // Windows joins with `\`, so a path under the replaced directory keeps a
+    // backslash AFTER the placeholder (`<CWD>\notes.txt`) while the fixture
+    // stores `/`. scrubText applies the longest `from` first, so the
+    // directory spelling above lands before this one and the separator that
+    // follows the placeholder is then normalised. One character either way,
+    // so the N3 clamp math (which keys on path length) is unaffected.
+    spellings.push([`${label}\\`, `${label}/`]);
   }
   return scrubText(value, spellings);
 }

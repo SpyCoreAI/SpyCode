@@ -239,10 +239,14 @@ describe('repo_map', () => {
   });
 
   test('file count samples at 8000', async () => {
+    // MEASURED, not a round number: 8001 synchronous creates plus a globby
+    // walk cost 7.6s standalone on Linux and 12.4s on the Windows runner
+    // (round-2 CI), so the 10s default fails there on wall-clock alone. The
+    // work itself is unchanged; the budget fits what it was measured to cost.
     for (let i = 0; i < 8001; i += 1) writeFileSync(fp(`f${i}.txt`), 'x');
     const res = await run('repo_map', {});
     expect(res.content).toContain('Files scanned: 8001 (sampled 8000)');
-  });
+  }, 30_000);
 });
 
 describe('diagnostics', () => {
@@ -562,12 +566,17 @@ describe('run_command', () => {
     // is observed through the executor directly. The generator is a script
     // file: the `seq` probe hung past the 10s default on Windows (run 38),
     // and a script file removes the MSYS2/cmd variable from the measurement.
-    // The 30s test timeout matches the command's own 30s budget.
+    // The 60s test budget is NOT the fix for that hang - the fix is the
+    // executor's Windows spawn (detached cmd.exe lost the piped output; see
+    // runShellCommand) - it only lets the test observe the executor's own
+    // 30s budget plus its 2s SIGKILL grace and drain instead of dying at
+    // the same instant the executor starts killing. Measured 3.1s
+    // standalone on Linux; round-2 Windows CI stalled past 30s.
     const gen = fp('gen-1mb.mjs');
     writeFileSync(gen, `for (let i = 1; i <= 300000; i++) console.log(i);\n`);
     const direct = await runShellCommand(`"${process.execPath}" "${gen}"`, workDir, 30_000, undefined);
     expect(direct.combined).toContain('[output capped at');
-  }, 30_000);
+  }, 60_000);
 
   test('long tails truncate with a leading ellipsis', async () => {
     // A script file, not inline `node -e`: `cmd /d /s /c` strips the

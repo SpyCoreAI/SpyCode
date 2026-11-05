@@ -106,7 +106,11 @@ describe('commandExists', () => {
   test('finds a fake executable prepended to PATH', () => {
     const bin = mkdtempSync(join(tmpdir(), 'spycli-lsp-bin-'));
     try {
-      const exe = join(bin, 'fake-ls-binary');
+      // Windows resolves a bare command name through PATHEXT only: an
+      // extensionless file is never found, whatever its mode bits. The
+      // Windows leg therefore plants a `.cmd` and still looks the bare name
+      // up, which exercises the real PATHEXT resolution commandExists does.
+      const exe = join(bin, process.platform === 'win32' ? 'fake-ls-binary.cmd' : 'fake-ls-binary');
       writeFileSync(exe, '#!/bin/sh\n', { mode: 0o755 });
       process.env.PATH = `${bin}${delimiter}${process.env.PATH ?? ''}`;
       expect(commandExists('fake-ls-binary')).toBe(true);

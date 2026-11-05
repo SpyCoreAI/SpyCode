@@ -25,9 +25,17 @@ import { describe, expect, test } from 'vitest';
  * The live arm runs as `node scripts/audit-resolved-install.mjs`.
  */
 const SCRIPT = fileURLToPath(new URL('../scripts/audit-resolved-install.mjs', import.meta.url));
-/** Imported through a computed URL: the instrument is plain `.mjs` and carries
- * no declaration file, and a static specifier would make `tsc` demand one. */
-const SCRIPT_URL = new URL('../scripts/audit-resolved-install.mjs', import.meta.url).href;
+/**
+ * The instrument is plain `.mjs` and carries no declaration file, so the
+ * specifier stays a computed string: a literal would make `tsc` demand one
+ * (TS7016). It is a plain RELATIVE specifier, not a `file:` URL: vitest's
+ * dynamic import of a `file:///C:/...` URL throws a bare SyntaxError on
+ * Windows (round-2 CI: both import legs failed in 2-16ms with no stack),
+ * while the same script runs fine under plain node there (the self-test leg
+ * above passed in the same run). A relative specifier goes through the
+ * module graph every other import in this suite uses.
+ */
+const SCRIPT_SPECIFIER = '../scripts/audit-resolved-install.mjs';
 
 describe('audit-resolved-install - the published-manifest advisory instrument', () => {
   test('its self-test passes, and reports how many cases actually RAN', () => {
@@ -48,7 +56,7 @@ describe('audit-resolved-install - the published-manifest advisory instrument', 
    * summary line.
    */
   test('a payload it cannot read is REFUSED, never read as a clean zero', async () => {
-    const mod = (await import(SCRIPT_URL)) as unknown as {
+    const mod = (await import(SCRIPT_SPECIFIER)) as unknown as {
       verdictFrom: (p: unknown) => { ok: boolean; reason: string | null; findings: unknown[] };
     };
     for (const malformed of [null, [], {}, { vulnerabilities: null }, { metadata: {} }, 'x', 7]) {
@@ -73,7 +81,7 @@ describe('audit-resolved-install - the published-manifest advisory instrument', 
    * which is the exact confusion it was built to end.
    */
   test('the probe manifest is the PUBLISHED one - prod + optional, never dev', async () => {
-    const mod = (await import(SCRIPT_URL)) as unknown as {
+    const mod = (await import(SCRIPT_SPECIFIER)) as unknown as {
       publishedManifest: (p: unknown) => Record<string, unknown>;
     };
     const pkg = JSON.parse(readFileSync(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8')) as {

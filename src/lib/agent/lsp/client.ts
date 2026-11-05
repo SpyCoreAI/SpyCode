@@ -22,6 +22,7 @@
  * a lingering server child can never hold the CLI's event loop open.
  */
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { buildSubprocessEnv } from '../../spawn-env.js';
 import { releaseChildStdio } from '../../child-stdio.js';
 import { isObject } from '../../text.js';
@@ -535,7 +536,11 @@ export class LspClient {
 function uriToPath(uri: string): string {
   try {
     const u = new URL(uri);
-    if (u.protocol === 'file:') return decodeURIComponent(u.pathname);
+    // `u.pathname` is a URI path, not a filesystem path: on Windows it keeps
+    // the leading slash of the drive (`/C:/...`), so a hand-rolled decode
+    // returns a path no Windows API recognises. `fileURLToPath` is the
+    // platform-correct conversion (drive letter, UNC, percent-decoding).
+    if (u.protocol === 'file:') return fileURLToPath(u);
   } catch {
     /* fall through */
   }
