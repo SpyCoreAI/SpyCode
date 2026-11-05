@@ -31,10 +31,15 @@ const SCRIPT = fileURLToPath(new URL('../scripts/audit-resolved-install.mjs', im
  * root-relative `/scripts/audit-resolved-install.mjs` at transform time, so
  * the runner never resolves a path at run time. A computed specifier is
  * invisible to import-analysis and is resolved at run time against the test
- * file's own path, which on Windows is a drive-letter path — both the
- * round-2 `file:` URL form and the round-3 relative form failed identically
- * in CI with a bare SyntaxError and no stack. The literal keeps this import
- * on the same path every other dynamic import in this suite uses.
+ * file's own path, which on Windows is a drive-letter path.
+ *
+ * The bare SyntaxError that survived three specifier forms was not the
+ * specifier at all: it was the script's shebang. On a CRLF checkout
+ * (Windows) Vite's SSR transform emits the shebang mid-file, where the
+ * runner rejects it as an unexpected token. The shebang has been removed
+ * from the script — it is never executed directly (no executable bit, always
+ * run via `node <path>`) — so the failure mode is gone for every line
+ * ending, not worked around for one of them.
  *
  * The `.mjs` carries no declaration file, so a literal would make `tsc`
  * demand one (TS7016); the sibling `scripts/audit-resolved-install.d.mts`

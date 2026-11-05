@@ -1,4 +1,8 @@
-#!/usr/bin/env node
+// No shebang on this file, deliberately. It is imported by
+// tests/resolved-install-audit.test.ts under Vitest, and on a CRLF checkout
+// (Windows) Vite's SSR transform emits a shebang mid-file, where the runner
+// rejects it as an unexpected token. The file is always run via `node <path>`
+// (it carries no executable bit), so nothing needs the shebang.
 /**
  * audit-resolved-install.mjs - audit WHAT A USER'S INSTALL ACTUALLY RESOLVES.
  *

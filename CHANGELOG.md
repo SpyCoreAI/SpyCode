@@ -54,7 +54,10 @@ changes in this release.
   are rewritten cross-platform (node script files instead of `sed`/`awk`/
   `cat`/`touch`/`printf` compounds, which cmd.exe cannot run), and the 1MB
   output-cap test's generator is rewritten the same way with a 30s timeout
-  matching its command budget.
+  matching its command budget. The resolved-install instrument's two Windows
+  failures were the script's shebang, emitted mid-file by Vite's SSR transform
+  on CRLF checkouts — the shebang is removed (the script is never executed
+  directly).
 - **Task-memory paths.** `summarizeTouchedFiles` now emits forward-slash
   paths on every platform (`relPath` normalizes with the existing `toPosix`
   helper). On Windows it previously emitted backslashes into the user-facing
