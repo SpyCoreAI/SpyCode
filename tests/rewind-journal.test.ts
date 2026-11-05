@@ -213,20 +213,31 @@ describe('the checkpoint journal reaches the opaque mutation paths', () => {
   });
 
   /**
-   * THE COMMAND IS PORTABLE ON PURPOSE, AND THE FIRST VERSION WAS NOT.
+   * THE COMMAND IS PORTABLE ON PURPOSE, AND THE FIRST TWO VERSIONS WERE NOT.
    * `sed -i ''` is BSD syntax: GNU sed reads the `''` as the SCRIPT and the
    * edit silently does not happen. This pin's own "the edit really happened"
    * assertion caught that on the Linux legs - a reminder that a test corpus
    * written on darwin is a darwin corpus until something else runs it. The
-   * `sed … > tmp && mv` form is POSIX and exercises the same journal path,
-   * plus a temp file created AND removed inside one window, which must
-   * therefore produce no record at all.
+   * `sed … > tmp && mv` form fixed that, but it is POSIX: under cmd.exe the
+   * `sed` stage yields an empty temp file and `mv` then clobbers the target
+   * with it (CI run 38). A node script does the same three journal legs - a
+   * create, an edit, and a temp file created AND removed inside one window,
+   * which must therefore produce no record at all - on every shell.
    */
   test('run_command CREATES and EDITS - both journaled, both reversed', async () => {
     writeFileSync(join(cwd, 'target.txt'), 'aaa\n');
+    const probe = join(cwd, 'probe-edit.mjs');
+    writeFileSync(
+      probe,
+      `import { readFileSync, renameSync, writeFileSync } from 'node:fs';
+writeFileSync('made.txt', 'made\\n');
+writeFileSync('target.tmp', readFileSync('target.txt', 'utf8').replace('aaa', 'zzz'));
+renameSync('target.tmp', 'target.txt');
+`,
+    );
     const changes = await run([
       block('run_command', {
-        command: 'echo made > made.txt && sed "s/aaa/zzz/" target.txt > target.tmp && mv target.tmp target.txt',
+        command: `"${process.execPath}" "${probe}"`,
       }),
       'Done.',
     ]);
@@ -949,10 +960,20 @@ describe(' · what the journal must never contain, and who may read it', () => {
     writeFileSync(join(cwd, 'ordinary.txt'), 'before\n');
     // no .gitignore at all - the case the old mitigation could not cover
 
+    const probe = join(cwd, 'probe-rewrite.mjs');
+    writeFileSync(
+      probe,
+      `import { writeFileSync } from 'node:fs';
+writeFileSync('.env.local', 'STRIPE_SECRET_KEY=sk_live_CHANGEDCHANGEDCHANGED\\n');
+writeFileSync('ordinary.txt', 'after\\n');
+`,
+    );
     const changes = await run(
       [
         block('run_command', {
-          command: 'printf "STRIPE_SECRET_KEY=sk_live_CHANGEDCHANGEDCHANGED\\n" > .env.local; printf "after\\n" > ordinary.txt',
+          // A node script, not `printf …; printf …`: `;` is not a command
+          // separator under cmd.exe, so the compound never ran on Windows.
+          command: `"${process.execPath}" "${probe}"`,
         }),
         'Done.',
       ],

@@ -1,6 +1,6 @@
 {
   "name": "@spycore/cli",
-  "version": "0.9.8",
+  "version": "0.9.9",
   "description": "SpyCode \u00b7 SpyCore's AI coding agent and CLI: chat, autonomous agent runs with approval gates and rewind, BYOK providers, skills, MCP client, and an ACP server for IDEs.",
   "license": "Apache-2.0",
   "author": {
@@ -74,10 +74,10 @@
     "@types/mime-types": "^2.1.4",
     "@types/node": "^20.0.0",
     "@types/react": "^19.2.15",
-    "@vitest/coverage-v8": "^3.2.7",
+    "@vitest/coverage-v8": "~4.0.0",
     "tsup": "^8.5.1",
     "typescript": "^5.6.0",
-    "vitest": "^3.2.7"
+    "vitest": "~4.0.0"
   },
   "keywords": [
     "spycore",

@@ -196,7 +196,7 @@ optional native keychain binding `keytar`, which your platform may skip:
   - tunnel-agent@0.6.0 (Apache-2.0)
   - type-fest@2.19.0 ((MIT OR CC0-1.0))
   - type-fest@5.8.0 ((MIT OR CC0-1.0))
-  - undici@6.29.0 (MIT)
+  - undici@6.29.1 (MIT)
   - unicorn-magic@0.4.0 (MIT)
   - util-deprecate@1.0.2 (MIT)
   - when-exit@2.1.5 (MIT)
@@ -4156,7 +4156,7 @@ Homepage: https://github.com/sindresorhus/type-fest
 
 (No license file was distributed with this package. Its declared SPDX license is (MIT OR CC0-1.0).)
 ==============================================================================
-undici@6.29.0
+undici@6.29.1
 License: MIT
 Homepage: https://undici.nodejs.org
 

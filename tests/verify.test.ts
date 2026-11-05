@@ -204,8 +204,19 @@ describe('runVerifyLoop', () => {
     // must not reach the model conversation. The secret lives in a file so the
     // echoed command text itself carries no secret.
     writeFileSync(join(workDir, 'leak.txt'), 'api_key=hunter2 exposed\n');
+    // A script file, not `cat leak.txt; exit 1`: `cat` does not exist under
+    // cmd.exe and `;` is not a separator there, so the secret never reached
+    // the output and there was nothing to redact.
+    const script = join(workDir, 'leak-dump.mjs');
+    writeFileSync(
+      script,
+      `import { readFileSync } from 'node:fs';
+process.stdout.write(readFileSync('leak.txt', 'utf8'));
+process.exit(1);
+`,
+    );
     const out = await runVerifyLoop('c1', {
-      verifyCommand: 'cat leak.txt; exit 1',
+      verifyCommand: `"${process.execPath}" "${script}"`,
       attempts: 2,
       cwd: workDir,
       requestApproval: approve,
@@ -351,19 +362,30 @@ describe('self-verify is gated by the same approval control as run_command', () 
 
   test('an ALLOW rule auto-approves without prompting - the escape hatch for a repeated verify', async () => {
     const marker = join(workDir, 'ran-allowed');
+    // The script is run by bare `node` with a relative path, and the marker
+    // path is embedded in the script: the allow rule can only fire for a
+    // command the strict tokenizer accepts, and a backslash anywhere in the
+    // command (a Windows absolute path) makes the tokenizer reject it
+    // outright - so no path may appear in the command at all.
+    const script = join(workDir, 'mark-allowed.mjs');
+    writeFileSync(
+      script,
+      `import { writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(marker)}, '');\n`,
+    );
     let resolverCalls = 0;
     const out = await runVerifyLoop('c1', {
-      // A SIMPLE command, deliberately. An allow rule can only fire for one
-      // the strict tokenizer accepts; anything carrying a metacharacter (the
-      // `printf x > marker` form used above) structurally never reaches the
-      // allow branch. That asymmetry is the metachar guarantee, and using a
-      // redirect here would have made this test fail for a reason unrelated
-      // to the property it names.
-      verifyCommand: `touch ${marker}`,
+      // A SIMPLE command, deliberately: `node mark-allowed.mjs`, two bare
+      // tokens, no metacharacters, no path. An allow rule can only fire for
+      // one the strict tokenizer accepts; anything carrying a metacharacter
+      // (the `printf x > marker` form used above) structurally never reaches
+      // the allow branch. That asymmetry is the metachar guarantee, and using
+      // a redirect - or an absolute script path - here would have made this
+      // test fail for a reason unrelated to the property it names.
+      verifyCommand: 'node mark-allowed.mjs',
       attempts: 3,
       cwd: workDir,
       commandRules: {
-        allow: [{ kind: 'allow', scope: 'user', entry: 'touch', tokens: ['touch'] }],
+        allow: [{ kind: 'allow', scope: 'user', entry: 'node', tokens: ['node'] }],
         deny: [],
       } as never,
       requestApproval: async () => {

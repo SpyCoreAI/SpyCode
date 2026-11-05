@@ -26,6 +26,7 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import type { FileOp, RecordedChange } from './checkpoint.js';
+import { toPosix } from './tool-core.js';
 import {
   CHANGELOG_FILE,
   appendChangelogEntry,
@@ -91,7 +92,9 @@ export interface TouchedFiles {
 
 function relPath(root: string, abs: string): string {
   const r = relative(root, abs);
-  return r.length > 0 && !r.startsWith('..') ? r : abs;
+  // The changelog is user-facing Markdown: paths use forward slashes on
+  // every platform. `relative()` yields backslashes on Windows.
+  return r.length > 0 && !r.startsWith('..') ? toPosix(r) : toPosix(abs);
 }
 
 /**

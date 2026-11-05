@@ -244,11 +244,22 @@ describe('§F1 an application error that ends the stream is terminal', () => {
     async () => {
       let n = 0;
       const undici = await import('undici');
-      vi.mocked(undici.request).mockImplementation((async () => {
-        n += 1;
-        if (n === 1) throw new Error('ECONNRESET');
-        return okResp([TXT, DONE]);
-      }) as unknown as typeof undici.request);
+      // One-shot overrides, NOT a persistent mockImplementation: under
+      // vitest 4 a persistent override is NOT undone by restoreMocks, so it
+      // would keep answering every later test in this file and their request
+      // counters would never move. The once-queue drains after the two calls
+      // below and the shared mock is back for the next test.
+      vi.mocked(undici.request)
+        .mockImplementationOnce(async () => {
+          n += 1;
+          throw new Error('ECONNRESET');
+        })
+        .mockImplementationOnce(
+          (async () => {
+            n += 1;
+            return okResp([TXT, DONE]);
+          }) as unknown as typeof undici.request,
+        );
 
       const { streamRequest } = await import('../src/lib/sse.js');
       const got: unknown[] = [];

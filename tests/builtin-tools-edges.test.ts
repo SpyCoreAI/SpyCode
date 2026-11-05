@@ -84,7 +84,10 @@ describe('read_file', () => {
     expect(res.content).toContain('is a directory');
   });
 
-  test('FIFO throws without reading', async () => {
+  // FIFOs do not exist on Windows: `mkfifo` has no meaning there, so the
+  // path the test creates is not visible to Win32 `stat` and the assertion
+  // about "not a regular file" can never be reached.
+  test.skipIf(process.platform === 'win32')('FIFO throws without reading', async () => {
     execFileSync('mkfifo', [fp('pipe')]);
     const res = await run('read_file', { path: 'pipe' });
     expect(res.ok).toBe(false);
@@ -504,11 +507,26 @@ describe('run_command', () => {
     expect(notices.map((n) => n.kind)).toEqual(['auto_approve']);
   });
 
-  test('timeout, pre-aborted signal, and SIGTERM-ignored abort', async () => {
+  test('timeout and pre-aborted signal abort the run', async () => {
     const timed = await run('run_command', { command: 'sleep 30' }, { commandTimeoutMs: 200 });
     expect(timed.timedOut).toBe(true);
     expect(timed.summary).toContain('timed out');
 
+    const ctl = new AbortController();
+    ctl.abort();
+    const aborted = await run(
+      'run_command',
+      { command: 'sleep 30' },
+      { signal: ctl.signal, commandTimeoutMs: 30_000 },
+    );
+    expect(aborted.ok).toBe(false);
+  }, 30_000);
+
+  // The SIGTERM legs assert POSIX-only behaviour: Windows has no SIGTERM for
+  // Node to report (a terminated child reports `exit 1`, not a signal), and
+  // `trap` does not exist under cmd.exe. The timeout and pre-abort legs above
+  // stay cross-platform.
+  test.skipIf(process.platform === 'win32')('SIGTERM-ignored abort ends by SIGKILL', async () => {
     const ctl = new AbortController();
     ctl.abort();
     const aborted = await run(
@@ -541,23 +559,39 @@ describe('run_command', () => {
 
   test('output capture caps at 1MB', async () => {
     // Dispatch char-caps the result long before the 1MB marker, so the cap
-    // is observed through the executor directly.
-    const direct = await runShellCommand('seq 1 300000', workDir, 30_000, undefined);
+    // is observed through the executor directly. The generator is a script
+    // file: the `seq` probe hung past the 10s default on Windows (run 38),
+    // and a script file removes the MSYS2/cmd variable from the measurement.
+    // The 30s test timeout matches the command's own 30s budget.
+    const gen = fp('gen-1mb.mjs');
+    writeFileSync(gen, `for (let i = 1; i <= 300000; i++) console.log(i);\n`);
+    const direct = await runShellCommand(`"${process.execPath}" "${gen}"`, workDir, 30_000, undefined);
     expect(direct.combined).toContain('[output capped at');
-  });
+  }, 30_000);
 
   test('long tails truncate with a leading ellipsis', async () => {
+    // A script file, not inline `node -e`: `cmd /d /s /c` strips the
+    // outermost quotes, so the nested quotes in an inline script do not
+    // survive on Windows.
+    const gen = fp('gen-tail.mjs');
+    writeFileSync(gen, `for (let i = 0; i < 50; i++) console.log('y'.repeat(200));\n`);
     const res = await run('run_command', {
-      command: `node -e "for(let i=0;i<50;i++) console.log('y'.repeat(200))"`,
+      command: `"${process.execPath}" "${gen}"`,
     });
     expect(res.ok).toBe(true);
     expect(res.outputTail!.startsWith('…')).toBe(true);
   });
 
-  test('signal kill and spawn error statuses', async () => {
+  // `kill` does not exist under cmd.exe, and Windows has no SIGKILL for Node
+  // to report (a terminated child reports `exit 1`, not a signal). The
+  // spawn-error legs below stay cross-platform.
+  test.skipIf(process.platform === 'win32')('signal kill reports SIGKILL', async () => {
     const killed = await run('run_command', { command: 'kill -9 $$' });
     expect(killed.ok).toBe(false);
     expect(killed.summary).toContain('killed (SIGKILL)');
+  });
+
+  test('spawn error statuses', async () => {
     const failed = await run('run_command', { command: 'echo hi' }, { cwd: '/nonexistent-dir-xyz' });
     expect(failed.ok).toBe(false);
     // No signal in the status: only the duration parenthetical follows.

@@ -4,6 +4,50 @@ All notable changes to `@spycore/cli` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## 0.9.9 - 2026-11-05
+
+CI repair for the 0.9.8 release. Clears the six high/critical advisories the
+audit gate caught on main (two critical tinypool RCEs, one vite advisory,
+three undici advisories) by moving undici to 6.29.1 and vitest to 4.0.18,
+which drops tinypool from the tree and resolves vite 7.3.7. Fixes the sixteen
+Windows test failures from the same run: four POSIX-only tests are now skipped
+on Windows, nine probes are rewritten in the repo's cross-platform script-file
+idiom, one real product bug is fixed - task-memory paths now use forward
+slashes on every platform - and the 1MB output-cap test's generator is
+rewritten the same way with a 30s timeout matching its command budget. No flag
+changes in this release.
+
+### Fixed
+
+- **Audit advisories.** `undici` 6.29.0 -> 6.29.1 (TLS validation bypass,
+  TLS 1.2 renegotiation DoS, content-encoding DoS); `vitest` 3.2.7 -> 4.0.18,
+  which removes `tinypool` from the tree entirely (two critical
+  prototype-pollution RCEs) and resolves `vite` 7.3.7 (Windows
+  `fs.existsSync()` bypass). 3.2.7 was the last 3.x release, so no 3.x bump
+  could clear the advisories; the vitest range is `~4.0.0` to hold the 4.0.x
+  line, whose vite range stays on 7.x - `^4.0.0` would float to the 4.1 line,
+  whose vite range admits 8.x. Gate semantics unchanged: no new exceptions,
+  no floor changes.
+- **Vitest 4 test compatibility.** Two tests replaced a persistent mock
+  override with one-shot overrides (a persistent override is no longer
+  undone between tests, so it kept answering every later test in the file),
+  and three SIGINT tests now deliver the signal synchronously instead of
+  through a zero-delay timer, which the faster runner could outrun. No
+  product code changed for either.
+- **Windows test failures.** Four tests assert POSIX-only behaviour and are
+  now skipped on Windows: the hostile-filename slash-command test (Win32
+  forbids control characters in filenames), the FIFO test (no FIFOs on
+  Windows), and the SIGTERM/SIGKILL legs (Windows reports no signal for a
+  terminated child; `trap` and `kill` do not exist under cmd.exe). Nine probes
+  are rewritten cross-platform (node script files instead of `sed`/`awk`/
+  `cat`/`touch`/`printf` compounds, which cmd.exe cannot run), and the 1MB
+  output-cap test's generator is rewritten the same way with a 30s timeout
+  matching its command budget.
+- **Task-memory paths.** `summarizeTouchedFiles` now emits forward-slash
+  paths on every platform (`relPath` normalizes with the existing `toPosix`
+  helper). On Windows it previously emitted backslashes into the user-facing
+  changelog, failing two tests.
+
 ## 0.9.8 - 2026-11-04
 
 CI and release hygiene. Fixes the dependency-audit gate harness (it previously

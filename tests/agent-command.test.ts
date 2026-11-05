@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -386,9 +386,13 @@ describe('run_command', () => {
 
   test('caps oversized output (model content) but keeps a tail', async () => {
     const tiny: ToolLimits = { ...DEFAULT_LIMITS, maxResultChars: 200 };
+    // A script file, not `awk`: cmd.exe passes single quotes literally, so
+    // the awk program arrives mangled and exits at once.
+    const gen = join(workDir, 'gen-lines.mjs');
+    writeFileSync(gen, `for (let i = 1; i <= 500; i++) console.log('line' + i);\n`);
     const r = await dispatchTool(
       'run_command',
-      { command: "awk 'BEGIN{for(i=1;i<=500;i++)print \"line\"i}'" },
+      { command: `"${process.execPath}" "${gen}"` },
       ctx(ACCEPT, { limits: tiny }),
     );
     expect(r.ok).toBe(true);

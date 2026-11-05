@@ -173,11 +173,22 @@ describe('§F1 abandonment cancels the retry loop', () => {
   test('A3 LEGITIMATE RETRY SURVIVES: a transport error still reconnects and completes', async () => {
     let n = 0;
     const undici = await import('undici');
-    vi.mocked(undici.request).mockImplementation((async () => {
-      n += 1;
-      if (n === 1) throw new Error('ECONNRESET');
-      return okResp([`data: {"type":"text","content":"ok"}\n\n`, `data: {"type":"done"}\n\n`]);
-    }) as unknown as typeof undici.request);
+    // One-shot overrides, NOT a persistent mockImplementation: under
+    // vitest 4 a persistent override is NOT undone by restoreMocks, so it
+    // would keep answering every later test in this file and their request
+    // counters would never move. The once-queue drains after the two calls
+    // below and the shared mock is back for the next test.
+    vi.mocked(undici.request)
+      .mockImplementationOnce(async () => {
+        n += 1;
+        throw new Error('ECONNRESET');
+      })
+      .mockImplementationOnce(
+        (async () => {
+          n += 1;
+          return okResp([`data: {"type":"text","content":"ok"}\n\n`, `data: {"type":"done"}\n\n`]);
+        }) as unknown as typeof undici.request,
+      );
 
     const { streamRequest } = await import('../src/lib/sse.js');
     const got: unknown[] = [];

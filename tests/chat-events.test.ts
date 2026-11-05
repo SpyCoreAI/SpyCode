@@ -377,9 +377,13 @@ describe('chat conversation resolution', () => {
     responder = streamResponder([TEXT, DONE]);
     const { getConfigPath } = await import('../src/lib/config.js');
     const { dirname } = await import('node:path');
+    // A script file, not `echo … >&2; exit 2`: `;` is not a command
+    // separator under cmd.exe, so `exit 2` never ran and the chat resolved.
+    const script = join(dirname(getConfigPath()), 'block-hook.mjs');
+    writeFileSync(script, `process.stderr.write('nope-reason\\n');\nprocess.exit(2);\n`);
     writeFileSync(
       join(dirname(getConfigPath()), 'hooks.json'),
-      JSON.stringify({ hooks: [{ event: 'prompt-submit', command: 'echo nope-reason >&2; exit 2' }] }),
+      JSON.stringify({ hooks: [{ event: 'prompt-submit', command: `"${process.execPath}" "${script}"` }] }),
     );
     await expect(runChat(['--no-color', 'chat', '--raw', 'hi'])).rejects.toThrow(
       /Prompt blocked by a user hook: nope-reason/,

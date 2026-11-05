@@ -605,9 +605,13 @@ describe('agent hooks and command rules', () => {
 
   test('a blocking prompt-submit hook rejects the run', async () => {
     await setToken();
+    // A script file, not `echo nope >&2; exit 2`: `;` is not a command
+    // separator under cmd.exe, so `exit 2` never ran and the hook exited 0.
+    const script = join(await configDir(), 'block-hook.mjs');
+    writeFileSync(script, `process.stderr.write('nope\\n');\nprocess.exit(2);\n`);
     writeFileSync(
       join(await configDir(), 'hooks.json'),
-      JSON.stringify({ hooks: [{ event: 'prompt-submit', command: 'echo nope >&2; exit 2' }] }),
+      JSON.stringify({ hooks: [{ event: 'prompt-submit', command: `"${process.execPath}" "${script}"` }] }),
     );
     await expect(runAgentCli(['do a thing', '--model', 'styx'])).rejects.toThrow(
       /Prompt blocked by a user hook/,

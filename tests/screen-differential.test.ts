@@ -293,7 +293,10 @@ describe('the differential against the published 0.6.0', () => {
    */
   test('the frozen 0.6.0 baseline is byte-identical to the publish point', () => {
     const path = fileURLToPath(new URL('./fixtures/catastrophic-screen-0.6.0.ts', import.meta.url));
-    const text = readFileSync(path, 'utf8');
+    // CRLF-normalised at the READ: Git checks this repository out with CRLF
+    // on Windows, and the pinned hash below is over LF bytes. Same precedent
+    // as display-sink-reach.test.ts B7.
+    const text = readFileSync(path, 'utf8').replace(/\r\n/g, '\n');
     const begin = text.indexOf('// ── BEGIN VERBATIM 24da8bf3550086e8f0cbd7e28b70071cc55e6de0 ──\n');
     const end = text.indexOf('// ── END VERBATIM ──');
     expect(begin, 'the BEGIN marker must be present and name the publish commit').toBeGreaterThanOrEqual(0);

@@ -1026,7 +1026,9 @@ describe('§7 benign corpus - the direction that decides whether the control is 
 // §4 - REPOSITORY-AUTHORED TEXT. A hostile clone drives these, not a server.
 // ═══════════════════════════════════════════════════════════════════════════
 describe('§4 repository-authored text reaching a notice sink', () => {
-  test('S10 a slash-command file whose NAME is hostile cannot drive the terminal', async () => {
+  // Win32 forbids control characters (0x00-0x1F) in filenames, so this
+  // probe file cannot exist on Windows and the property is vacuous there.
+  test.skipIf(process.platform === 'win32')('S10 a slash-command file whose NAME is hostile cannot drive the terminal', async () => {
     const { mkdtempSync, mkdirSync, writeFileSync } = await import('node:fs');
     const { tmpdir } = await import('node:os');
     const { join } = await import('node:path');

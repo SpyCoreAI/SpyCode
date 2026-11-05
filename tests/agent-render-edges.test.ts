@@ -253,7 +253,14 @@ describe('SIGINT cancellation', () => {
     ]);
     responder = (url, init) => {
       calls += 1;
-      if (calls === 1) setTimeout(() => process.emit('SIGINT'), 0);
+      // Delivered synchronously, NOT through a zero-delay timer: under
+      // vitest 4 the run can finish before a timer fires, and by then the
+      // run has already removed its SIGINT listener (measured: zero
+      // listeners attached at emit time), so the signal is lost and the run
+      // completes normally. Emitting here lands while the run is in progress
+      // and its listener is attached; the product behaviour under test - a
+      // SIGINT arriving mid-run cancels it - is unchanged.
+      if (calls === 1) process.emit('SIGINT');
       return base(url, init);
     };
     await runAgentCli(['do the thing', '--model', 'styx', '--yes']);
@@ -270,7 +277,14 @@ describe('SIGINT cancellation', () => {
     ]);
     responder = (url, init) => {
       calls += 1;
-      if (calls === 1) setTimeout(() => process.emit('SIGINT'), 0);
+      // Delivered synchronously, NOT through a zero-delay timer: under
+      // vitest 4 the run can finish before a timer fires, and by then the
+      // run has already removed its SIGINT listener (measured: zero
+      // listeners attached at emit time), so the signal is lost and the run
+      // completes normally. Emitting here lands while the run is in progress
+      // and its listener is attached; the product behaviour under test - a
+      // SIGINT arriving mid-run cancels it - is unchanged.
+      if (calls === 1) process.emit('SIGINT');
       return base(url, init);
     };
     await runAgentCli(['do the thing', '--model', 'styx', '--plan', '--yes']);
@@ -287,7 +301,14 @@ describe('SIGINT cancellation', () => {
     ]);
     responder = (url, init) => {
       calls += 1;
-      if (calls === 1) setTimeout(() => process.emit('SIGINT'), 0);
+      // Delivered synchronously, NOT through a zero-delay timer: under
+      // vitest 4 the run can finish before a timer fires, and by then the
+      // run has already removed its SIGINT listener (measured: zero
+      // listeners attached at emit time), so the signal is lost and the run
+      // completes normally. Emitting here lands while the run is in progress
+      // and its listener is attached; the product behaviour under test - a
+      // SIGINT arriving mid-run cancels it - is unchanged.
+      if (calls === 1) process.emit('SIGINT');
       return base(url, init);
     };
     await runAgentCli(['do the thing', '--model', 'styx', '--plan', '--yes', '--json']);
