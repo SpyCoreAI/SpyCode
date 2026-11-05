@@ -8,8 +8,9 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 CI repair for the 0.9.8 release. Clears the six high/critical advisories the
 audit gate caught on main (two critical tinypool RCEs, one vite advisory,
-three undici advisories) by moving undici to 6.29.1 and vitest to 4.0.18,
-which drops tinypool from the tree and resolves vite 7.3.7. Fixes the sixteen
+three undici advisories) by moving undici to 6.29.1 and vitest to 4.1.12,
+which drops tinypool from the tree and resolves vite 7.3.7, and clears the
+critical UI server advisory the round 2 audit caught on the 4.0 line. Fixes the sixteen
 Windows test failures from the same run: four POSIX-only tests are now skipped
 on Windows, nine probes are rewritten in the repo's cross-platform script-file
 idiom, one real product bug is fixed - task-memory paths now use forward
@@ -20,13 +21,17 @@ changes in this release.
 ### Fixed
 
 - **Audit advisories.** `undici` 6.29.0 -> 6.29.1 (TLS validation bypass,
-  TLS 1.2 renegotiation DoS, content-encoding DoS); `vitest` 3.2.7 -> 4.0.18,
+  TLS 1.2 renegotiation DoS, content-encoding DoS); `vitest` 3.2.7 -> 4.1.12,
   which removes `tinypool` from the tree entirely (two critical
   prototype-pollution RCEs) and resolves `vite` 7.3.7 (Windows
   `fs.existsSync()` bypass). 3.2.7 was the last 3.x release, so no 3.x bump
-  could clear the advisories; the vitest range is `~4.0.0` to hold the 4.0.x
-  line, whose vite range stays on 7.x - `^4.0.0` would float to the 4.1 line,
-  whose vite range admits 8.x. Gate semantics unchanged: no new exceptions.
+  could clear the advisories. The 4.1 line also clears the critical UI server
+  advisory (arbitrary file read and execution when the UI server is
+  listening) that covers every 4.0 release, so the vitest range moves to
+  `~4.1.0`; `^4.1.0` would float to the 5.x line, so the tilde range stays.
+  The resolved tree still carries `vite` 7.3.7, not 8.x: the 4.1 line admits
+  8.x in its range, but the locked 7.3.7 satisfies it, so pnpm keeps it.
+  Gate semantics unchanged: no new exceptions.
 - **Coverage floors recalibrated for vitest 4.** The new major version's v8
   provider uses AST-based remapping and measures coverage accurately; the
   previous release's remapping inflated the numbers with false positives
