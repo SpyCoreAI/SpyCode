@@ -5,6 +5,7 @@ import {
   useApp,
   useInput,
   useStdin,
+  useStdout,
 } from 'ink';
 import {
   useEffect,
@@ -301,12 +302,26 @@ import {
 export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRules, hooks }: TuiAppProps): ReactNode {
   const { exit } = useApp();
   const { stdin } = useStdin();
+  const { write } = useStdout();
+  const [staticKey, setStaticKey] = useState(0);
   const { colors, symbols } = useTheme();
   const contentWidth = useContentWidth();
   const { width: termWidth } = useTerminalSize();
   const cwd = process.cwd();
 
   const [theme, setTheme] = useState<Theme>(initialTheme);
+  const getWelcomeItem = (): TuiItem => {
+    const { bindings: kbBindings } = getEffectiveKeybindings();
+    const kbPaletteLabel = labelForAction(kbBindings, 'composer', 'command palette') ?? 'Ctrl+P';
+    const tips = TIPS.map((t) => t.replace('Ctrl+P', kbPaletteLabel));
+    return {
+      kind: 'welcome',
+      id: nextId.current++,
+      loggedIn,
+      tip: tips[Math.floor(Date.now() / 86_400_000) % tips.length]!,
+    };
+  };
+
   const [items, setItems] = useState<TuiItem[]>(() => {
     // M1: the palette tip names a rebindable key - resolve its label from
     // the table so the welcome tip never advertises a dead key.
@@ -360,6 +375,7 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
   // Session title: the first submitted task's text.
   const [sessionTitle, setSessionTitle] = useState('');
   const [modelOverride, setModelOverride] = useState<string | null>(null);
+  const [providerOverride, setProviderOverride] = useState<string | null>(null);
   // Plan mode toggle - when true, the next task runs in plan mode (no file changes).
   const [planMode, setPlanMode] = useState(false);
   // Approval mode - 'ask' (default), 'auto-all' (auto-approve everything).
@@ -695,9 +711,9 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
     providerKind: 'spycore' | 'byok';
   } | null> => {
     const selection = resolveProviderSelection({
-      providerFlag: undefined,
+      providerFlag: providerOverride ?? undefined,
       baseUrl: undefined,
-      model: undefined,
+      model: modelOverride ?? undefined,
       apiKeyEnv: undefined,
       env: process.env,
       stored: getStoredProviders(),
@@ -747,9 +763,9 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
     titleRequestedRef.current = true;
     try {
       const selection = resolveProviderSelection({
-        providerFlag: undefined,
+        providerFlag: providerOverride ?? undefined,
         baseUrl: undefined,
-        model: undefined,
+        model: modelOverride ?? undefined,
         apiKeyEnv: undefined,
         env: process.env,
         stored: getStoredProviders(),
@@ -1450,8 +1466,10 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
      * registry that belongs to it. Stale peek entries and paste
      * placeholders must not survive the wipe.
      */
-    const clearTranscript = (): void => {
-      setItems([]);
+    const clearTranscript = (restoreWelcome = false): void => {
+      setItems(restoreWelcome ? [getWelcomeItem()] : []);
+      setStaticKey((k) => k + 1);
+      write('\x1b[2J\x1b[3J\x1b[H');
       // N1/N2: registries belong to the old transcript - stale peek
       // entries and paste placeholders must not survive the clear.
       elidedRef.current.clear();
@@ -1478,7 +1496,7 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
           pushNotice('warning', 'A task is running - /clear is available when idle.');
           break;
         }
-        clearTranscript();
+        clearTranscript(false);
         break;
       case 'new': {
         // A fresh session without quit+relaunch: the transcript is wiped
@@ -1491,7 +1509,7 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
           pushNotice('warning', 'A task is running - /new is available when idle.');
           break;
         }
-        clearTranscript();
+        clearTranscript(true);
         lastRunRef.current = null;
         setSessionTitle('');
         setSidebarFiles([]);
@@ -1502,23 +1520,46 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
       }
       case 'model': {
         const want = (args[0] ?? '').toLowerCase();
+        const storedProviders = getStoredProviders();
+        const defaultProvName = getDefaultProviderName();
         if (!want) {
-          const provs = pickerProviders(getStoredProviders());
-          const models = modelsForProvider(provs[0] ?? { id: 'spycore', label: 'SpyCore', kind: 'spycore' }, modelOverride);
+          const provs = pickerProviders(storedProviders);
+          const currentProvId = providerOverride ?? defaultProvName ?? 'spycore';
+          const pIdx = Math.max(0, provs.findIndex((p) => p.id === currentProvId));
+          const activeProv = provs[pIdx] ?? provs[0] ?? { id: 'spycore', label: 'SpyCore', kind: 'spycore' };
+          const models = modelsForProvider(activeProv, modelOverride);
           const currentIdx = Math.max(0, models.findIndex((m) => m.key === modelOverride));
-          setModelPicker({ providerIndex: 0, modelIndex: currentIdx });
+          setModelPicker({ providerIndex: pIdx, modelIndex: currentIdx });
           break;
         }
         if (want === 'auto') {
           setModelOverride(null);
+          setProviderOverride(null);
           pushNotice('success', 'Model override cleared - back to per-task triage.');
           break;
         }
+        // Check stored providers for a matching model or provider name
+        const matchingProvByModel = storedProviders.find((p) => p.model?.toLowerCase() === want);
+        const matchingProvByName = storedProviders.find((p) => p.name.toLowerCase() === want);
+        if (matchingProvByModel) {
+          setModelOverride(matchingProvByModel.model!);
+          setProviderOverride(matchingProvByModel.name);
+          pushNotice('success', `Model pinned to ${matchingProvByModel.model} (${matchingProvByModel.name}).`);
+          break;
+        }
+        if (matchingProvByName && matchingProvByName.model) {
+          setModelOverride(matchingProvByName.model);
+          setProviderOverride(matchingProvByName.name);
+          pushNotice('success', `Provider switched to ${matchingProvByName.name} (model: ${matchingProvByName.model}).`);
+          break;
+        }
         if (!(TUI_AGENT_MODELS as readonly string[]).includes(want) || !isModelSlug(want)) {
-          pushNotice('warning', `Unknown model: ${args[0]}. Allowed: ${TUI_AGENT_MODELS.join(', ')}, auto.`);
+          const allowed = [...TUI_AGENT_MODELS, ...storedProviders.map((p) => p.model).filter(Boolean)];
+          pushNotice('warning', `Unknown model: ${args[0]}. Allowed: ${allowed.join(', ')}, auto.`);
           break;
         }
         setModelOverride(want);
+        setProviderOverride('spycore');
         pushNotice('success', `Model pinned to ${modelLabel(want)} for this session.`);
         break;
       }
@@ -1764,13 +1805,23 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
     if (!value.startsWith('/')) return [];
     if (value.startsWith('/model ')) {
       const arg = value.slice(7).trim().toLowerCase();
-      const candidates = ['auto', ...TUI_AGENT_MODELS];
+      const stored = getStoredProviders();
+      const customModels = stored.map((p) => p.model?.toLowerCase()).filter((m): m is string => Boolean(m));
+      const candidates = ['auto', ...TUI_AGENT_MODELS, ...customModels];
       return candidates
         .filter((c) => c.startsWith(arg))
-        .map((c) => ({
-          name: `model ${c}`,
-          summary: c === 'auto' ? 'Triaged per task' : `Pin ${modelLabel(c)}`,
-        }));
+        .map((c) => {
+          const prov = stored.find((p) => p.model?.toLowerCase() === c);
+          const summary = c === 'auto'
+            ? 'Triaged per task'
+            : prov
+              ? `Custom (${prov.name})`
+              : `Pin ${modelLabel(c)}`;
+          return {
+            name: `model ${c}`,
+            summary,
+          };
+        });
     }
     return filterCommands(value.slice(1)).slice(0, 6);
   };
@@ -2283,12 +2334,14 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
             if (activeProv.kind === 'spycore') {
               if ((TUI_AGENT_MODELS as readonly string[]).includes(chosen)) {
                 setModelOverride(chosen);
+                setProviderOverride('spycore');
                 pushNotice('success', `Model pinned to ${modelLabel(chosen)} for this session.`);
               } else {
                 pushNotice('warning', `Model ${chosen} is not supported for agent runs (allowed: ${TUI_AGENT_MODELS.join(', ')}).`);
               }
             } else {
               setModelOverride(chosen);
+              setProviderOverride(activeProv.id);
               pushNotice('success', `Model set to ${chosen} (${activeProv.label}).`);
             }
           }
@@ -2533,7 +2586,7 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
           When hidden, this renders exactly the old full-width column. */}
       <Box flexDirection="row">
         <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0}>
-          <Static items={items}>
+          <Static key={staticKey} items={items}>
             {(item) => <TuiItemView key={item.id} item={item} width={mainContentWidth} search={searchRender} />}
           </Static>
 
@@ -2611,7 +2664,8 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
             const provs = pickerProviders(getStoredProviders());
             const clampedP = Math.min(Math.max(0, modelPicker.providerIndex), provs.length - 1);
             const activeProv = provs[clampedP] ?? { id: 'spycore', label: 'SpyCore', kind: 'spycore' };
-            const mRows = modelsForProvider(activeProv, modelOverride);
+            const currentEffectiveModel = modelOverride ?? activeProv.model ?? null;
+            const mRows = modelsForProvider(activeProv, currentEffectiveModel);
             return (
               <ModelPicker
                 providers={provs}
