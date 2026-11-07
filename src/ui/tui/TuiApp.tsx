@@ -238,6 +238,11 @@ import {
   ThemePicker,
 } from './theme-picker.js';
 import {
+  ModelPicker,
+  modelsForProvider,
+  pickerProviders,
+} from './model-picker.js';
+import {
   listThemeOptions,
   resolveThemeSelection,
   isGalleryThemeId,
@@ -339,6 +344,7 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
   // M7: theme picker dialog state. When open, the picker owns the keyboard
   // (like the command palette). `selected` is the highlighted index.
   const [themePicker, setThemePicker] = useState<{ selected: number } | null>(null);
+  const [modelPicker, setModelPicker] = useState<{ providerIndex: number; modelIndex: number } | null>(null);
   const [composer, setComposer] = useState(() => {
     const s = loadTuiState();
     const draft = s?.draft ?? '';
@@ -378,6 +384,7 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
   const paletteRef = useRef<{ filter: string; selected: number } | null>(null);
   const confirmRef = useRef<{ question: string; onYes: () => void } | null>(null);
   const themePickerRef = useRef<{ selected: number } | null>(null);
+  const modelPickerRef = useRef<{ providerIndex: number; modelIndex: number } | null>(null);
   const composerRef = useRef(composer);
   /** Busy-queue: tasks AND shell commands wait here while a run is in flight
    * (BLOCKER #1 fix - a `!` shell can no longer run concurrently with a task). */
@@ -418,6 +425,7 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
   paletteRef.current = palette;
   confirmRef.current = confirm;
   themePickerRef.current = themePicker;
+  modelPickerRef.current = modelPicker;
   composerRef.current = composer;
   totalsRef.current = totals;
   searchRef.current = search;
@@ -1495,12 +1503,10 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
       case 'model': {
         const want = (args[0] ?? '').toLowerCase();
         if (!want) {
-          pushNotice(
-            'info',
-            modelOverride
-              ? `Model override: ${modelLabel(modelOverride)} (cleared on /model auto)`
-              : 'Model: auto (triaged per task). /model <name> to pin one.',
-          );
+          const provs = pickerProviders(getStoredProviders());
+          const models = modelsForProvider(provs[0] ?? { id: 'spycore', label: 'SpyCore', kind: 'spycore' }, modelOverride);
+          const currentIdx = Math.max(0, models.findIndex((m) => m.key === modelOverride));
+          setModelPicker({ providerIndex: 0, modelIndex: currentIdx });
           break;
         }
         if (want === 'auto') {
@@ -1756,13 +1762,24 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
   const slashSuggestions = (): TuiCommand[] => {
     const { value } = composerRef.current;
     if (!value.startsWith('/')) return [];
+    if (value.startsWith('/model ')) {
+      const arg = value.slice(7).trim().toLowerCase();
+      const candidates = ['auto', ...TUI_AGENT_MODELS];
+      return candidates
+        .filter((c) => c.startsWith(arg))
+        .map((c) => ({
+          name: `model ${c}`,
+          summary: c === 'auto' ? 'Triaged per task' : `Pin ${modelLabel(c)}`,
+        }));
+    }
     return filterCommands(value.slice(1)).slice(0, 6);
   };
 
   const acceptSuggestion = (): void => {
     const { value, cursor } = composerRef.current;
     if (value.startsWith('/')) {
-      const first = filterCommands(value.slice(1))[0];
+      const suggestions = slashSuggestions();
+      const first = suggestions[0];
       if (first) {
         const next = `/${first.name} `;
         updateComposer(() => ({ value: next, cursor: next.length }));
@@ -1963,7 +1980,7 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
     if (paletteRef.current) context = 'palette';
     else if (confirmRef.current) context = 'confirm';
     else if (approvalRef.current) context = 'approval';
-    else if (themePickerRef.current) {
+    else if (themePickerRef.current || modelPickerRef.current) {
       const global = actionForKey(resolvedBindings, 'always', keyId);
       return global ? { context: 'always', action: global } : null;
     }
@@ -2076,6 +2093,10 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
         setThemePicker(null);
         return;
       }
+      if (modelPickerRef.current) {
+        setModelPicker(null);
+        return;
+      }
       if (confirmRef.current) {
         setConfirm(null);
         return;
@@ -2166,7 +2187,7 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
       // A modal/approval owns the keyboard; otherwise open the search. The
       // resolved-table check keeps the M1 "one key, one meaning" contract:
       // if the user rebound 'transcript search' away, Ctrl+F must not fire it.
-      if (!paletteRef.current && !confirmRef.current && !themePickerRef.current && !approvalRef.current) {
+      if (!paletteRef.current && !confirmRef.current && !themePickerRef.current && !modelPickerRef.current && !approvalRef.current) {
         if (actionForKey(resolvedBindings, 'composer', 'ctrl+f') === 'transcript search') {
           setSearch({ query: '', cursor: 0, index: -1 });
           return;
@@ -2238,6 +2259,63 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
       }
       return;
       } // end else (no approval)
+    }
+
+    if (modelPickerRef.current) {
+      if (approvalRef.current) {
+        setModelPicker(null);
+      } else {
+        const mp = modelPickerRef.current;
+        const provs = pickerProviders(getStoredProviders());
+        const clampedP = Math.min(Math.max(0, mp.providerIndex), provs.length - 1);
+        const activeProv = provs[clampedP] ?? { id: 'spycore', label: 'SpyCore', kind: 'spycore' };
+        const modelRows = modelsForProvider(activeProv, modelOverride);
+
+        if (key.escape) {
+          setModelPicker(null);
+          return;
+        }
+        if (key.return) {
+          const selectedRow = modelRows[mp.modelIndex];
+          setModelPicker(null);
+          if (selectedRow && selectedRow.key !== 'unset') {
+            const chosen = selectedRow.key;
+            if (activeProv.kind === 'spycore') {
+              if ((TUI_AGENT_MODELS as readonly string[]).includes(chosen)) {
+                setModelOverride(chosen);
+                pushNotice('success', `Model pinned to ${modelLabel(chosen)} for this session.`);
+              } else {
+                pushNotice('warning', `Model ${chosen} is not supported for agent runs (allowed: ${TUI_AGENT_MODELS.join(', ')}).`);
+              }
+            } else {
+              setModelOverride(chosen);
+              pushNotice('success', `Model set to ${chosen} (${activeProv.label}).`);
+            }
+          }
+          return;
+        }
+        if (key.leftArrow) {
+          const nextP = (clampedP + provs.length - 1) % Math.max(1, provs.length);
+          const nextRows = modelsForProvider(provs[nextP]!, modelOverride);
+          setModelPicker({ providerIndex: nextP, modelIndex: Math.min(mp.modelIndex, Math.max(0, nextRows.length - 1)) });
+          return;
+        }
+        if (key.rightArrow) {
+          const nextP = (clampedP + 1) % Math.max(1, provs.length);
+          const nextRows = modelsForProvider(provs[nextP]!, modelOverride);
+          setModelPicker({ providerIndex: nextP, modelIndex: Math.min(mp.modelIndex, Math.max(0, nextRows.length - 1)) });
+          return;
+        }
+        if (key.upArrow) {
+          setModelPicker({ providerIndex: clampedP, modelIndex: (mp.modelIndex + modelRows.length - 1) % Math.max(1, modelRows.length) });
+          return;
+        }
+        if (key.downArrow) {
+          setModelPicker({ providerIndex: clampedP, modelIndex: (mp.modelIndex + 1) % Math.max(1, modelRows.length) });
+          return;
+        }
+        return;
+      }
     }
 
     // Confirm dialogs: y / n / Esc. Modifier combos (Ctrl+Y etc.) must not
@@ -2402,7 +2480,7 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
   const liveTool = liveToolRef.current;
   const showLive = phase === 'running' && !approval;
   const composerMode = composer.value.startsWith('!') ? 'shell' : 'normal';
-  const composerDisabled = approval !== null || palette !== null || confirm !== null || themePicker !== null;
+  const composerDisabled = approval !== null || palette !== null || confirm !== null || themePicker !== null || modelPicker !== null;
   const suggestions = !composerDisabled && phase === 'idle' ? [...slashSuggestions().map((c) => `/${c.name} - ${c.summary}`), ...mentionSuggestions().map((f) => `@${f}`)] : [];
   const hintState = approval ? 'approval' : phase === 'running' ? 'running' : 'idle';
   // M1: the idle hints name rebindable actions - derive their labels from
@@ -2529,6 +2607,22 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
             />
           ) : null}
 
+          {modelPicker ? (() => {
+            const provs = pickerProviders(getStoredProviders());
+            const clampedP = Math.min(Math.max(0, modelPicker.providerIndex), provs.length - 1);
+            const activeProv = provs[clampedP] ?? { id: 'spycore', label: 'SpyCore', kind: 'spycore' };
+            const mRows = modelsForProvider(activeProv, modelOverride);
+            return (
+              <ModelPicker
+                providers={provs}
+                providerIndex={clampedP}
+                models={mRows}
+                modelIndex={modelPicker.modelIndex}
+                width={mainContentWidth}
+              />
+            );
+          })() : null}
+
           {suggestions.length > 0 ? (
             <Box flexDirection="column" marginTop={1}>
               {suggestions.slice(0, 6).map((s) => (
@@ -2585,7 +2679,7 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
             mode={composerMode}
             disabled={composerDisabled}
             disabledHint={
-              approval ? 'Answer the approval above (a / A / r / Esc)' : palette ? 'Palette open' : themePicker ? 'Theme picker open' : 'Answer the question above (y / n)'
+              approval ? 'Answer the approval above (a / A / r / Esc)' : palette ? 'Palette open' : themePicker ? 'Theme picker open' : modelPicker ? 'Model picker open' : 'Answer the question above (y / n)'
             }
           />
 
