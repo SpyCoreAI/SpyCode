@@ -74,14 +74,22 @@ export function pickerProviders(
 }
 
 /**
- * Model rows for the SpyCore backend: the advertised chat models. The
- * currently-pinned model (if any) carries an `(active)` marker. Pure.
+ * Model rows for the SpyCore backend: `auto` (per-task triage) first, then
+ * the advertised chat models. The selected row carries an `(active)` marker;
+ * a null slug means auto. Pure.
  */
 export function spycoreModelRows(currentSlug: string | null): PickerRow[] {
-  return CHAT_MODELS.map((slug) => ({
-    key: slug,
-    text: `${MODEL_DISPLAY[slug]}${slug === currentSlug ? '  (active)' : ''}`,
-  }));
+  const isAuto = currentSlug === null || currentSlug === 'auto';
+  return [
+    {
+      key: 'auto',
+      text: `Auto (triaged per task)${isAuto ? '  (active)' : ''}`,
+    },
+    ...CHAT_MODELS.map((slug) => ({
+      key: slug,
+      text: `${MODEL_DISPLAY[slug]}${slug === currentSlug ? '  (active)' : ''}`,
+    })),
+  ];
 }
 
 /**

@@ -27,6 +27,7 @@ export const TUI_COMMANDS: readonly TuiCommand[] = [
   { name: 'usage', summary: 'Show session totals', usage: '' },
   { name: 'compact', summary: 'Collapse the transcript to recent items', usage: '' },
   { name: 'resume', summary: 'Resume an interrupted SpyCore session', usage: '[id] [--force]' },
+  { name: 'sessions', summary: 'Browse and resume previous sessions in this directory', usage: '' },
   { name: 'theme', summary: 'Show or set the theme', usage: '[auto|light|dark|<gallery-id>] (no args: visual picker)' },
   { name: 'provider', summary: 'Manage model providers', usage: '[list | use <name> | add <name> ... | remove <name> | test <name> | usage]' },
   { name: 'clear', summary: 'Clear the visible transcript', usage: '' },
@@ -122,7 +123,7 @@ export function shiftRunnable(queue: TuiQueueItem[]): TuiQueueItem | undefined {
 }
 
 /** Slash commands refused while a task is in flight (N4). */
-const RUNNING_GUARDED_COMMANDS: ReadonlySet<string> = new Set(['compact', 'resume', 'undo', 'redo', 'clear', 'new', 'exit']);
+const RUNNING_GUARDED_COMMANDS: ReadonlySet<string> = new Set(['compact', 'resume', 'sessions', 'undo', 'redo', 'clear', 'new', 'exit']);
 
 /**
  * True when the named slash command must wait for an idle TUI.

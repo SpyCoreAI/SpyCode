@@ -45,7 +45,7 @@ describe('registry', () => {
   test('carries the exact v1 slash set', () => {
     const names = TUI_COMMANDS.map((c) => c.name).sort();
     expect(names).toEqual(
-      ['approval', 'branch', 'clear', 'compact', 'diagnose', 'diff', 'exit', 'fork', 'help', 'model', 'new', 'plan', 'provider', 'redo', 'resume', 'theme', 'todo', 'undo', 'usage'].sort(),
+      ['approval', 'branch', 'clear', 'compact', 'diagnose', 'diff', 'exit', 'fork', 'help', 'model', 'new', 'plan', 'provider', 'redo', 'resume', 'sessions', 'theme', 'todo', 'undo', 'usage'].sort(),
     );
   });
 

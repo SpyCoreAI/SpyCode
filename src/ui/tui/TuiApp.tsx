@@ -93,6 +93,8 @@ import {
   applyRewind,
   branchSession,
   createRunRecorder,
+  getResumeState,
+  listSessions,
   loadDoneSession,
   loadSession,
   markSessionActive,
@@ -117,6 +119,7 @@ import {
   buildResumeContinueMessage,
   currentGitHead,
   detectWorkspaceDrift,
+  isResumable,
   makeRunStateHook,
   resolveResumeTarget,
 } from '../../lib/agent/resume.js';
@@ -257,6 +260,9 @@ import {
   pickerProviders,
 } from './model-picker.js';
 import {
+  SessionPicker,
+} from './session-picker.js';
+import {
   listThemeOptions,
   resolveThemeSelection,
   isGalleryThemeId,
@@ -377,6 +383,7 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
     selected: number;
     wizard: ProviderWizardState | null;
   } | null>(null);
+  const [sessionPicker, setSessionPicker] = useState<{ selected: number } | null>(null);
   const [composer, setComposer] = useState(() => {
     const s = loadTuiState();
     const draft = s?.draft ?? '';
@@ -391,8 +398,29 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
   const [sidebarFiles, setSidebarFiles] = useState<SessionFileStat[]>([]);
   // Session title: the first submitted task's text.
   const [sessionTitle, setSessionTitle] = useState('');
-  const [modelOverride, setModelOverride] = useState<string | null>(null);
-  const [providerOverride, setProviderOverride] = useState<string | null>(null);
+  // Startup provider/model: honor the configured default instead of always
+  // booting into auto, so the status bar reflects the saved choice.
+  const [providerOverride, setProviderOverride] = useState<string | null>(() => {
+    const defProv = getDefaultProviderName();
+    return defProv && defProv.trim().length > 0 ? defProv.trim() : null;
+  });
+  const [modelOverride, setModelOverride] = useState<string | null>(() => {
+    const defProv = getDefaultProviderName();
+    if (defProv && defProv !== 'spycore') {
+      const stored = getStoredProviders().find((p) => p.name === defProv);
+      if (stored?.model) return stored.model;
+      if (stored?.models?.[0]) return stored.models[0];
+    }
+    const cfgModel = getConfigStore().get('defaultModel');
+    if (
+      typeof cfgModel === 'string' &&
+      cfgModel.trim().length > 0 &&
+      (TUI_AGENT_MODELS as readonly string[]).includes(cfgModel.trim().toLowerCase())
+    ) {
+      return cfgModel.trim().toLowerCase();
+    }
+    return null;
+  });
   // Plan mode toggle - when true, the next task runs in plan mode (no file changes).
   const [planMode, setPlanMode] = useState(false);
   // Approval mode - 'ask' (default), 'auto-all' (auto-approve everything).
@@ -422,6 +450,7 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
     selected: number;
     wizard: ProviderWizardState | null;
   } | null>(null);
+  const sessionPickerRef = useRef<{ selected: number } | null>(null);
   const composerRef = useRef(composer);
   /** Busy-queue: tasks AND shell commands wait here while a run is in flight
    * (BLOCKER #1 fix - a `!` shell can no longer run concurrently with a task). */
@@ -464,6 +493,7 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
   themePickerRef.current = themePicker;
   modelPickerRef.current = modelPicker;
   providerManagerRef.current = providerManager;
+  sessionPickerRef.current = sessionPicker;
   composerRef.current = composer;
   totalsRef.current = totals;
   searchRef.current = search;
@@ -486,6 +516,11 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
   ): void => {
     providerManagerRef.current = next;
     setProviderManager(next);
+  };
+
+  const updateSessionPicker = (next: { selected: number } | null): void => {
+    sessionPickerRef.current = next;
+    setSessionPicker(next);
   };
 
   const { historyRef, histIdxRef, pushHistory, historyBack, historyForward } =
@@ -1556,8 +1591,9 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
           const currentProvId = providerOverride ?? defaultProvName ?? 'spycore';
           const pIdx = Math.max(0, provs.findIndex((p) => p.id === currentProvId));
           const activeProv = provs[pIdx] ?? provs[0] ?? { id: 'spycore', label: 'SpyCore', kind: 'spycore' };
-          const models = modelsForProvider(activeProv, modelOverride);
-          const currentIdx = Math.max(0, models.findIndex((m) => m.key === modelOverride));
+          const effectiveModel = activeProv.kind === 'spycore' ? (modelOverride ?? 'auto') : (modelOverride ?? activeProv.model ?? null);
+          const models = modelsForProvider(activeProv, effectiveModel);
+          const currentIdx = Math.max(0, models.findIndex((m) => m.key === effectiveModel));
           setModelPicker({ providerIndex: pIdx, modelIndex: currentIdx });
           break;
         }
@@ -2037,6 +2073,14 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
         }
         startResume(args);
         break;
+      case 'sessions': {
+        if (isRefusedWhileRunning('sessions', phaseRef.current)) {
+          pushNotice('warning', 'A task is running - /sessions is available when idle.');
+          break;
+        }
+        updateSessionPicker({ selected: 0 });
+        break;
+      }
       case 'theme': {
         const want = (args[0] ?? '').toLowerCase();
         if (!want) {
@@ -2357,7 +2401,7 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
     if (paletteRef.current) context = 'palette';
     else if (confirmRef.current) context = 'confirm';
     else if (approvalRef.current) context = 'approval';
-    else if (themePickerRef.current || modelPickerRef.current || providerManagerRef.current) {
+    else if (themePickerRef.current || modelPickerRef.current || providerManagerRef.current || sessionPickerRef.current) {
       const global = actionForKey(resolvedBindings, 'always', keyId);
       return global ? { context: 'always', action: global } : null;
     }
@@ -2478,6 +2522,10 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
         setProviderManager(null);
         return;
       }
+      if (sessionPickerRef.current) {
+        updateSessionPicker(null);
+        return;
+      }
       if (confirmRef.current) {
         setConfirm(null);
         return;
@@ -2568,7 +2616,7 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
       // A modal/approval owns the keyboard; otherwise open the search. The
       // resolved-table check keeps the M1 "one key, one meaning" contract:
       // if the user rebound 'transcript search' away, Ctrl+F must not fire it.
-      if (!paletteRef.current && !confirmRef.current && !themePickerRef.current && !modelPickerRef.current && !providerManagerRef.current && !approvalRef.current) {
+      if (!paletteRef.current && !confirmRef.current && !themePickerRef.current && !modelPickerRef.current && !providerManagerRef.current && !sessionPickerRef.current && !approvalRef.current) {
         if (actionForKey(resolvedBindings, 'composer', 'ctrl+f') === 'transcript search') {
           setSearch({ query: '', cursor: 0, index: -1 });
           return;
@@ -2662,9 +2710,15 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
           if (selectedRow && selectedRow.key !== 'unset') {
             const chosen = selectedRow.key;
             if (activeProv.kind === 'spycore') {
-              if ((TUI_AGENT_MODELS as readonly string[]).includes(chosen)) {
+              if (chosen === 'auto') {
+                setModelOverride(null);
+                setProviderOverride('spycore');
+                setDefaultProviderName('spycore');
+                pushNotice('success', 'Model set to Auto (triaged per task) on SpyCore.');
+              } else if ((TUI_AGENT_MODELS as readonly string[]).includes(chosen)) {
                 setModelOverride(chosen);
                 setProviderOverride('spycore');
+                setDefaultProviderName('spycore');
                 pushNotice('success', `Model pinned to ${modelLabel(chosen)} for this session.`);
               } else {
                 pushNotice('warning', `Model ${chosen} is not supported for agent runs (allowed: ${TUI_AGENT_MODELS.join(', ')}).`);
@@ -2672,6 +2726,11 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
             } else {
               setModelOverride(chosen);
               setProviderOverride(activeProv.id);
+              setDefaultProviderName(activeProv.id);
+              const updatedStored = getStoredProviders().map((p) =>
+                p.name === activeProv.id ? { ...p, model: chosen } : p,
+              );
+              setStoredProviders(updatedStored);
               pushNotice('success', `Model set to ${chosen} (${activeProv.label}).`);
             }
           }
@@ -2974,6 +3033,50 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
       }
     }
 
+    if (sessionPickerRef.current) {
+      if (approvalRef.current) {
+        updateSessionPicker(null);
+      } else {
+        const sp = sessionPickerRef.current;
+        const sessions = listSessions(cwd);
+        if (key.escape) {
+          updateSessionPicker(null);
+          return;
+        }
+        if (key.upArrow && sessions.length > 0) {
+          updateSessionPicker({ selected: (sp.selected + sessions.length - 1) % sessions.length });
+          return;
+        }
+        if (key.downArrow && sessions.length > 0) {
+          updateSessionPicker({ selected: (sp.selected + 1) % sessions.length });
+          return;
+        }
+        if (key.return) {
+          const chosen = sessions[sp.selected];
+          updateSessionPicker(null);
+          if (!chosen) return;
+          if (isResumable(chosen)) {
+            startResume([chosen.id]);
+          } else {
+            // Load the session's context into the current view so the user
+            // can continue working from it.
+            lastRunRef.current = { sessionId: chosen.id, undone: false };
+            setSessionTitle(chosen.task.trim().split('\n')[0] ?? '');
+            setSidebarFiles([]);
+            mergeSidebarChanges(chosen.changes);
+            const rState = getResumeState(chosen);
+            if (rState?.model) setModelOverride(rState.model);
+            pushNotice(
+              'success',
+              `Loaded session ${chosen.id} ("${sanitizeForDisplay(chosen.task.slice(0, 60))}") - ${chosen.changes.length} file change(s) restored to session state.`,
+            );
+          }
+          return;
+        }
+        return;
+      }
+    }
+
     // Confirm dialogs: y / n / Esc. Modifier combos (Ctrl+Y etc.) must not
     // confirm destructive actions.
     if (confirmRef.current) {
@@ -3136,7 +3239,7 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
   const liveTool = liveToolRef.current;
   const showLive = phase === 'running' && !approval;
   const composerMode = composer.value.startsWith('!') ? 'shell' : 'normal';
-  const composerDisabled = approval !== null || palette !== null || confirm !== null || themePicker !== null || modelPicker !== null || providerManager !== null;
+  const composerDisabled = approval !== null || palette !== null || confirm !== null || themePicker !== null || modelPicker !== null || providerManager !== null || sessionPicker !== null;
   const suggestions = !composerDisabled && phase === 'idle' ? [...slashSuggestions().map((c) => `/${c.name} - ${c.summary}`), ...mentionSuggestions().map((f) => `@${f}`)] : [];
   const hintState = approval ? 'approval' : phase === 'running' ? 'running' : 'idle';
   // M1: the idle hints name rebindable actions - derive their labels from
@@ -3290,6 +3393,14 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
             />
           ) : null}
 
+          {sessionPicker ? (
+            <SessionPicker
+              sessions={listSessions(cwd)}
+              selected={sessionPicker.selected}
+              width={mainContentWidth}
+            />
+          ) : null}
+
           {suggestions.length > 0 ? (
             <Box flexDirection="column" marginTop={1}>
               {suggestions.slice(0, 6).map((s) => (
@@ -3346,7 +3457,7 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
             mode={composerMode}
             disabled={composerDisabled}
             disabledHint={
-              approval ? 'Answer the approval above (a / A / r / Esc)' : palette ? 'Palette open' : themePicker ? 'Theme picker open' : modelPicker ? 'Model picker open' : providerManager ? 'Provider manager open' : 'Answer the question above (y / n)'
+              approval ? 'Answer the approval above (a / A / r / Esc)' : palette ? 'Palette open' : themePicker ? 'Theme picker open' : modelPicker ? 'Model picker open' : providerManager ? 'Provider manager open' : sessionPicker ? 'Session picker open' : 'Answer the question above (y / n)'
             }
           />
 

@@ -158,11 +158,14 @@ describe('themePickerRows', () => {
 });
 
 describe('model picker rows', () => {
-  test('spycoreModelRows lists the chat models with an active marker', () => {
+  test('spycoreModelRows lists auto first, then the chat models with an active marker', () => {
     const rows = spycoreModelRows('styx');
-    expect(rows.map((r) => r.key)).toEqual(['hermes', 'minos', 'styx', 'styx_max', 'charon']);
-    expect(rows[2]!.text).toContain('(active)');
+    expect(rows.map((r) => r.key)).toEqual(['auto', 'hermes', 'minos', 'styx', 'styx_max', 'charon']);
+    expect(rows[3]!.text).toContain('(active)');
     expect(rows[0]!.text).not.toContain('(active)');
+
+    const autoRows = spycoreModelRows(null);
+    expect(autoRows[0]!.text).toContain('(active)');
   });
 
   test('byokModelRows shows the configured model, or a placeholder when unset', () => {
@@ -174,7 +177,7 @@ describe('model picker rows', () => {
 
   test('modelsForProvider switches on provider kind', () => {
     const spycore = modelsForProvider({ id: 'spycore', label: 'SpyCore', kind: 'spycore' }, null);
-    expect(spycore.length).toBe(5);
+    expect(spycore.length).toBe(6);
     const byok = modelsForProvider(
       { id: 'mine', label: 'mine', kind: 'byok', model: 'llama-3' },
       null,
