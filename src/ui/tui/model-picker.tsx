@@ -31,6 +31,8 @@ export interface ModelPickerProvider {
   kind: 'spycore' | 'byok';
   /** The provider's configured model (BYOK only); null when unset. */
   model?: string | null;
+  /** All models configured for this provider. */
+  models?: readonly string[];
 }
 
 export interface ModelPickerProps {
@@ -63,6 +65,10 @@ export function pickerProviders(
       label: sanitizeForDisplay(s.name),
       kind: 'byok' as const,
       model: s.model ?? null,
+      models: [
+        ...(s.model ? [s.model] : []),
+        ...(s.models ?? []),
+      ].filter((m, idx, arr) => arr.indexOf(m) === idx),
     })),
   ];
 }
@@ -86,17 +92,22 @@ export function spycoreModelRows(currentSlug: string | null): PickerRow[] {
 export function byokModelRows(
   configuredModel: string | null | undefined,
   currentModel: string | null,
+  allModels?: readonly string[],
 ): PickerRow[] {
-  const model = (configuredModel ?? '').trim();
-  if (model.length === 0) {
+  const list = allModels && allModels.length > 0
+    ? allModels
+    : configuredModel && configuredModel.trim().length > 0
+      ? [configuredModel.trim()]
+      : [];
+
+  if (list.length === 0) {
     return [{ key: 'unset', text: '(no model configured for this provider)' }];
   }
-  return [
-    {
-      key: model,
-      text: `${sanitizeForDisplay(model)}${model === currentModel ? '  (active)' : ''}`,
-    },
-  ];
+
+  return list.map((m) => ({
+    key: m,
+    text: `${sanitizeForDisplay(m)}${m === currentModel ? '  (active)' : ''}`,
+  }));
 }
 
 /** Vertical-axis rows for whichever provider the rail currently points at. Pure. */
@@ -106,7 +117,7 @@ export function modelsForProvider(
 ): PickerRow[] {
   return provider.kind === 'spycore'
     ? spycoreModelRows(currentModel)
-    : byokModelRows(provider.model, currentModel);
+    : byokModelRows(provider.model, currentModel, provider.models);
 }
 
 const FALLBACK_PROVIDER: ModelPickerProvider = {

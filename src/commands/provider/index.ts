@@ -33,7 +33,7 @@ import { redactUrlCredentials } from '../../lib/redact.js';
 const RESERVED = new Set<string>(PROVIDER_KINDS); // 'spycore', 'openai', 'anthropic', 'google'
 
 /** How a provider's key is sourced, for `list` - never the key itself. */
-function keySource(p: StoredProviderConfig): string {
+export function keySource(p: StoredProviderConfig): string {
   if (p.apiKeyEnv && p.apiKeyEnv.length > 0) return `env:${p.apiKeyEnv}`;
   if (p.apiKey && p.apiKey.length > 0) return `stored:••••${p.apiKey.slice(-4)}`;
   // Key-required types fall back to their default env var at run time; the

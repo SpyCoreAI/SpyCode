@@ -28,6 +28,7 @@ export const TUI_COMMANDS: readonly TuiCommand[] = [
   { name: 'compact', summary: 'Collapse the transcript to recent items', usage: '' },
   { name: 'resume', summary: 'Resume an interrupted SpyCore session', usage: '[id] [--force]' },
   { name: 'theme', summary: 'Show or set the theme', usage: '[auto|light|dark|<gallery-id>] (no args: visual picker)' },
+  { name: 'provider', summary: 'Manage model providers', usage: '[list | use <name> | add <name> ... | remove <name> | test <name> | usage]' },
   { name: 'clear', summary: 'Clear the visible transcript', usage: '' },
   { name: 'new', summary: 'Start a fresh session (clean slate, no relaunch)', usage: '' },
   { name: 'exit', summary: 'Quit the TUI', usage: '' },

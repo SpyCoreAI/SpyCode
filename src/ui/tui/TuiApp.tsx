@@ -125,12 +125,21 @@ import {
   routingLine,
 } from '../../lib/agent/router.js';
 import {
+  BYOK_TYPES,
+  BYOK_TYPE_DEFAULTS,
+  PROVIDER_KINDS,
+  isByokType,
   resolveProviderSelection,
+  type ByokProviderType,
+  type StoredProviderConfig,
 } from '../../lib/providers/byok-config.js';
+import { keySource } from '../../commands/provider/index.js';
 import {
   getConfigStore,
   getDefaultProviderName,
   getStoredProviders,
+  setDefaultProviderName,
+  setStoredProviders,
 } from '../../lib/config.js';
 import { resolveGuardianThreshold } from '../../lib/agent/guardian.js';
 import { resolveDisabledToolsets } from '../../lib/agent/toolsets.js';
@@ -238,6 +247,10 @@ import {
 import {
   ThemePicker,
 } from './theme-picker.js';
+import {
+  ProviderManager,
+  type ProviderWizardState,
+} from './provider-manager.js';
 import {
   ModelPicker,
   modelsForProvider,
@@ -360,6 +373,10 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
   // (like the command palette). `selected` is the highlighted index.
   const [themePicker, setThemePicker] = useState<{ selected: number } | null>(null);
   const [modelPicker, setModelPicker] = useState<{ providerIndex: number; modelIndex: number } | null>(null);
+  const [providerManager, setProviderManager] = useState<{
+    selected: number;
+    wizard: ProviderWizardState | null;
+  } | null>(null);
   const [composer, setComposer] = useState(() => {
     const s = loadTuiState();
     const draft = s?.draft ?? '';
@@ -401,6 +418,10 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
   const confirmRef = useRef<{ question: string; onYes: () => void } | null>(null);
   const themePickerRef = useRef<{ selected: number } | null>(null);
   const modelPickerRef = useRef<{ providerIndex: number; modelIndex: number } | null>(null);
+  const providerManagerRef = useRef<{
+    selected: number;
+    wizard: ProviderWizardState | null;
+  } | null>(null);
   const composerRef = useRef(composer);
   /** Busy-queue: tasks AND shell commands wait here while a run is in flight
    * (BLOCKER #1 fix - a `!` shell can no longer run concurrently with a task). */
@@ -442,6 +463,7 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
   confirmRef.current = confirm;
   themePickerRef.current = themePicker;
   modelPickerRef.current = modelPicker;
+  providerManagerRef.current = providerManager;
   composerRef.current = composer;
   totalsRef.current = totals;
   searchRef.current = search;
@@ -458,6 +480,13 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
    */
   const updateComposer = (fn: (prev: ComposerState) => ComposerState): void =>
     updateComposerState(composerRef, setComposer, fn);
+
+  const updateProviderManager = (
+    next: { selected: number; wizard: ProviderWizardState | null } | null,
+  ): void => {
+    providerManagerRef.current = next;
+    setProviderManager(next);
+  };
 
   const { historyRef, histIdxRef, pushHistory, historyBack, historyForward } =
     useComposerHistory({ composerRef, updateComposer, setHistory });
@@ -1539,22 +1568,37 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
           break;
         }
         // Check stored providers for a matching model or provider name
-        const matchingProvByModel = storedProviders.find((p) => p.model?.toLowerCase() === want);
+        const matchingProvByModel = storedProviders.find(
+          (p) =>
+            p.model?.toLowerCase() === want ||
+            p.models?.some((m) => m.toLowerCase() === want),
+        );
         const matchingProvByName = storedProviders.find((p) => p.name.toLowerCase() === want);
         if (matchingProvByModel) {
-          setModelOverride(matchingProvByModel.model!);
+          const targetModel =
+            matchingProvByModel.models?.find((m) => m.toLowerCase() === want) ??
+            matchingProvByModel.model ??
+            want;
+          setModelOverride(targetModel);
           setProviderOverride(matchingProvByModel.name);
-          pushNotice('success', `Model pinned to ${matchingProvByModel.model} (${matchingProvByModel.name}).`);
+          pushNotice('success', `Model pinned to ${targetModel} (${matchingProvByModel.name}).`);
           break;
         }
-        if (matchingProvByName && matchingProvByName.model) {
-          setModelOverride(matchingProvByName.model);
+        if (matchingProvByName && (matchingProvByName.model || matchingProvByName.models?.length)) {
+          const targetModel = matchingProvByName.model ?? matchingProvByName.models?.[0]!;
+          setModelOverride(targetModel);
           setProviderOverride(matchingProvByName.name);
-          pushNotice('success', `Provider switched to ${matchingProvByName.name} (model: ${matchingProvByName.model}).`);
+          pushNotice('success', `Provider switched to ${matchingProvByName.name} (model: ${targetModel}).`);
           break;
         }
         if (!(TUI_AGENT_MODELS as readonly string[]).includes(want) || !isModelSlug(want)) {
-          const allowed = [...TUI_AGENT_MODELS, ...storedProviders.map((p) => p.model).filter(Boolean)];
+          const allowed = [
+            ...TUI_AGENT_MODELS,
+            ...storedProviders.flatMap((p) => [
+              ...(p.model ? [p.model] : []),
+              ...(p.models ?? []),
+            ]),
+          ];
           pushNotice('warning', `Unknown model: ${args[0]}. Allowed: ${allowed.join(', ')}, auto.`);
           break;
         }
@@ -1626,6 +1670,258 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
             pushNotice('info', `Todos:\n${lines.join('\n')}`);
           }
         }
+        break;
+      }
+      case 'provider': {
+        const sub = (args[0] ?? '').toLowerCase();
+        const stored = getStoredProviders();
+        const currentDefault = getDefaultProviderName() ?? 'spycore';
+
+        if (!sub) {
+          // Open interactive Provider Manager modal
+          const currentProvId = providerOverride ?? currentDefault;
+          const initialIdx = currentProvId === 'spycore'
+            ? 0
+            : Math.max(0, stored.findIndex((p) => p.name === currentProvId) + 1);
+          setProviderManager({ selected: initialIdx, wizard: null });
+          break;
+        }
+
+        if (sub === 'list') {
+          const lines = [`Default provider: ${currentDefault}`];
+          if (stored.length === 0) {
+            lines.push('No custom providers. Add one: /provider add <name> --base-url <url> --model <id>');
+          } else {
+            lines.push('');
+            for (const p of stored) {
+              const mark = p.name === currentDefault ? '*' : ' ';
+              lines.push(`${mark} ${p.name} (${p.type})  base: ${p.baseURL}  model: ${p.model ?? '-'}  key: ${keySource(p)}`);
+            }
+          }
+          pushNotice('info', lines.join('\n'));
+          break;
+        }
+
+        if (sub === 'use') {
+          const target = (args[1] ?? '').trim();
+          if (!target) {
+            pushNotice('warning', 'Usage: /provider use <name|spycore>');
+            break;
+          }
+          if (target.toLowerCase() === 'spycore') {
+            setDefaultProviderName('spycore');
+            setProviderOverride('spycore');
+            setModelOverride(null);
+            pushNotice('success', 'Default provider reset to spycore.');
+            break;
+          }
+          const found = stored.find((p) => p.name.toLowerCase() === target.toLowerCase());
+          if (!found) {
+            pushNotice('warning', `No provider named "${target}". Use /provider list to see saved providers.`);
+            break;
+          }
+          setDefaultProviderName(found.name);
+          setProviderOverride(found.name);
+          if (found.model) setModelOverride(found.model);
+          pushNotice('success', `Default provider set to "${found.name}" (model: ${found.model ?? 'none'}).`);
+          break;
+        }
+
+        if (sub === 'remove' || sub === 'rm') {
+          const target = (args[1] ?? '').trim();
+          if (!target) {
+            pushNotice('warning', 'Usage: /provider remove <name>');
+            break;
+          }
+          if (target.toLowerCase() === 'spycore') {
+            pushNotice('warning', 'Cannot delete default SpyCore provider.');
+            break;
+          }
+          const found = stored.find((p) => p.name.toLowerCase() === target.toLowerCase());
+          if (!found) {
+            pushNotice('warning', `No provider named "${target}".`);
+            break;
+          }
+          setConfirm({
+            question: `Delete saved provider "${found.name}"?`,
+            onYes: () => {
+              setStoredProviders(stored.filter((p) => p.name !== found.name));
+              if (currentDefault === found.name) {
+                setDefaultProviderName(undefined);
+                setProviderOverride(null);
+                setModelOverride(null);
+                pushNotice('info', 'Default reset to spycore.');
+              }
+              pushNotice('success', `Removed provider "${found.name}".`);
+            },
+          });
+          break;
+        }
+
+        if (sub === 'add') {
+          const provName = (args[1] ?? '').trim();
+          if (!provName || provName.startsWith('-')) {
+            pushNotice('warning', 'Usage: /provider add <name> [--type openai|anthropic|google] [--base-url <url>] [--model <id>] [--api-key-env <VAR> | --api-key <key>]');
+            break;
+          }
+          if (['spycore', 'openai', 'anthropic', 'google'].includes(provName.toLowerCase())) {
+            pushNotice('warning', `"${provName}" is a reserved built-in name.`);
+            break;
+          }
+          if (stored.some((p) => p.name.toLowerCase() === provName.toLowerCase())) {
+            pushNotice('warning', `A provider named "${provName}" already exists.`);
+            break;
+          }
+
+          let pType: ByokProviderType = 'openai';
+          let pBaseUrl = '';
+          let pModel = '';
+          let pKeyEnv = '';
+          let pKey = '';
+
+          for (let i = 2; i < args.length; i++) {
+            const a = args[i]!;
+            const nextVal = args[i + 1] ?? '';
+            if (a === '--type' && nextVal) {
+              const t = nextVal.toLowerCase();
+              if (isByokType(t)) pType = t;
+              i++;
+            } else if (a === '--base-url' && nextVal) {
+              pBaseUrl = nextVal;
+              i++;
+            } else if (a === '--model' && nextVal) {
+              pModel = nextVal;
+              i++;
+            } else if (a === '--api-key-env' && nextVal) {
+              pKeyEnv = nextVal;
+              i++;
+            } else if (a === '--api-key' && nextVal) {
+              pKey = nextVal;
+              i++;
+            }
+          }
+
+          const finalBaseUrl = (pBaseUrl.trim() || BYOK_TYPE_DEFAULTS[pType].baseURL).replace(/\/+$/, '');
+          const newEntry: StoredProviderConfig = {
+            name: provName,
+            type: pType,
+            baseURL: finalBaseUrl,
+            ...(pModel.trim() ? { model: pModel.trim() } : {}),
+            ...(pKeyEnv.trim() ? { apiKeyEnv: pKeyEnv.trim() } : {}),
+            ...(pKey.trim() ? { apiKey: pKey.trim() } : {}),
+          };
+
+          setStoredProviders([...stored, newEntry]);
+          pushNotice('success', `Saved provider "${provName}" (${pType} · ${finalBaseUrl}).`);
+          break;
+        }
+
+        if (sub === 'add-model' || sub === 'model') {
+          const provName = (args[1] ?? '').trim();
+          const modelId = (args[2] ?? '').trim();
+          if (!provName || !modelId) {
+            pushNotice('warning', 'Usage: /provider add-model <provider-name> <model-id>');
+            break;
+          }
+          const found = stored.find((p) => p.name.toLowerCase() === provName.toLowerCase());
+          if (!found) {
+            pushNotice('warning', `Provider "${provName}" not found.`);
+            break;
+          }
+          const existingModels = [
+            ...(found.model ? [found.model] : []),
+            ...(found.models ?? []),
+          ];
+          if (existingModels.includes(modelId)) {
+            pushNotice('info', `Model "${modelId}" is already registered for provider "${found.name}".`);
+            break;
+          }
+          const updated = stored.map((p) => {
+            if (p.name !== found.name) return p;
+            return {
+              ...p,
+              models: [...(p.models ?? []), modelId],
+            };
+          });
+          setStoredProviders(updated);
+          pushNotice('success', `Added model "${modelId}" to provider "${found.name}".`);
+          break;
+        }
+
+        if (sub === 'test') {
+          const target = (args[1] ?? '').trim();
+          if (!target) {
+            pushNotice('warning', 'Usage: /provider test <name>');
+            break;
+          }
+          const found = stored.find((p) => p.name.toLowerCase() === target.toLowerCase());
+          if (!found) {
+            pushNotice('warning', `No provider named "${target}".`);
+            break;
+          }
+          pushNotice('info', `Testing "${found.name}" (${found.baseURL})…`);
+          (async () => {
+            try {
+              const selection = resolveProviderSelection({
+                providerFlag: found.name,
+                model: undefined,
+                baseUrl: undefined,
+                apiKeyEnv: undefined,
+                env: process.env,
+                stored: getStoredProviders(),
+                defaultProvider: undefined,
+              });
+              if (selection.kind !== 'byok') {
+                pushNotice('warning', `Provider "${found.name}" did not resolve to BYOK.`);
+                return;
+              }
+              const { createByokProvider } = await import('../../lib/providers/factory.js');
+              const provider = await createByokProvider(selection.config);
+              const conversationId = await provider.createConversation({ model: selection.config.model });
+              let errMsg: string | null = null;
+              for await (const ev of provider.streamChat({ conversationId, message: 'Reply with: OK', model: selection.config.model })) {
+                if (ev.type === 'error') {
+                  errMsg = ev.message;
+                  break;
+                }
+                if (ev.type === 'done') break;
+              }
+              if (errMsg) {
+                pushNotice('error', `Provider test failed: ${errMsg}`);
+              } else {
+                pushNotice('success', `Provider "${found.name}" is reachable.`);
+              }
+            } catch (err) {
+              pushNotice('error', `Provider test failed: ${errMessage(err)}`);
+            }
+          })();
+          break;
+        }
+
+        if (sub === 'usage') {
+          (async () => {
+            try {
+              const { getByokUsage } = await import('../../lib/byok-usage.js');
+              const usage = getByokUsage();
+              const names = Object.keys(usage).sort();
+              if (names.length === 0) {
+                pushNotice('info', 'No BYOK usage recorded yet.');
+                return;
+              }
+              const lines = ['BYOK Token Usage:'];
+              for (const name of names) {
+                const u = usage[name]!;
+                lines.push(`• ${name}: ${u.calls} calls | ${u.inputTokens.toLocaleString()} in | ${u.outputTokens.toLocaleString()} out (last: ${new Date(u.lastUsed).toLocaleTimeString()})`);
+              }
+              pushNotice('info', lines.join('\n'));
+            } catch (err) {
+              pushNotice('error', `Failed to load usage: ${errMessage(err)}`);
+            }
+          })();
+          break;
+        }
+
+        pushNotice('warning', 'Unknown subcommand. Usage: /provider [list | use <name> | add <name> ... | remove <name> | test <name> | usage]');
         break;
       }
       case 'plan': {
@@ -1806,12 +2102,19 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
     if (value.startsWith('/model ')) {
       const arg = value.slice(7).trim().toLowerCase();
       const stored = getStoredProviders();
-      const customModels = stored.map((p) => p.model?.toLowerCase()).filter((m): m is string => Boolean(m));
-      const candidates = ['auto', ...TUI_AGENT_MODELS, ...customModels];
+      const customModels = stored.flatMap((p) => [
+        ...(p.model ? [p.model.toLowerCase()] : []),
+        ...(p.models ? p.models.map((m) => m.toLowerCase()) : []),
+      ]);
+      const candidates = Array.from(new Set(['auto', ...TUI_AGENT_MODELS, ...customModels]));
       return candidates
         .filter((c) => c.startsWith(arg))
         .map((c) => {
-          const prov = stored.find((p) => p.model?.toLowerCase() === c);
+          const prov = stored.find(
+            (p) =>
+              p.model?.toLowerCase() === c ||
+              p.models?.some((m) => m.toLowerCase() === c),
+          );
           const summary = c === 'auto'
             ? 'Triaged per task'
             : prov
@@ -1822,6 +2125,29 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
             summary,
           };
         });
+    }
+    if (value.startsWith('/provider ')) {
+      const sub = value.slice(10).trim().toLowerCase();
+      const subs = ['list', 'use', 'add', 'add-model', 'remove', 'test', 'usage'];
+      return subs
+        .filter((s) => s.startsWith(sub))
+        .map((s) => ({
+          name: `provider ${s}`,
+          summary:
+            s === 'list'
+              ? 'List saved providers'
+              : s === 'use'
+                ? 'Set default provider'
+                : s === 'add'
+                  ? 'Add a new BYOK provider'
+                  : s === 'add-model'
+                    ? 'Add model to provider'
+                    : s === 'remove'
+                      ? 'Delete a provider'
+                      : s === 'test'
+                        ? 'Test connection to provider'
+                        : 'Show BYOK token usage',
+        }));
     }
     return filterCommands(value.slice(1)).slice(0, 6);
   };
@@ -2031,7 +2357,7 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
     if (paletteRef.current) context = 'palette';
     else if (confirmRef.current) context = 'confirm';
     else if (approvalRef.current) context = 'approval';
-    else if (themePickerRef.current || modelPickerRef.current) {
+    else if (themePickerRef.current || modelPickerRef.current || providerManagerRef.current) {
       const global = actionForKey(resolvedBindings, 'always', keyId);
       return global ? { context: 'always', action: global } : null;
     }
@@ -2148,6 +2474,10 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
         setModelPicker(null);
         return;
       }
+      if (providerManagerRef.current) {
+        setProviderManager(null);
+        return;
+      }
       if (confirmRef.current) {
         setConfirm(null);
         return;
@@ -2238,7 +2568,7 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
       // A modal/approval owns the keyboard; otherwise open the search. The
       // resolved-table check keeps the M1 "one key, one meaning" contract:
       // if the user rebound 'transcript search' away, Ctrl+F must not fire it.
-      if (!paletteRef.current && !confirmRef.current && !themePickerRef.current && !modelPickerRef.current && !approvalRef.current) {
+      if (!paletteRef.current && !confirmRef.current && !themePickerRef.current && !modelPickerRef.current && !providerManagerRef.current && !approvalRef.current) {
         if (actionForKey(resolvedBindings, 'composer', 'ctrl+f') === 'transcript search') {
           setSearch({ query: '', cursor: 0, index: -1 });
           return;
@@ -2365,6 +2695,279 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
         }
         if (key.downArrow) {
           setModelPicker({ providerIndex: clampedP, modelIndex: (mp.modelIndex + 1) % Math.max(1, modelRows.length) });
+          return;
+        }
+        return;
+      }
+    }
+
+    if (providerManagerRef.current) {
+      if (approvalRef.current) {
+        setProviderManager(null);
+      } else {
+        const pm = providerManagerRef.current;
+        const stored = getStoredProviders();
+        const currentDef = getDefaultProviderName() ?? 'spycore';
+        const totalItems = stored.length + 1; // spycore + stored providers
+
+        // WIZARD MODE: Adding provider step-by-step
+        if (pm.wizard) {
+          const w = pm.wizard;
+          if (key.escape) {
+            updateProviderManager({ selected: pm.selected, wizard: null });
+            return;
+          }
+
+          if (w.step === 'type') {
+            const types: ByokProviderType[] = ['openai', 'anthropic', 'google'];
+            const curIdx = types.indexOf(w.type);
+            if (key.leftArrow) {
+              const nextT = types[(curIdx + types.length - 1) % types.length]!;
+              updateProviderManager({ selected: pm.selected, wizard: { ...w, type: nextT } });
+              return;
+            }
+            if (key.rightArrow) {
+              const nextT = types[(curIdx + 1) % types.length]!;
+              updateProviderManager({ selected: pm.selected, wizard: { ...w, type: nextT } });
+              return;
+            }
+            if (key.return) {
+              updateProviderManager({ selected: pm.selected, wizard: { ...w, step: 'name' } });
+              return;
+            }
+            return;
+          }
+
+          // Text steps: name, baseUrl, model, apiKey
+          if (key.return) {
+            if (w.step === 'name') {
+              const name = w.name.trim();
+              if (!name) return;
+              if (['spycore', 'openai', 'anthropic', 'google'].includes(name.toLowerCase())) {
+                pushNotice('warning', 'Reserved name. Choose another.');
+                return;
+              }
+              if (stored.some((p) => p.name.toLowerCase() === name.toLowerCase())) {
+                pushNotice('warning', 'Provider name already exists.');
+                return;
+              }
+              updateProviderManager({ selected: pm.selected, wizard: { ...w, step: 'baseUrl' } });
+              return;
+            }
+            if (w.step === 'baseUrl') {
+              updateProviderManager({ selected: pm.selected, wizard: { ...w, step: 'model' } });
+              return;
+            }
+            if (w.step === 'model') {
+              updateProviderManager({ selected: pm.selected, wizard: { ...w, step: 'apiKey' } });
+              return;
+            }
+            if (w.step === 'addModel') {
+              const modelId = w.model.trim();
+              if (!modelId) return;
+              const targetProv = stored.find((p) => p.name.toLowerCase() === w.name.toLowerCase());
+              if (!targetProv) {
+                updateProviderManager(null);
+                return;
+              }
+              const existing = [
+                ...(targetProv.model ? [targetProv.model] : []),
+                ...(targetProv.models ?? []),
+              ];
+              if (!existing.includes(modelId)) {
+                const updated = stored.map((p) => {
+                  if (p.name !== targetProv.name) return p;
+                  return {
+                    ...p,
+                    models: [...(p.models ?? []), modelId],
+                  };
+                });
+                setStoredProviders(updated);
+                pushNotice('success', `Added model "${modelId}" to provider "${targetProv.name}".`);
+              }
+              updateProviderManager({ selected: pm.selected, wizard: null });
+              return;
+            }
+            if (w.step === 'apiKey') {
+              // Finalize and save!
+              const baseUrlRaw = (w.baseUrl.trim() || BYOK_TYPE_DEFAULTS[w.type].baseURL).replace(/\/+$/, '');
+              const apiKeyInput = w.apiKey.trim();
+              const isEnv = apiKeyInput.toUpperCase() === apiKeyInput && apiKeyInput.includes('_') && !apiKeyInput.startsWith('sk-');
+              const newEntry: StoredProviderConfig = {
+                name: w.name.trim(),
+                type: w.type,
+                baseURL: baseUrlRaw,
+                ...(w.model.trim() ? { model: w.model.trim() } : {}),
+                ...(isEnv ? { apiKeyEnv: apiKeyInput } : apiKeyInput ? { apiKey: apiKeyInput } : {}),
+              };
+              setStoredProviders([...stored, newEntry]);
+              updateProviderManager(null);
+              pushNotice('success', `Saved provider "${w.name.trim()}" (${w.type}).`);
+              return;
+            }
+          }
+
+          if (key.backspace || key.delete) {
+            const field = w.step === 'addModel' ? 'model' : (w.step as 'name' | 'baseUrl' | 'model' | 'apiKey');
+            const curVal = w[field];
+            updateProviderManager({
+              selected: pm.selected,
+              wizard: { ...w, [field]: curVal.slice(0, -1) },
+            });
+            return;
+          }
+
+          if (input && !key.ctrl && !key.meta) {
+            const field = w.step === 'addModel' ? 'model' : (w.step as 'name' | 'baseUrl' | 'model' | 'apiKey');
+            const curVal = w[field];
+            const cleanInput = input.replace(/[\r\n]+/g, '');
+            updateProviderManager({
+              selected: pm.selected,
+              wizard: { ...w, [field]: curVal + cleanInput },
+            });
+            return;
+          }
+          return;
+        }
+
+        // BROWSE MODE: Shortcuts [Enter]=use, [a]=add, [d]=delete, [t]=test, [Esc]=close
+        if (key.escape) {
+          updateProviderManager(null);
+          return;
+        }
+
+        if (key.upArrow) {
+          updateProviderManager({ selected: (pm.selected + totalItems - 1) % totalItems, wizard: null });
+          return;
+        }
+        if (key.downArrow) {
+          updateProviderManager({ selected: (pm.selected + 1) % totalItems, wizard: null });
+          return;
+        }
+
+        // Action: [a] Add New Provider Wizard
+        if (input === 'a' || input === 'A') {
+          updateProviderManager({
+            selected: pm.selected,
+            wizard: {
+              step: 'type',
+              type: 'openai',
+              name: '',
+              baseUrl: '',
+              model: '',
+              apiKey: '',
+              cursor: 0,
+            },
+          });
+          return;
+        }
+
+        // Action: [m] Add Model to currently selected provider
+        if (input === 'm' || input === 'M') {
+          if (pm.selected === 0) {
+            pushNotice('warning', 'Cannot add custom models to built-in SpyCore provider.');
+            return;
+          }
+          const chosen = stored[pm.selected - 1];
+          if (!chosen) return;
+          updateProviderManager({
+            selected: pm.selected,
+            wizard: {
+              step: 'addModel',
+              type: chosen.type,
+              name: chosen.name,
+              baseUrl: chosen.baseURL,
+              model: '',
+              apiKey: '',
+              cursor: 0,
+            },
+          });
+          return;
+        }
+
+        // Action: [Enter] Set Default
+        if (key.return) {
+          if (pm.selected === 0) {
+            setDefaultProviderName('spycore');
+            setProviderOverride('spycore');
+            setModelOverride(null);
+            updateProviderManager(null);
+            pushNotice('success', 'Default provider reset to spycore.');
+          } else {
+            const chosen = stored[pm.selected - 1];
+            if (chosen) {
+              setDefaultProviderName(chosen.name);
+              setProviderOverride(chosen.name);
+              if (chosen.model) setModelOverride(chosen.model);
+              updateProviderManager(null);
+              pushNotice('success', `Default provider set to "${chosen.name}" (${chosen.model ?? 'no model'}).`);
+            }
+          }
+          return;
+        }
+
+        // Action: [t] Test Connection
+        if (input === 't' || input === 'T') {
+          if (pm.selected === 0) {
+            pushNotice('info', 'SpyCore built-in provider connectivity is verified via `spycore ping`.');
+            return;
+          }
+          const target = stored[pm.selected - 1];
+          if (!target) return;
+          pushNotice('info', `Testing "${target.name}" (${target.baseURL})…`);
+          (async () => {
+            try {
+              const selection = resolveProviderSelection({
+                providerFlag: target.name,
+                model: undefined,
+                baseUrl: undefined,
+                apiKeyEnv: undefined,
+                env: process.env,
+                stored: getStoredProviders(),
+                defaultProvider: undefined,
+              });
+              if (selection.kind !== 'byok') return;
+              const { createByokProvider } = await import('../../lib/providers/factory.js');
+              const provider = await createByokProvider(selection.config);
+              const conversationId = await provider.createConversation({ model: selection.config.model });
+              let errMsg: string | null = null;
+              for await (const ev of provider.streamChat({ conversationId, message: 'Reply with: OK', model: selection.config.model })) {
+                if (ev.type === 'error') {
+                  errMsg = ev.message;
+                  break;
+                }
+                if (ev.type === 'done') break;
+              }
+              if (errMsg) pushNotice('error', `Test failed: ${errMsg}`);
+              else pushNotice('success', `Provider "${target.name}" is reachable.`);
+            } catch (err) {
+              pushNotice('error', `Test failed: ${errMessage(err)}`);
+            }
+          })();
+          return;
+        }
+
+        // Action: [d] Delete Provider
+        if (input === 'd' || input === 'D') {
+          if (pm.selected === 0) {
+            pushNotice('warning', 'Cannot delete default SpyCore provider.');
+            return;
+          }
+          const target = stored[pm.selected - 1];
+          if (!target) return;
+          setProviderManager(null);
+          setConfirm({
+            question: `Delete saved provider "${target.name}"?`,
+            onYes: () => {
+              setStoredProviders(stored.filter((p) => p.name !== target.name));
+              if (currentDef === target.name) {
+                setDefaultProviderName(undefined);
+                setProviderOverride(null);
+                setModelOverride(null);
+              }
+              pushNotice('success', `Removed provider "${target.name}".`);
+            },
+          });
           return;
         }
         return;
@@ -2533,7 +3136,7 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
   const liveTool = liveToolRef.current;
   const showLive = phase === 'running' && !approval;
   const composerMode = composer.value.startsWith('!') ? 'shell' : 'normal';
-  const composerDisabled = approval !== null || palette !== null || confirm !== null || themePicker !== null || modelPicker !== null;
+  const composerDisabled = approval !== null || palette !== null || confirm !== null || themePicker !== null || modelPicker !== null || providerManager !== null;
   const suggestions = !composerDisabled && phase === 'idle' ? [...slashSuggestions().map((c) => `/${c.name} - ${c.summary}`), ...mentionSuggestions().map((f) => `@${f}`)] : [];
   const hintState = approval ? 'approval' : phase === 'running' ? 'running' : 'idle';
   // M1: the idle hints name rebindable actions - derive their labels from
@@ -2677,6 +3280,16 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
             );
           })() : null}
 
+          {providerManager ? (
+            <ProviderManager
+              providers={getStoredProviders()}
+              defaultProvider={getDefaultProviderName() ?? 'spycore'}
+              selected={providerManager.selected}
+              wizard={providerManager.wizard}
+              width={mainContentWidth}
+            />
+          ) : null}
+
           {suggestions.length > 0 ? (
             <Box flexDirection="column" marginTop={1}>
               {suggestions.slice(0, 6).map((s) => (
@@ -2733,7 +3346,7 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
             mode={composerMode}
             disabled={composerDisabled}
             disabledHint={
-              approval ? 'Answer the approval above (a / A / r / Esc)' : palette ? 'Palette open' : themePicker ? 'Theme picker open' : modelPicker ? 'Model picker open' : 'Answer the question above (y / n)'
+              approval ? 'Answer the approval above (a / A / r / Esc)' : palette ? 'Palette open' : themePicker ? 'Theme picker open' : modelPicker ? 'Model picker open' : providerManager ? 'Provider manager open' : 'Answer the question above (y / n)'
             }
           />
 

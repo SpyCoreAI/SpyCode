@@ -156,6 +156,8 @@ export interface StoredProviderConfig {
   type: ByokProviderType;
   baseURL: string;
   model?: string | undefined;
+  /** Additional model IDs registered for this provider. */
+  models?: string[] | undefined;
   /** Env var holding the key (preferred). */
   apiKeyEnv?: string | undefined;
   /** Inline key (discouraged - written to disk). */
