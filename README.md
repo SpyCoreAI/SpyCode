@@ -18,7 +18,7 @@ providers, skills, an MCP client, and an ACP server for IDE integration.
 
 [![npm](https://img.shields.io/npm/v/%40spycore%2Fcli?color=8A63D2&label=npm)](https://www.npmjs.com/package/@spycore/cli)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![node](https://img.shields.io/badge/node-%3E%3D20-339933?logo=node.js&logoColor=white)](https://nodejs.org)
+[![node](https://img.shields.io/badge/node-%3E%3D22.5-339933?logo=node.js&logoColor=white)](https://nodejs.org)
 [![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20WSL-lightgrey)](#install)
 [![docs](https://img.shields.io/badge/docs-spycore.ai%2Fspycode-6E56CF)](https://spycore.ai/spycode)
 
@@ -57,7 +57,7 @@ providers, skills, an MCP client, and an ACP server for IDE integration.
 npm install -g @spycore/cli
 ```
 
-Requirements: **Node 20+**. macOS and Linux are supported; Windows via WSL.
+Requirements: **Node 22.5+**. macOS and Linux are supported; Windows via WSL.
 
 Alternatively, the installer at [spycore.ai/spycode](https://spycore.ai/spycode)
 sets up the same package (a dependency-free binary distribution is planned).
@@ -96,14 +96,15 @@ spycore rewind                             # undo the workspace files the last r
 ## Models and routing
 
 SpyCore models, picked automatically by task complexity - or pinned with
-`-m`:
+`-m` (`agent -m` accepts Hermes, Minos, Styx and Charon; Styx Max is
+chat-only and cannot be pinned with `agent -m`):
 
 | Model | Role |
 | --- | --- |
 | **Hermes** | fast chat and triage |
 | **Minos** | vision + general reasoning |
 | **Styx** | the coding workhorse (agent default) |
-| **Styx Max** | the coding workhorse at higher effort |
+| **Styx Max** | the coding workhorse at higher effort (chat only) |
 | **Charon** | deep reasoning for complex tasks |
 
 ```bash

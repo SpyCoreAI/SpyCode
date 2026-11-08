@@ -6,7 +6,7 @@ is responsible for holding.
 
 ## Bird's eye
 
-SpyCode is a single TypeScript CLI (`@spycore/cli`, Node 20+, built with
+SpyCode is a single TypeScript CLI (`@spycore/cli`, Node 22.5+, built with
 tsup). Three surfaces share one agent engine:
 
 - `spycore agent "<task>"` - one-shot run with a streaming renderer.

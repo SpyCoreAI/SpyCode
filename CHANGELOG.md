@@ -104,6 +104,22 @@ public tree, supplied privately at CI time). No flag changes in this release.
 - **Version alignment.** `package.json` version is now 0.9.8, matching the
   release tag (0.9.7 shipped with package.json still at 0.9.6).
 
+## 0.9.7 - 2026-11-04
+
+Security fix. Removes the identity denylist file from the public tree: the
+patterns are now supplied privately at CI time via a secret, so pack-verify
+still gates the published bundle without the denylist ever appearing in the
+repository. `package.json` stayed at 0.9.6 in this release; the version was
+aligned with the release tag in 0.9.8.
+
+### Security
+
+- **Identity denylist removed from the public tree.** `.github/identity-denylist.txt`
+  is gone from the repository and from the published package. CI supplies the
+  denylist through the `SPYCODE_IDENTITY_DENYLIST` secret instead, referenced
+  by name only, so no fork PR can read it and no pattern is ever written to
+  disk or to a log.
+
 ## 0.9.6 - 2026-10-11
 
 Combined release. Medium features: zero-friction migration from competing

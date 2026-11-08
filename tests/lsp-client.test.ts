@@ -137,9 +137,10 @@ describe('LspClient (real stdio handshake, Content-Length framing)', () => {
     await expect(startFixture({ LSP_FIXTURE_CRASH: '1' })).rejects.toThrow(LspError);
   });
 
-  // Skipped on Windows: POSIX signal semantics differ there, and the
-  // server-death path itself is covered on POSIX.
-  test.skipIf(process.platform === 'win32')('requests after the server died reject with LspError', async () => {
+  // H17: un-skipped - killing the server process terminates it on Windows
+  // too (TerminateProcess); the test asserts the request REJECTS, not the
+  // signal name, so the mechanism is platform-neutral.
+  test('requests after the server died reject with LspError', async () => {
     const client = await startFixture();
     const pid = client.pid!;
     process.kill(pid, 'SIGKILL');

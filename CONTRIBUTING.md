@@ -21,7 +21,7 @@ codebase holds itself to. Read it before opening a pull request.
 
 ## Development setup
 
-Requirements: **Node 20+**, pnpm.
+Requirements: **Node 22.5+**, pnpm.
 
 ```bash
 pnpm install      # dependencies

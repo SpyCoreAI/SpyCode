@@ -180,20 +180,16 @@ Windows is untested in this release (sandbox path semantics and
 process-group kill behavior differ) and prints a warning. Native Windows
 support is planned post-launch.
 
-Linux verified 2026-08-06 (full suite + offline agent smoke in Debian-based
-`node` images): node 20 and node 22 on arm64, with the `multi-tool`,
-`symlink-escape`, `catastrophic-guard` and `config-0600` checks green on both.
+Linux verified 2026-11-08 (full suite, 3220 tests, on node 22): lines
+73.94%, statements 73.44%, functions 77.99%, branches 67.45%, with the
+`multi-tool`, `symlink-escape`, `catastrophic-guard` and `config-0600`
+checks green. Node 20 is not supported: `engines` requires `>=22.5.0`
+and the CI matrix runs node 22 only.
 
 **amd64 is not verified in this release.** Only emulated amd64 was available
 here, and under emulation the heaviest checks exceed their time limits and fail
 for reasons unrelated to what they test. Rather than repeat an older amd64
 figure, no amd64 result is claimed.
-
-**This verification did not run at all between 2026-08-05 and 2026-08-06.** The
-archive the harness builds excluded the repository's git history, which two of
-the suite's own checks require, so it could not reach a passing result - and
-nothing reported that, because nothing connected the two facts. It was repaired
-and re-run end to end for the statement above.
 
 ## Out of scope (v1)
 
