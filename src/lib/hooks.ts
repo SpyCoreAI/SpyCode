@@ -338,24 +338,31 @@ interface SpawnOutcome {
 // window. Its reasoning is documented there.
 
 /**
- * Close our write end of the hook's stdin pipe at settle.
+ * Close our write end of the hook's stdin pipe.
  *
  * `releaseChildStdio` unrefs the three pipes, which drops them from the
- * event-loop census on POSIX - but on Windows the stdin PipeWrap stays
- * listed when the hook exits without draining stdin: the payload write is
- * still pending against a read end a surviving descendant holds open, and
- * the unref does not retire that handle (measured in branch CI: one
- * PipeWrap over baseline after a pipe-holding hook settled, while the
- * stdin-less shell executor settled back to baseline on the same runner).
- * Destroying the write end retires the handle outright.
+ * event-loop census on POSIX - but the stdin PipeWrap needs to be RETIRED,
+ * not just unrefed, and WHEN it is retired is the whole fix. Measured on
+ * Linux: the stdin socket self-closes after `end()` (destroyed at settle
+ * with no explicit destroy), so a destroy at settle is already too late
+ * to matter - and on Windows the socket does NOT self-close (a Windows
+ * named pipe's write end stays open until explicitly destroyed), so the
+ * settle-time destroy was the only thing retiring it, and it landed too
+ * late: `uv_close` retires the handle on a later loop turn, while the
+ * census that counts it runs synchronously right after settle resolved -
+ * branch CI still showed exactly one PipeWrap over baseline. Destroying
+ * the write end here, as soon as the payload has flushed, gives the close
+ * the whole stdio drain window (~200ms) to complete before any census.
  *
  * Stdin is the one pipe this is safe for. The destroy-vs-unref reasoning
  * in `lib/child-stdio.ts` is about the READ direction - stdout/stderr,
  * where destroying our end SIGPIPEs a descendant still writing. Stdin
- * runs the other way: we write, the hook reads, and we already called
- * `end()` after the payload, so every reader - hook or descendant -
- * already sees EOF after the buffered bytes. Closing our end sooner
- * signals nothing and kills nothing; it only retires our own handle.
+ * runs the other way: we write, the hook reads, and the payload is fully
+ * flushed into the pipe buffer before this callback runs, so every reader
+ * - hook or descendant - already sees the bytes followed by EOF. Closing
+ * our end sooner signals nothing and kills nothing; it only retires our
+ * own handle. The settle-time destroy stays as the fallback for a write
+ * that never flushes (hook exited first / EPIPE).
  */
 function destroyHookStdin(child: ChildProcess): void {
   try {
@@ -488,8 +495,10 @@ function runHookCommand(
       /* the hook exited before reading stdin - expected, never fatal */
     });
     try {
-      child.stdin?.write(payload);
-      child.stdin?.end();
+      // Retire the stdin write end as soon as the payload has flushed -
+      // see destroyHookStdin: a destroy at settle lands too late for the
+      // handle census on Windows, where the socket does not self-close.
+      child.stdin?.end(payload, () => destroyHookStdin(child));
     } catch {
       /* the child may have exited before reading stdin - fine */
     }

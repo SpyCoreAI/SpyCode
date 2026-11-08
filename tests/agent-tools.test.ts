@@ -514,7 +514,11 @@ describe('dispatchTool CLI-wide timeout', () => {
     expect(r.content).toMatch(/timed out after/);
     // The dispatch gave up at the watchdog tick (~1s), NOT at the tool's
     // own 2500ms finish - the cutoff fired, the tool did not complete.
-    expect(elapsed).toBeLessThan(2000);
+    // The bound is the tool's own runtime, not the tick: a loaded runner
+    // measured exactly 2000ms here once, and 2000 < 2000 is false, so a
+    // bound of 2000 flakes on timer slop. 2500 still proves the cutoff:
+    // the dispatch returned before the tool could finish at 2500ms.
+    expect(elapsed).toBeLessThan(2500);
   });
 });
 

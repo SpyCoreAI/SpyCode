@@ -53,16 +53,43 @@ let scriptDir: string;
 
 /**
  * Quote for shell: hooks run via `spawn(command, {shell: true})`. Every
- * argument is wrapped in double quotes with `"`, `$`, backtick, and `\`
- * escaped, so an argument can never break out of its quotes or trigger
- * command substitution - it always arrives as one literal argument.
+ * argument is wrapped in double quotes - but the two shells escape
+ * differently, and the POSIX escaping is wrong on cmd.exe (measured in
+ * branch CI: a POSIX-escaped `\"` arrives as a literal quote, while
+ * `\$`, backtick and `\\` arrive with their backslashes still attached,
+ * so the argument lands intact but spelled wrong).
+ *
+ * POSIX (`/bin/sh`): escape `"`, `$`, backtick and `\`, so an argument
+ * can never break out of its quotes or trigger command substitution.
+ *
+ * win32 (`cmd.exe`): `$`, backtick and `\` are literal to cmd.exe and
+ * must NOT be escaped - only `"` is escaped, as `\"`, which cmd.exe
+ * passes through and the MSVC argv parser yields as a literal quote.
+ * `%VAR%` expands even inside quotes, so `%` is escaped as `^%`, and
+ * `^` (cmd.exe's escape character) as `^^` - `^` first, so the caret
+ * introduced for `%` is not itself doubled. A trailing run of
+ * backslashes doubles, so it cannot swallow the closing quote.
+ *
+ * The `platform` parameter exists so the win32 branch is pinned by a
+ * unit test on Linux; callers pass nothing and get the live platform.
  */
-function shellQuote(arg: string): string {
+function shellQuote(arg: string, platform: NodeJS.Platform = process.platform): string {
+  if (platform === 'win32') {
+    // MSVC layer first: backslashes before a quote double, and a trailing
+    // run of backslashes doubles, so a trailing `\"` cannot swallow the
+    // closing quote; then the cmd.exe layer (^ first, so the caret
+    // introduced for % is not itself doubled). Same algorithm as
+    // src/lib/gh.ts buildCmdCommandLine.
+    let body = arg.replace(/(\\*)"/g, (_m, slashes: string) => `${slashes}${slashes}\\"`);
+    body = body.replace(/(\\+)$/, '$1$1');
+    body = body.replace(/\^/g, '^^').replace(/%/g, '^%');
+    return `"${body}"`;
+  }
   return `"${arg.replace(/(["$`\\])/g, '\\$1')}"`;
 }
 
 function nodeCmd(script: string, ...args: string[]): string {
-  return [shellQuote(process.execPath), shellQuote(script), ...args.map(shellQuote)].join(' ');
+  return [shellQuote(process.execPath), shellQuote(script), ...args.map((a) => shellQuote(a))].join(' ');
 }
 
 function writeScript(name: string, source: string): string {
@@ -278,6 +305,32 @@ describe('nodeCmd shell quoting', () => {
     for (const name of ['pwned0', 'pwned1', 'pwned2']) {
       expect(existsSync(join(cwd, name))).toBe(false);
     }
+  });
+});
+
+// ──────────────── shellQuote: both shells, pinned on any platform ──────────
+
+describe('shellQuote is platform-aware', () => {
+  const hostile = 'a"; touch pwned0; echo "b$(touch pwned1)`touch pwned2`c\\d';
+
+  test('win32: only the quote is escaped; $ ` \\ stay literal', () => {
+    expect(shellQuote(hostile, 'win32')).toBe(
+      '"a\\"; touch pwned0; echo \\"b$(touch pwned1)`touch pwned2`c\\d"',
+    );
+  });
+
+  test('win32: % and ^ are escaped for cmd.exe', () => {
+    expect(shellQuote('100% ^x', 'win32')).toBe('"100^% ^^x"');
+  });
+
+  test('win32: a trailing backslash is doubled so it cannot swallow the closing quote', () => {
+    expect(shellQuote('C:\\dir\\', 'win32')).toBe('"C:\\dir\\\\"');
+  });
+
+  test('posix: $ ` \\ " are escaped (unchanged)', () => {
+    expect(shellQuote(hostile, 'linux')).toBe(
+      '"a\\"; touch pwned0; echo \\"b\\$(touch pwned1)\\`touch pwned2\\`c\\\\d"',
+    );
   });
 });
 

@@ -7,7 +7,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import { accessSync, constants as fsConstants } from 'node:fs';
-import { delimiter, join } from 'node:path';
+import { join } from 'node:path';
 
 const GH_TIMEOUT_MS = 60_000;
 
@@ -21,16 +21,29 @@ const GH_TIMEOUT_MS = 60_000;
  * invoked and the real GitHub CLI answered instead). So on Windows, probe
  * PATH ourselves - directory by directory, extensions in PATHEXT order,
  * the same resolution `cmd.exe` itself performs - and spawn the resolved
- * path, which Node executes (a `.cmd` path is wrapped in `cmd.exe`).
- * Null when no `gh` of any form is on PATH.
+ * path. Null when no `gh` of any form is on PATH.
+ *
+ * The overrides exist so the win32 walk is unit-testable on Linux: pass
+ * `platform: 'win32'` with a `pathEnv`/`pathext` and the same code runs
+ * against real temp dirs. Without them the live platform and environment
+ * are used.
  */
-export function resolveGhCommand(): string | null {
-  if (process.platform !== 'win32') return 'gh';
-  const exts = (process.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD')
+export interface GhResolveOverrides {
+  platform?: NodeJS.Platform;
+  /** PATH value to search (win32 only). Defaults to `process.env.PATH`. */
+  pathEnv?: string;
+  /** PATHEXT value (win32 only). Defaults to `process.env.PATHEXT`. */
+  pathext?: string;
+}
+
+export function resolveGhCommand(overrides: GhResolveOverrides = {}): string | null {
+  const platform = overrides.platform ?? process.platform;
+  if (platform !== 'win32') return 'gh';
+  const exts = (overrides.pathext ?? process.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD')
     .split(';')
     .map((e) => e.trim())
     .filter((e) => e.length > 0);
-  for (const dir of (process.env.PATH ?? '').split(delimiter)) {
+  for (const dir of (overrides.pathEnv ?? process.env.PATH ?? '').split(';')) {
     if (dir.length === 0) continue;
     for (const ext of exts) {
       const candidate = join(dir, `gh${ext}`);
@@ -45,11 +58,51 @@ export function resolveGhCommand(): string | null {
   return null;
 }
 
+/**
+ * Quote one token for a `cmd.exe /d /s /c` command line.
+ *
+ * Two parsers read the result in turn, so both layers must be satisfied:
+ * `cmd.exe` first (it expands `%VAR%` even inside quotes, and `^` is its
+ * escape character), then the MSVC argv parser of the child (backslash
+ * before a quote, and a trailing run of backslashes, decide whether the
+ * quote is a delimiter). `"` is escaped as `\"`: `cmd.exe` passes it
+ * through and MSVC yields a literal quote - measured in branch CI, where
+ * a POSIX-escaped `\"` arrived intact as one argument while `\$`, backtick
+ * and `\\` arrived with their backslashes still attached. `$`, backtick
+ * and `\` are literal to `cmd.exe` and need no escaping at all.
+ */
+export function buildCmdCommandLine(tokens: string[]): string {
+  return tokens.map(quoteCmdToken).join(' ');
+}
+
+function quoteCmdToken(token: string): string {
+  // MSVC layer first: backslashes before a quote double, and a trailing run
+  // of backslashes doubles, so a trailing `\"` cannot swallow the closing quote.
+  let body = token.replace(/(\\*)"/g, (_m, slashes: string) => `${slashes}${slashes}\\"`);
+  body = body.replace(/(\\+)$/, '$1$1');
+  // cmd.exe layer: escape ^ first, so the caret introduced for % is not doubled.
+  body = body.replace(/\^/g, '^^').replace(/%/g, '^%');
+  return `"${body}"`;
+}
+
 /** Spawn `gh`, resolved for the platform. Throws when no `gh` is on PATH. */
 function runGh(args: string[], cwd?: string): string {
   const cmd = resolveGhCommand();
   if (cmd === null) throw new Error('gh: command not found on PATH');
-  return execFileSync(cmd, args, {
+  // A resolved .cmd/.bat file cannot be spawned directly on Windows -
+  // libuv returns EINVAL (the file is not an executable, only cmd.exe can
+  // interpret it; Node docs, child_process "Spawning .bat and .cmd files on
+  // Windows"). Run it via cmd.exe /d /s /c with a command line quoted by
+  // buildCmdCommandLine. `shell: true` is NOT the substitute: Node joins
+  // file and args with bare spaces (child_process.js
+  // normalizeSpawnArguments), so an argument with a space ('Test PR', a
+  // temp path) would split into two. A resolved .exe spawns directly, as
+  // before - the production binary is an .exe, the .cmd path is the shim
+  // case (corepack-style installs, and the test fake).
+  const useCmd = process.platform === 'win32' && /\.(?:cmd|bat)$/i.test(cmd);
+  const file = useCmd ? (process.env.ComSpec ?? 'cmd.exe') : cmd;
+  const argv = useCmd ? ['/d', '/s', '/c', buildCmdCommandLine([cmd, ...args])] : args;
+  return execFileSync(file, argv, {
     ...(cwd !== undefined ? { cwd } : {}),
     stdio: ['ignore', 'pipe', 'pipe'],
     timeout: GH_TIMEOUT_MS,

@@ -192,8 +192,16 @@ const JOURNAL_DIR_MODE = 0o700;
  * resolved path makes every spelling of one directory the same journal.
  * A path that cannot be resolved (not yet on disk) falls back to the
  * spelling it was given rather than failing the journal write.
+ *
+ * Exported, and the ONLY way to compute this directory: the tests used to
+ * recompute it as `sha256(raw cwd)`, which silently diverged from this
+ * function on macOS (raw `/var/…` vs resolved `/private/var/…`) - the
+ * tests wrote session files into one directory while save/list read
+ * another, so listSessions came back empty and sabotage tests that block
+ * the directory missed entirely. Every consumer - product and tests -
+ * goes through this function, so the spelling can never drift again.
  */
-function cwdDir(cwd: string): string {
+export function checkpointDirFor(cwd: string): string {
   let canonical = cwd;
   try {
     canonical = realpathSync(cwd);
@@ -259,7 +267,7 @@ function currentSha(path: string): string | null {
 export function saveSession(input: { cwd: string; task: string; changes: RecordedChange[] }): string | null {
   if (input.changes.length === 0) return null;
   try {
-    const dir = cwdDir(input.cwd);
+    const dir = checkpointDirFor(input.cwd);
     mkdirSync(dir, { recursive: true, mode: JOURNAL_DIR_MODE });
     const id = nextSessionId();
     const session: CheckpointSession = {
@@ -358,7 +366,7 @@ function makeRecorder(
     // changes to guard. Keeps plan-only / not-yet-started runs off disk.
     if (resume.conversationId === null && changes.length === 0) return;
     try {
-      const dir = cwdDir(cwd);
+      const dir = checkpointDirFor(cwd);
       mkdirSync(dir, { recursive: true, mode: JOURNAL_DIR_MODE });
       const session: CheckpointSession = {
         id,
@@ -403,7 +411,7 @@ function makeRecorder(
       if (status === 'completed' && changes.length === 0) {
         // Match today's behavior: a completed run with no changes leaves no file.
         try {
-          const file = join(cwdDir(cwd), `${id}.json`);
+          const file = join(checkpointDirFor(cwd), `${id}.json`);
           if (existsSync(file)) unlinkSync(file);
         } catch {
           /* ignore */
@@ -488,7 +496,7 @@ function parseSession(file: string): CheckpointSession | null {
 
 /** Active (not-yet-rewound) sessions for `cwd`, newest first. */
 export function listSessions(cwd: string): CheckpointSession[] {
-  const dir = cwdDir(cwd);
+  const dir = checkpointDirFor(cwd);
   if (!existsSync(dir)) return [];
   let files: string[];
   try {
@@ -511,22 +519,22 @@ export function latestSession(cwd: string): CheckpointSession | null {
 export function loadSession(cwd: string, id: string): CheckpointSession | null {
   // Validate id to prevent path traversal (mirrors branchSession).
   if (!/^[A-Za-z0-9_-]+$/.test(id)) return null;
-  const file = join(cwdDir(cwd), `${id}.json`);
+  const file = join(checkpointDirFor(cwd), `${id}.json`);
   return existsSync(file) ? parseSession(file) : null;
 }
 
 /** Load a session that was marked done (renamed to `.json.done` by undo). */
 export function loadDoneSession(cwd: string, id: string): CheckpointSession | null {
   if (!/^[A-Za-z0-9_-]+$/.test(id)) return null;
-  const file = join(cwdDir(cwd), `${id}.json.done`);
+  const file = join(checkpointDirFor(cwd), `${id}.json.done`);
   return existsSync(file) ? parseSession(file) : null;
 }
 
 /** Mark a session rewound (rename to `.json.done`) so it isn't re-applied. */
 export function markSessionDone(cwd: string, id: string): void {
   try {
-    const src = join(cwdDir(cwd), `${id}.json`);
-    if (existsSync(src)) renameSync(src, join(cwdDir(cwd), `${id}.json.done`));
+    const src = join(checkpointDirFor(cwd), `${id}.json`);
+    if (existsSync(src)) renameSync(src, join(checkpointDirFor(cwd), `${id}.json.done`));
   } catch {
     /* ignore */
   }
@@ -535,8 +543,8 @@ export function markSessionDone(cwd: string, id: string): void {
 /** Mark a session as active again (rename `.json.done` back to `.json`). */
 export function markSessionActive(cwd: string, id: string): void {
   try {
-    const src = join(cwdDir(cwd), `${id}.json.done`);
-    if (existsSync(src)) renameSync(src, join(cwdDir(cwd), `${id}.json`));
+    const src = join(checkpointDirFor(cwd), `${id}.json.done`);
+    if (existsSync(src)) renameSync(src, join(checkpointDirFor(cwd), `${id}.json`));
   } catch {
     /* ignore */
   }
@@ -557,7 +565,7 @@ export function branchSession(cwd: string, sourceId: string): string | null {
     if (!/^[A-Za-z0-9_-]+$/.test(sourceId)) {
       return null;
     }
-    const dir = cwdDir(cwd);
+    const dir = checkpointDirFor(cwd);
     // Try active (.json) first, then done (.json.done).
     let src = join(dir, `${sourceId}.json`);
     if (!existsSync(src)) {

@@ -1,13 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { join } from 'node:path';
 import { Command, Option } from 'commander';
 import { Readable } from 'node:stream';
 import { freshConfigDir } from './helpers.js';
 import { registerRewindCommand } from '../src/commands/rewind.js';
-import { saveSession, sha256 } from '../src/lib/agent/checkpoint.js';
-import { getConfigPath } from '../src/lib/config.js';
+import { checkpointDirFor, saveSession } from '../src/lib/agent/checkpoint.js';
 
 async function runRewind(
   argv: string[],
@@ -48,7 +47,7 @@ function fp(name: string): string {
   return join(workDir, name);
 }
 function ckptDir(): string {
-  return join(dirname(getConfigPath()), 'checkpoints', sha256(workDir));
+  return checkpointDirFor(workDir);
 }
 function seed(task: string, changes: Array<Record<string, unknown>>): string {
   const id = saveSession({ cwd: workDir, task, changes: changes as never });

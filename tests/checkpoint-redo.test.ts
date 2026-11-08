@@ -15,6 +15,7 @@ import { freshConfigDir } from './helpers.js';
 import { __resetConfigForTests, getConfigPath } from '../src/lib/config.js';
 import {
   applyRedo,
+  checkpointDirFor,
   createRunRecorder,
   listSessions,
   loadSession,
@@ -45,7 +46,7 @@ afterEach(() => {
 });
 
 const fp = (name: string): string => join(workDir, name);
-const ckptDir = (): string => join(dirname(getConfigPath()), 'checkpoints', sha256(workDir));
+const ckptDir = (): string => checkpointDirFor(workDir);
 const ch = (path: string, op: 'create' | 'modify' | 'delete', before: string | null, after: string): FileChange => ({
   path,
   op,

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
-import { ghAuthed, ghAvailable, ghPrCreate } from '../src/lib/gh.js';
+import { buildCmdCommandLine, ghAuthed, ghAvailable, ghPrCreate, resolveGhCommand } from '../src/lib/gh.js';
 
 /**
  * H13 - the real `src/lib/gh.ts` runs here, against a fake `gh` binary on
@@ -134,5 +134,85 @@ describe('gh (real module, fake binary)', () => {
   test('ghPrCreate falls back to the spawn error message with empty stderr', () => {
     process.env.GH_FAKE_MODE = 'pr-fail-empty';
     expect(() => ghPrCreate({ cwd: binDir, title: 'T', bodyFile })).toThrow(/Command failed/);
+  });
+});
+
+describe('resolveGhCommand (injected win32, runs on Linux)', () => {
+  const PATHEXT = '.COM;.EXE;.BAT;.CMD';
+  const dirs: string[] = [];
+
+  // Files are planted with UPPERCASE extensions: the resolver walks PATHEXT
+  // as given (uppercase, as Windows reports it), and this Linux filesystem
+  // is case-sensitive - a lowercase gh.cmd would never match gh.CMD here.
+  // On Windows the same lookup succeeds because NTFS is case-insensitive;
+  // the walk order (dir-major, PATHEXT order) is what this pins.
+  function fakeBin(files: string[]): string {
+    const d = mkdtempSync(join(tmpdir(), 'spycode-gh-resolve-'));
+    dirs.push(d);
+    for (const f of files) {
+      writeFileSync(join(d, f), '');
+      chmodSync(join(d, f), 0o755);
+    }
+    return d;
+  }
+
+  afterEach(() => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  test('dir-major walk: a .cmd in the first dir beats an .exe later on PATH', () => {
+    const first = fakeBin(['gh.CMD']);
+    const second = fakeBin(['gh.EXE']);
+    expect(resolveGhCommand({ platform: 'win32', pathEnv: `${first};${second}`, pathext: PATHEXT })).toBe(
+      join(first, 'gh.CMD'),
+    );
+  });
+
+  test('extension order within a dir: .exe beats .cmd', () => {
+    const d = fakeBin(['gh.CMD', 'gh.EXE']);
+    expect(resolveGhCommand({ platform: 'win32', pathEnv: d, pathext: PATHEXT })).toBe(join(d, 'gh.EXE'));
+  });
+
+  test('null when no gh of any form is on PATH', () => {
+    const d = fakeBin(['not-gh.cmd']);
+    expect(resolveGhCommand({ platform: 'win32', pathEnv: d, pathext: PATHEXT })).toBeNull();
+    expect(resolveGhCommand({ platform: 'win32', pathEnv: '', pathext: PATHEXT })).toBeNull();
+  });
+
+  test('posix returns the bare name regardless of PATH', () => {
+    expect(resolveGhCommand({ platform: 'linux' })).toBe('gh');
+    expect(resolveGhCommand({ platform: 'darwin' })).toBe('gh');
+  });
+});
+
+describe('buildCmdCommandLine (cmd.exe quoting)', () => {
+  test('spaces are quoted, plain tokens stay bare of escapes', () => {
+    expect(
+      buildCmdCommandLine([
+        'C:\\Temp\\gh.CMD',
+        'pr',
+        'create',
+        '--title',
+        'Test PR',
+        '--body-file',
+        'C:\\Temp\\body.md',
+      ]),
+    ).toBe('"C:\\Temp\\gh.CMD" "pr" "create" "--title" "Test PR" "--body-file" "C:\\Temp\\body.md"');
+  });
+
+  test('a quote becomes \\", % and ^ get the cmd.exe escape', () => {
+    expect(buildCmdCommandLine(['a"b'])).toBe('"a\\"b"');
+    expect(buildCmdCommandLine(['100% ^x'])).toBe('"100^% ^^x"');
+  });
+
+  test('a trailing backslash doubles so it cannot swallow the closing quote', () => {
+    expect(buildCmdCommandLine(['C:\\dir\\'])).toBe('"C:\\dir\\\\"');
+  });
+
+  test('backslashes before a quote double (MSVC argv rules)', () => {
+    // Token: a + two backslashes + quote + b. The quoted form carries five
+    // backslashes before the quote, which MSVC reads as two literal
+    // backslashes plus a literal quote.
+    expect(buildCmdCommandLine(['a\\\\"b'])).toBe(`"a${'\\'.repeat(5)}"b"`);
   });
 });

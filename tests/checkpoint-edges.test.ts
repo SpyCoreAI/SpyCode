@@ -7,6 +7,7 @@ import { __resetConfigForTests, getConfigPath } from '../src/lib/config.js';
 import {
   applyRewind,
   branchSession,
+  checkpointDirFor,
   createRunRecorder,
   getResumeState,
   listSessions,
@@ -38,7 +39,7 @@ afterEach(() => {
 });
 
 const fp = (name: string): string => join(workDir, name);
-const ckptDir = (): string => join(dirname(getConfigPath()), 'checkpoints', sha256(workDir));
+const ckptDir = (): string => checkpointDirFor(workDir);
 const writeSessionFile = (name: string, data: unknown): void => {
   mkdirSync(ckptDir(), { recursive: true });
   writeFileSync(join(ckptDir(), name), typeof data === 'string' ? data : JSON.stringify(data));

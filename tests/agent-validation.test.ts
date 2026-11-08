@@ -500,10 +500,9 @@ describe('agent resume paths', () => {
   test('--resume with a non-slug session model prints it verbatim', async () => {
     await interruptedFirstRun();
     const { listSessions } = await import('../src/lib/agent/checkpoint.js');
-    const { getConfigPath } = await import('../src/lib/config.js');
-    const { sha256 } = await import('../src/lib/agent/checkpoint.js');
+    const { checkpointDirFor } = await import('../src/lib/agent/checkpoint.js');
     const session = listSessions(workDir)[0]!;
-    const file = join(dirname(getConfigPath()), 'checkpoints', sha256(workDir), `${session.id}.json`);
+    const file = join(checkpointDirFor(workDir), `${session.id}.json`);
     const data = JSON.parse(readFileSync(file, 'utf8')) as { resume: { model: string } };
     data.resume.model = 'custom-thing';
     writeFileSync(file, JSON.stringify(data));

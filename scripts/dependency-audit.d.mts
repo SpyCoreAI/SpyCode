@@ -9,3 +9,15 @@ export function evaluateAuditReport(data: unknown): {
   waived: number;
   blocked: 0;
 };
+
+export interface PnpmResolveOverrides {
+  platform?: NodeJS.Platform;
+  /** PATH value to search (win32 only). Defaults to `process.env.PATH`. */
+  pathEnv?: string;
+  /** PATHEXT value (win32 only). Defaults to `process.env.PATHEXT`. */
+  pathext?: string;
+}
+
+export function resolvePnpmCommand(overrides?: PnpmResolveOverrides): string | null;
+
+export function buildCmdCommandLine(tokens: string[]): string;

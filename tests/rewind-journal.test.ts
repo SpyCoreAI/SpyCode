@@ -52,6 +52,7 @@ import { freshConfigDir } from './helpers.js';
 import { runAgent } from '../src/lib/agent/loop.js';
 import {
   applyRewind,
+  checkpointDirFor,
   latestSession,
   planRewind,
   saveSession,
@@ -62,7 +63,6 @@ import {
 import { writeScope } from '../src/lib/agent/mcp-config.js';
 import {
   coerceValue,
-  getConfigPath,
   getConfigStore,
   isKnownKey,
   listKnownKeys,
@@ -788,7 +788,7 @@ describe('the workspace observer is opt-in, and it defaults to OFF', () => {
     // journal, and a user who merely UPDATES must be in the same position. This
     // is asserted ON DISK rather than from the in-memory record, because the
     // exposure the decision is about is a FILE.
-    const dir = join(dirname(getConfigPath()), 'checkpoints', sha256(cwd));
+    const dir = checkpointDirFor(cwd);
     expect(
       existsSync(dir),
       'no journal directory may be created for a run that only made opaque changes',
@@ -1026,8 +1026,8 @@ writeFileSync('ordinary.txt', 'after\\n');
       const session = latestSession(cwd);
       expect(session, 'and must be readable back').not.toBeNull();
 
-      const root = join(dirname(getConfigPath()), 'checkpoints');
-      const dir = join(root, sha256(cwd));
+      const root = dirname(checkpointDirFor(cwd));
+      const dir = checkpointDirFor(cwd);
       const file = join(dir, `${id}.json`);
       expect(existsSync(file), 'the journal file must exist at its own path').toBe(true);
 

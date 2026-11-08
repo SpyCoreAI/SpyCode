@@ -34,7 +34,7 @@
  */
 import { spawnSync } from 'node:child_process';
 import { accessSync, constants as fsConstants, existsSync, readFileSync } from 'node:fs';
-import { delimiter, join, dirname, resolve } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -75,14 +75,20 @@ function patchIsWired() {
  * directory by directory, extensions in PATHEXT order - and spawn the
  * resolved path; on POSIX the bare name works as-is. Null when no `pnpm`
  * of any form is on PATH.
+ *
+ * The overrides exist so the win32 walk is unit-testable on Linux: pass
+ * `platform: 'win32'` with a `pathEnv`/`pathext` and the same code runs
+ * against real temp dirs. Without them the live platform and environment
+ * are used.
  */
-function resolvePnpmCommand() {
-  if (process.platform !== 'win32') return 'pnpm';
-  const exts = (process.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD')
+export function resolvePnpmCommand(overrides = {}) {
+  const platform = overrides.platform ?? process.platform;
+  if (platform !== 'win32') return 'pnpm';
+  const exts = (overrides.pathext ?? process.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD')
     .split(';')
     .map((e) => e.trim())
     .filter((e) => e.length > 0);
-  for (const dir of (process.env.PATH ?? '').split(delimiter)) {
+  for (const dir of (overrides.pathEnv ?? process.env.PATH ?? '').split(';')) {
     if (dir.length === 0) continue;
     for (const ext of exts) {
       const candidate = join(dir, `pnpm${ext}`);
@@ -98,6 +104,37 @@ function resolvePnpmCommand() {
 }
 
 /**
+ * Quote one token for a `cmd.exe /d /s /c` command line - the same
+ * two-layer quoting as `src/lib/gh.ts` `buildCmdCommandLine` (this script
+ * is plain JS and cannot import the TS module, so the ~10 lines live in
+ * both places; keep them in agreement). `cmd.exe` expands `%VAR%` even
+ * inside quotes and `^` is its escape character; the child then parses
+ * with the MSVC argv rules, where a backslash before a quote - and a
+ * trailing run of backslashes - decides whether the quote is a delimiter.
+ * `"` is escaped as `\"` (cmd.exe passes it through, MSVC yields a
+ * literal quote); `$`, backtick and `\` are literal to cmd.exe and need
+ * no escaping.
+ */
+export function buildCmdCommandLine(tokens) {
+  return tokens.map(quoteCmdToken).join(' ');
+}
+
+function quoteCmdToken(token) {
+  // MSVC layer first: backslashes before a quote double, and a trailing run
+  // of backslashes doubles, so a trailing `\"` cannot swallow the closing quote.
+  let body = token.replace(/(\\*)"/g, (_m, slashes) => `${slashes}${slashes}\\"`);
+  body = body.replace(/(\\+)$/, '$1$1');
+  // cmd.exe layer: escape ^ first, so the caret introduced for % is not doubled.
+  body = body.replace(/\^/g, '^^').replace(/%/g, '^%');
+  return `"${body}"`;
+}
+
+/** True when a resolved binary must go through cmd.exe on Windows. */
+function needsCmdShell(resolved) {
+  return process.platform === 'win32' && /\.(?:cmd|bat)$/i.test(resolved);
+}
+
+/**
  * CLI entry point: run `pnpm audit --json` and judge it. Guarded so that
  * importing this module (the unit tests import `evaluateAuditReport`) does
  * NOT run the audit - only `node scripts/dependency-audit.mjs` does.
@@ -105,7 +142,19 @@ function resolvePnpmCommand() {
 function runFromCli() {
   const pnpm = resolvePnpmCommand();
   if (pnpm === null) fail('pnpm audit did not run: spawnSync pnpm ENOENT');
-  const res = spawnSync(pnpm, ['audit', '--json'], { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  // A resolved .cmd/.bat file cannot be spawned directly on Windows -
+  // libuv returns EINVAL (measured in branch CI: `spawnSync
+  // C:\...\pnpm.CMD EINVAL`). Run it via cmd.exe /d /s /c with a command
+  // line quoted by buildCmdCommandLine. `shell: true` is NOT the
+  // substitute: Node joins file and args with bare spaces
+  // (child_process.js normalizeSpawnArguments), so an argument with a
+  // space would split. A resolved .exe spawns directly, as before.
+  const useCmd = needsCmdShell(pnpm);
+  const file = useCmd ? (process.env.ComSpec ?? 'cmd.exe') : pnpm;
+  const argv = useCmd
+    ? ['/d', '/s', '/c', buildCmdCommandLine([pnpm, 'audit', '--json'])]
+    : ['audit', '--json'];
+  const res = spawnSync(file, argv, { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   if (res.error) fail(`pnpm audit did not run: ${res.error.message}`);
   const raw = res.stdout || '';
   if (!raw.trim()) {

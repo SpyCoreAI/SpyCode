@@ -15,7 +15,7 @@ import { describe, expect, test } from 'vitest';
  * import-analysis can only rewrite a literal (see
  * tests/resolved-install-audit.test.ts for why a computed specifier fails).
  */
-import { evaluateAuditReport } from '../scripts/dependency-audit.mjs';
+import { buildCmdCommandLine, evaluateAuditReport, resolvePnpmCommand } from '../scripts/dependency-audit.mjs';
 
 const SCRIPT = fileURLToPath(new URL('../scripts/dependency-audit.mjs', import.meta.url));
 
@@ -107,5 +107,60 @@ describe('dependency-audit.mjs end-to-end (fake pnpm, no network)', () => {
     const r = runWithFakePnpm('{"advisories":{}}');
     expect(r.status).toBe(0);
     expect(r.output).toMatch(/clean: 0 advisorie\(s\) scanned/);
+  });
+});
+
+describe('resolvePnpmCommand + buildCmdCommandLine (injected win32, runs on Linux)', () => {
+  const PATHEXT = '.COM;.EXE;.BAT;.CMD';
+
+  // Files are planted with UPPERCASE extensions: the resolver walks PATHEXT
+  // as given (uppercase, as Windows reports it), and this Linux filesystem
+  // is case-sensitive - a lowercase pnpm.cmd would never match pnpm.CMD here.
+  // On Windows the same lookup succeeds because NTFS is case-insensitive;
+  // the walk order (dir-major, PATHEXT order) is what this pins.
+  function fakeBin(files: string[]): string {
+    const d = mkdtempSync(join(tmpdir(), 'spycli-depaudit-resolve-'));
+    for (const f of files) {
+      writeFileSync(join(d, f), '');
+      chmodSync(join(d, f), 0o755);
+    }
+    return d;
+  }
+
+  test('dir-major walk: a .cmd in the first dir beats an .exe later on PATH', () => {
+    const first = fakeBin(['pnpm.CMD']);
+    const second = fakeBin(['pnpm.EXE']);
+    try {
+      expect(resolvePnpmCommand({ platform: 'win32', pathEnv: `${first};${second}`, pathext: PATHEXT })).toBe(
+        join(first, 'pnpm.CMD'),
+      );
+    } finally {
+      rmSync(first, { recursive: true, force: true });
+      rmSync(second, { recursive: true, force: true });
+    }
+  });
+
+  test('extension order within a dir: .exe beats .cmd; null when absent', () => {
+    const d = fakeBin(['pnpm.CMD', 'pnpm.EXE']);
+    const empty = fakeBin(['not-pnpm.CMD']);
+    try {
+      expect(resolvePnpmCommand({ platform: 'win32', pathEnv: d, pathext: PATHEXT })).toBe(join(d, 'pnpm.EXE'));
+      expect(resolvePnpmCommand({ platform: 'win32', pathEnv: empty, pathext: PATHEXT })).toBeNull();
+    } finally {
+      rmSync(d, { recursive: true, force: true });
+      rmSync(empty, { recursive: true, force: true });
+    }
+  });
+
+  test('posix returns the bare name', () => {
+    expect(resolvePnpmCommand({ platform: 'linux' })).toBe('pnpm');
+  });
+
+  test('the cmd.exe command line quotes spaces and escapes " % ^', () => {
+    expect(buildCmdCommandLine(['C:\\Temp\\pnpm.CMD', 'audit', '--json'])).toBe(
+      '"C:\\Temp\\pnpm.CMD" "audit" "--json"',
+    );
+    expect(buildCmdCommandLine(['a"b'])).toBe('"a\\"b"');
+    expect(buildCmdCommandLine(['100% ^x'])).toBe('"100^% ^^x"');
   });
 });
