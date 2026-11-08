@@ -3,7 +3,7 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'n
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
-import { freshConfigDir } from './helpers.js';
+import { freshConfigDir, isR2Url } from './helpers.js';
 
 interface MockResp {
   statusCode: number;
@@ -138,7 +138,7 @@ describe('spycore image', () => {
           { type: 'done' },
         ]);
       }
-      if (url.includes('r2.example.com')) {
+      if (isR2Url(url)) {
         downloadInits.push(init as unknown as Record<string, unknown>);
         return binaryResp(png);
       }
@@ -174,7 +174,7 @@ describe('spycore image', () => {
           { type: 'done' },
         ]);
       }
-      if (url.includes('r2.example.com')) {
+      if (isR2Url(url)) {
         return binaryResp(png);
       }
       throw new Error(`unexpected ${url}`);
@@ -210,7 +210,7 @@ describe('spycore image', () => {
           { type: 'done' },
         ]);
       }
-      if (url.includes('r2.example.com')) {
+      if (isR2Url(url)) {
         return binaryResp(png);
       }
       throw new Error(`unexpected ${url}`);
@@ -317,7 +317,7 @@ describe('spycore image', () => {
           { type: 'done' },
         ]);
       }
-      if (url.includes('r2.example.com')) {
+      if (isR2Url(url)) {
         return binaryResp(png);
       }
       throw new Error(`unexpected ${url}`);
@@ -346,7 +346,7 @@ describe('spycore image', () => {
           { type: 'done' },
         ]);
       }
-      if (url.includes('r2.example.com')) {
+      if (isR2Url(url)) {
         return binaryResp(png);
       }
       throw new Error(`unexpected ${url}`);
@@ -386,7 +386,7 @@ describe('spycore image', () => {
           { type: 'done' },
         ]);
       }
-      if (url.includes('r2.example.com')) {
+      if (isR2Url(url)) {
         return binaryResp(png);
       }
       throw new Error(`unexpected ${url}`);
@@ -417,7 +417,7 @@ describe('spycore image', () => {
           { type: 'done' },
         ]);
       }
-      if (url.includes('r2.example.com')) {
+      if (isR2Url(url)) {
         return binaryResp(png);
       }
       throw new Error(`unexpected ${url}`);
@@ -444,7 +444,7 @@ describe('spycore image', () => {
           { type: 'done' },
         ]);
       }
-      if (url.includes('r2.example.com')) {
+      if (isR2Url(url)) {
         return binaryResp(jpeg, 'image/jpeg');
       }
       throw new Error(`unexpected ${url}`);
@@ -479,7 +479,7 @@ describe('spycore image', () => {
           { type: 'done' },
         ]);
       }
-      if (url.includes('r2.example.com')) {
+      if (isR2Url(url)) {
         return binaryResp(png);
       }
       throw new Error(`unexpected ${url}`);

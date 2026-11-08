@@ -51,9 +51,18 @@ let configDir: string;
 let cwd: string;
 let scriptDir: string;
 
-/** Quote for shell: hooks run via `spawn(command, {shell: true})`. */
+/**
+ * Quote for shell: hooks run via `spawn(command, {shell: true})`. Every
+ * argument is wrapped in double quotes with `"`, `$`, backtick, and `\`
+ * escaped, so an argument can never break out of its quotes or trigger
+ * command substitution - it always arrives as one literal argument.
+ */
+function shellQuote(arg: string): string {
+  return `"${arg.replace(/(["$`\\])/g, '\\$1')}"`;
+}
+
 function nodeCmd(script: string, ...args: string[]): string {
-  return [`"${process.execPath}"`, `"${script}"`, ...args.map((a) => `"${a}"`)].join(' ');
+  return [shellQuote(process.execPath), shellQuote(script), ...args.map(shellQuote)].join(' ');
 }
 
 function writeScript(name: string, source: string): string {
@@ -243,6 +252,32 @@ describe('hook firing + stdin payload', () => {
     expect(existsSync(marker)).toBe(false);
     await fireHookEvent(s, 'pre-tool', { tool: { name: 'glob', args: '{}' } });
     expect(existsSync(marker)).toBe(true);
+  });
+});
+
+// ───────────────────────── nodeCmd shell quoting ────────────────────────────
+
+describe('nodeCmd shell quoting', () => {
+  test('a hostile argument arrives intact as one argument; nothing executes', async () => {
+    const echo = writeScript(
+      'echo-arg.js',
+      `require('fs').writeFileSync(process.argv[2], process.argv[3]);`,
+    );
+    const outFile = join(scriptDir, 'arg.txt');
+    // Quote break-out, command substitution, backtick substitution, and a
+    // trailing backslash: with the old bare double quotes each of these
+    // would run a `touch` in the hook cwd instead of staying literal.
+    const hostile = 'a"; touch pwned0; echo "b$(touch pwned1)`touch pwned2`c\\d';
+    writeGlobalHooks([
+      { event: 'session-start', command: nodeCmd(echo, outFile, hostile) },
+    ]);
+    const { loadHookSession, fireHookEvent } = await import('../src/lib/hooks.js');
+    const s = await loadHookSession(cwd);
+    await fireHookEvent(s, 'session-start');
+    expect(readFileSync(outFile, 'utf8')).toBe(hostile);
+    for (const name of ['pwned0', 'pwned1', 'pwned2']) {
+      expect(existsSync(join(cwd, name))).toBe(false);
+    }
   });
 });
 

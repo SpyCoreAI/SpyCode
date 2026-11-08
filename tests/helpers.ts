@@ -40,6 +40,20 @@ export function jsonResp(status: number, body: unknown): MockResp {
   return { statusCode: status, headers: {}, body: { json: async () => body } };
 }
 
+/**
+ * True only when the URL's host is exactly r2.example.com. A substring
+ * check (`url.includes('r2.example.com')`) would also match lookalike
+ * hosts such as r2.example.com.evil.test or notr2.example.com, so mock
+ * fetch handlers must route on this, never on a substring.
+ */
+export function isR2Url(url: string): boolean {
+  try {
+    return new URL(url).hostname === 'r2.example.com';
+  } catch {
+    return false;
+  }
+}
+
 export function sseResp(events: Array<Record<string, unknown>>): MockResp {
   const buf = Buffer.from(events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join(''));
   return {

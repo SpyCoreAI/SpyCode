@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
-import { freshConfigDir } from './helpers.js';
+import { freshConfigDir, isR2Url } from './helpers.js';
 
 interface MockResp {
   statusCode: number;
@@ -267,7 +267,7 @@ describe('files show', () => {
           },
         });
       }
-      if (url.includes('r2.example.com')) {
+      if (isR2Url(url)) {
         return streamResp(big);
       }
       throw new Error(`unexpected ${url}`);
@@ -279,7 +279,7 @@ describe('files show', () => {
     const preview = out.split('--- preview ---')[1] ?? '';
     expect(preview.length).toBeLessThanOrEqual(8192 + 16); // 8 KB + framing
     // The presigned-URL fetch follows redirects like a normal client.
-    const r2 = capturedInits.find((c) => c.url.includes('r2.example.com'));
+    const r2 = capturedInits.find((c) => isR2Url(c.url));
     expect(r2?.init.maxRedirections).toBe(5);
   });
 });
@@ -315,7 +315,7 @@ describe('files download', () => {
           },
         });
       }
-      if (url.includes('r2.example.com')) {
+      if (isR2Url(url)) {
         return streamResp(payload);
       }
       throw new Error(`unexpected ${url}`);
@@ -326,8 +326,39 @@ describe('files download', () => {
     expect(got.equals(payload)).toBe(true);
     // The presigned-URL fetch follows redirects like a normal client
     // (presigned S3/R2 URLs 302 to the object).
-    const r2 = capturedInits.find((c) => c.url.includes('r2.example.com'));
+    const r2 = capturedInits.find((c) => isR2Url(c.url));
     expect(r2?.init.maxRedirections).toBe(5);
+  });
+
+  test('a lookalike R2 host is NOT treated as the presigned-URL host', async () => {
+    const payload = Buffer.from('hello world');
+    responder = (url, init) => {
+      if (init.method === 'GET' && url.includes('/api/files/file_1')) {
+        return jsonResp(200, {
+          success: true,
+          data: {
+            id: 'file_1',
+            filename: 'hello.txt',
+            mimeType: 'text/plain',
+            size: payload.length,
+            // Suffix lookalike: a substring check would route this to the
+            // R2 branch and serve the payload; the anchored host check
+            // must not.
+            url: 'https://r2.example.com.evil.test/hello.txt?sig=abc',
+            createdAt: new Date().toISOString(),
+          },
+        });
+      }
+      if (isR2Url(url)) {
+        return streamResp(payload);
+      }
+      throw new Error(`unexpected ${url}`);
+    };
+    const out = join(workDir, 'hello.txt');
+    await expect(runCli(['download', 'file_1', '--output', out, '--force'])).rejects.toThrow(
+      /unexpected/,
+    );
+    expect(existsSync(out)).toBe(false);
   });
 
   test('refuses to overwrite without --force in non-TTY', async () => {
@@ -404,6 +435,15 @@ describe('files delete', () => {
 });
 
 describe('files lib helpers', () => {
+  test('isR2Url matches only the exact R2 host', () => {
+    expect(isR2Url('https://r2.example.com/hello.txt?sig=abc')).toBe(true);
+    expect(isR2Url('https://r2.example.com.evil.test/hello.txt')).toBe(false);
+    expect(isR2Url('https://notr2.example.com/hello.txt')).toBe(false);
+    expect(isR2Url('https://sub.r2.example.com/hello.txt')).toBe(false);
+    expect(isR2Url('https://r2.example.com@evil.test/hello.txt')).toBe(false);
+    expect(isR2Url('not a url')).toBe(false);
+  });
+
   test('detectMime falls back to octet-stream for unknown', async () => {
     const { detectMime } = await import('../src/lib/files.js');
     expect(detectMime('thing.pdf')).toBe('application/pdf');

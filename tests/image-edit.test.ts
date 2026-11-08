@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
-import { freshConfigDir } from './helpers.js';
+import { freshConfigDir, isR2Url } from './helpers.js';
 
 /**
  * `spycore image edit <file> -p "<instruction>"` - PHASE-1 1.3.
@@ -157,7 +157,7 @@ function happyResponder(
         { type: 'done' },
       ]);
     }
-    if (url.includes('r2.example.com')) {
+    if (isR2Url(url)) {
       return binaryResp(png);
     }
     throw new Error(`unexpected ${url}`);
@@ -458,7 +458,7 @@ describe('spycore image - generation grammar untouched', () => {
           { type: 'done' },
         ]);
       }
-      if (url.includes('r2.example.com')) {
+      if (isR2Url(url)) {
         return binaryResp(png);
       }
       throw new Error(`unexpected ${url}`);
