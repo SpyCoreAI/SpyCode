@@ -110,6 +110,7 @@ export {
   invisibleUnicodeNotice,
   type InvisibleHit,
   matchesCatastrophic,
+  screenWindowsCommand,
   MAX_SCREEN_DEPTH,
   SHELLS,
   COMMAND_CARRIERS,

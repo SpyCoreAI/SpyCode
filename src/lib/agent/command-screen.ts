@@ -24,6 +24,7 @@
  * file too; use `grep -a` or AST tooling.
  */
 import { screenShell } from './command-screen/engine.js';
+import { screenWindowsCommand } from './command-screen/windows.js';
 
 /**
  * A SMALL safety net (NOT a sandbox): hard-block obviously catastrophic
@@ -52,8 +53,15 @@ import { screenShell } from './command-screen/engine.js';
  * the primary control.
  */
 export function matchesCatastrophic(command: string): string | null {
-  return screenShell(command, 0);
+  // The POSIX screen models /bin/sh; the Windows screen models cmd.exe.
+  // `runShellCommand` spawns with `shell: true`, which is cmd.exe on
+  // Windows, so a command the POSIX screen cannot see (`rd /s /q`,
+  // `format C:`) is caught here instead. Both screens are pure and
+  // platform-independent; the order is fixed so the reason is stable.
+  return screenShell(command, 0) ?? screenWindowsCommand(command);
 }
+
+export { screenWindowsCommand } from './command-screen/windows.js';
 
 // The one expansion model lives in shell-parse.ts; re-exported here so the
 // screen's consumers keep a single import (unchanged from the single-file era).

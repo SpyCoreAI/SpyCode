@@ -436,6 +436,7 @@ describe('N34 public surface of the facades', () => {
         'invisibleUnicodeNotice',
         'matchesCatastrophic',
         'runShellCommand',
+        'screenWindowsCommand',
         'stripExpansions',
         'tailLines',
         'toolNames',

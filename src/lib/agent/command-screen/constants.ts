@@ -207,9 +207,17 @@ export const SAFE_DEVICE_TERMINALS = /^\/dev\/(?:console|tty[0-9]+|ttys[0-9]+|tt
  */
 export const DISK_IDENTIFIER = /^disk\d+(?:s\d+){0,2}$/;
 
-/** SSH keys, shell-init files and system auth databases - injection or lockout. */
+/** SSH keys, shell-init files, system auth databases, and credential files -
+ * injection or lockout. The `~/.aws/credentials`, `~/.gnupg/*`, `~/.npmrc`
+ * and `~/.netrc` entries close the credential-path gap: `run_command` is
+ * exempt from the secret guard, so this screen is the only thing standing
+ * between a redirect and a credential file. The `.env` alternative matches a
+ * file NAMED `.env` (or `.env.<suffix>`) in any directory - `foo/.env`,
+ * `.env.local` - not a file that merely ends in those letters (`notes.env`
+ * is an ordinary file). The home/`/etc` alternatives stay `^`-anchored;
+ * only the `.env` alternative is allowed to start after a `/`. */
 export const SENSITIVE_FILE =
-  /^(?:(?:~|\$\{?home\}?)\/\.(?:ssh(?:\/|$)|bash_profile|bash_login|bashrc|zshrc|zshenv|zprofile|profile|inputrc)|\/etc\/(?:passwd|shadow|sudoers))/i;
+  /(?:^(?:(?:~|\$\{?home\}?)\/\.(?:ssh(?:\/|$)|aws\/credentials|gnupg(?:\/|$)|npmrc|netrc|bash_profile|bash_login|bashrc|zshrc|zshenv|zprofile|profile|inputrc)|\/etc\/(?:passwd|shadow|sudoers))|(?:^|\/)\.env(?:\.[^/]*)?$)/i;
 
 /**
  * F-2c-43 - THE PROTECTED SET IS A LIST, AND A LIST MUST BE READABLE BY THE
