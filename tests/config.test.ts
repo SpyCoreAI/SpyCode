@@ -29,6 +29,17 @@ describe('config schema', () => {
     expect(() => coerceValue('defaultStream', 'maybe')).toThrow();
   });
 
+  test('coerceValue normalizes booleans for providerFallback (H11)', async () => {
+    const { coerceValue, getConfigStore } = await import('../src/lib/config.js');
+    expect(coerceValue('providerFallback', 'true')).toBe(true);
+    expect(coerceValue('providerFallback', 'false')).toBe(false);
+    expect(() => coerceValue('providerFallback', 'maybe')).toThrow();
+    // The stored value must be a real boolean: agent.ts checks `=== true`
+    // strictly, so the raw string "true" silently never enabled fallback.
+    getConfigStore().set('providerFallback', coerceValue('providerFallback', 'true'));
+    expect(getConfigStore().get('providerFallback')).toBe(true);
+  });
+
   test('coerceValue enforces theme enum', async () => {
     const { coerceValue } = await import('../src/lib/config.js');
     expect(coerceValue('theme', 'auto')).toBe('auto');

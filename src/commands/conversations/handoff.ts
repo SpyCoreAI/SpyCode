@@ -174,7 +174,7 @@ export function registerConversationsHandoffCommand(program: Command): void {
         // ── Fetch the FULL conversation (no limit - history must be complete). ──
         let convo: ConversationGetResp;
         try {
-          convo = await api.get<ConversationGetResp>(`/conversations/${id}`, {
+          convo = await api.get<ConversationGetResp>(`/conversations/${encodeURIComponent(id)}`, {
             apiUrlOverride: parentOpts.apiUrl,
           });
         } catch (err) {

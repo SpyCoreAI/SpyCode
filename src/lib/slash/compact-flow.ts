@@ -68,7 +68,7 @@ export async function runCompactFlow(opts: CompactFlowOpts): Promise<CompactFlow
     // Empty body → the server's default ratio (0.8). The endpoint is
     // uncharged; consuming it adds no charge.
     resp = await api.post<SummarizeResp>(
-      `/conversations/${opts.conversationId}/summarize`,
+      `/conversations/${encodeURIComponent(opts.conversationId)}/summarize`,
       { apiUrlOverride: opts.apiUrlOverride, body: {} },
     );
   } catch (err) {

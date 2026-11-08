@@ -39,7 +39,7 @@ export function registerConversationsDeleteCommand(program: Command): void {
           }
         }
 
-        await api.delete(`/conversations/${id}`, {
+        await api.delete(`/conversations/${encodeURIComponent(id)}`, {
           apiUrlOverride: parentOpts.apiUrl,
         });
         success(`Deleted ${id}`);

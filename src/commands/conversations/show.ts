@@ -50,7 +50,7 @@ export function registerConversationsShowCommand(program: Command): void {
 
         let convo: ConversationGetResp;
         try {
-          convo = await api.get<ConversationGetResp>(`/conversations/${id}`, {
+          convo = await api.get<ConversationGetResp>(`/conversations/${encodeURIComponent(id)}`, {
             apiUrlOverride: parentOpts.apiUrl,
           });
         } catch (err) {

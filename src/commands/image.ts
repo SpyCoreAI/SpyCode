@@ -440,7 +440,7 @@ export function registerImageCommand(program: Command): void {
         // hiccup must never cost the user their generated image.
         if (cmd.getOptionValueSource('style') === 'cli' && opts.style) {
           try {
-            await api.patch(`/conversations/${conversation.id}/settings`, {
+            await api.patch(`/conversations/${encodeURIComponent(conversation.id)}/settings`, {
               apiUrlOverride: parentOpts.apiUrl,
               body: { imageParams: { styleVariance: opts.style } },
             });

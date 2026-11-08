@@ -65,7 +65,7 @@ export function registerConversationsExportCommand(program: Command): void {
         const format = opts.format ?? 'markdown';
 
         const convo = await api.get<ConversationGetResp>(
-          `/conversations/${id}`,
+          `/conversations/${encodeURIComponent(id)}`,
           { apiUrlOverride: parentOpts.apiUrl },
         );
 

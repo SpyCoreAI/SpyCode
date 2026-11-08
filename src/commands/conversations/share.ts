@@ -84,7 +84,7 @@ export function registerConversationsShareCommand(program: Command): void {
 
         if (opts.revoke) {
           try {
-            await api.delete(`/conversations/${id}/share`, apiOpts);
+            await api.delete(`/conversations/${encodeURIComponent(id)}/share`, apiOpts);
           } catch (err) {
             fail(shareUnsupportedError(err, id));
           }
@@ -93,7 +93,7 @@ export function registerConversationsShareCommand(program: Command): void {
         }
 
         const convo = await api.get<ConversationGetResp>(
-          `/conversations/${id}`,
+          `/conversations/${encodeURIComponent(id)}`,
           apiOpts,
         );
 
@@ -102,7 +102,7 @@ export function registerConversationsShareCommand(program: Command): void {
 
         let created: ShareCreateResp;
         try {
-          created = await api.post<ShareCreateResp>(`/conversations/${id}/share`, {
+          created = await api.post<ShareCreateResp>(`/conversations/${encodeURIComponent(id)}/share`, {
             ...apiOpts,
             body,
           });

@@ -391,7 +391,7 @@ export async function runSlashCommand(
       if (!file) return { kind: 'save-usage' };
       try {
         const convo = await api.get<ConversationExportResp>(
-          `/conversations/${ctx.conversationId}`,
+          `/conversations/${encodeURIComponent(ctx.conversationId)}`,
           { apiUrlOverride: ctx.apiUrl },
         );
         const path = resolvePath(file);

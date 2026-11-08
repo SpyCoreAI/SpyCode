@@ -412,7 +412,7 @@ async function resolveConversationId(
       // The GET endpoint returns { conversation: {...}, messages: [...] }
       // wrapped in the standard envelope.
       const fetched = await api.get<{ id: string } | ConversationGetResp>(
-        `/conversations/${opts.conversation}`,
+        `/conversations/${encodeURIComponent(opts.conversation)}`,
         { apiUrlOverride: apiUrl },
       );
       const id = (fetched as { id?: string }).id ?? opts.conversation;

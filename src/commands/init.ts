@@ -1,4 +1,4 @@
-import { existsSync, unlinkSync } from 'node:fs';
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { Command, Option } from 'commander';
 import { CHANGELOG_FILE, initChangelogFile } from '../lib/codebase-changelog.js';
@@ -144,18 +144,35 @@ export function registerInitCommand(program: Command): void {
             outcomes.push({ file: target.file, path: target.path, existed, action: 'skipped' });
             continue;
           }
+          // Force-overwrite reuses the SAME generator: remove first so the
+          // never-overwrite init function writes a fresh file. The original
+          // bytes are held in memory first - if generation throws (disk
+          // error, bad template), the original is restored byte-for-byte
+          // instead of being lost with only a warning to show for it.
+          let backup: Buffer | null = null;
           if (existed && force) {
-            // Force-overwrite reuses the SAME generator: remove first so the
-            // never-overwrite init function writes a fresh file.
+            backup = readFileSync(target.path);
             unlinkSync(target.path);
           }
-          const result = await target.generate();
-          outcomes.push({
-            file: target.file,
-            path: result.path,
-            existed,
-            action: existed ? 'overwritten' : result.created ? 'created' : 'skipped',
-          });
+          try {
+            const result = await target.generate();
+            outcomes.push({
+              file: target.file,
+              path: result.path,
+              existed,
+              action: existed ? 'overwritten' : result.created ? 'created' : 'skipped',
+            });
+          } catch (genErr) {
+            if (backup !== null) {
+              try {
+                writeFileSync(target.path, backup);
+              } catch {
+                // Restoration failed too - the original error below is
+                // still reported; there is nothing further to recover.
+              }
+            }
+            throw genErr;
+          }
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           outcomes.push({ file: target.file, path: target.path, existed, action: 'skipped', error: message });

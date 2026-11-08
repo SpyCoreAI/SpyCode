@@ -766,7 +766,8 @@ export function coerceValue(
     case 'autoChangelog':
     case 'autoRefreshGuide':
     case 'agentWebTools':
-    case 'agentObserveWorkspace': {
+    case 'agentObserveWorkspace':
+    case 'providerFallback': {
       if (raw === 'true') return true;
       if (raw === 'false') return false;
       throw new Error(`${key} must be 'true' or 'false', got: ${raw}`);
