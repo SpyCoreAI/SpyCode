@@ -94,4 +94,15 @@ jobs:
         run: |
           printf '%s' "$IDENTITY_DENYLIST" > "$RUNNER_TEMP/identity-denylist.txt"
           echo "IDENTITY_DENYLIST_FILE=$RUNNER_TEMP/identity-denylist.txt" >> "$GITHUB_ENV"
-      - run: sh scripts/pack-verify.sh
+      # Fork-safe denylist path (precondition 1): GitHub does not give the
+      # secret to fork PRs, so the full identity scan cannot run there and
+      # the full pack-verify run below would fail closed. On fork PRs only,
+      # run it in public mode instead: the scan still runs, with the public
+      # format list only, and the stage reports PARTIAL in plain words -
+      # never a clean full scan. The full scan runs on push to main and on
+      # internal PRs, where the secret is available. A hit in either mode
+      # fails the job; the guard is never weakened to make fork CI green.
+      - name: Pack-verify (full artifact check)
+        env:
+          PACK_VERIFY_PUBLIC_ONLY: ${{ github.event.pull_request.head.repo.fork == 'true' }}
+        run: sh scripts/pack-verify.sh
