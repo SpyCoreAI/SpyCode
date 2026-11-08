@@ -290,6 +290,37 @@ scan_verdict() { # $1 = grep rc
   esac
 }
 
+# A blocked-string hit report that can NEVER disclose what was matched.
+# grep's output lines are `path:line:content`, and the content BY DEFINITION
+# contains a denylisted string - printing it would publish exactly what the
+# scan exists to keep out of public CI logs. GitHub secret-masking cannot help:
+# the stored list holds regex patterns, not the literal matched text. So the
+# report carries only the file path and the match count per file, sorted so
+# the output is deterministic.
+hit_report() { # $1 = grep -rEn output
+  [ -n "$1" ] || return 0
+  printf '%s\n' "$1" | sed -E 's/:[0-9]+:.*$//' | sort | uniq -c | awk '{ c=$1; $1=""; sub(/^ /, ""); printf "  %s match(es) in %s\n", c, $0 }'
+}
+
+# The PUBLIC pattern list for fork runs: generic secret FORMAT shapes, every
+# one already public in this repo (src/lib/redact.ts documents them), never
+# identity strings. A fork PR cannot receive the private denylist, so this is
+# the only scan that can run there; it is PARTIAL by construction and the
+# stage says so. Each pattern requires a full credential-shaped token after
+# its prefix, so the pattern spellings as they appear in redact.ts itself do
+# NOT match (a `[` follows the prefix there) - pinned by self-test D14.
+public_patterns() { # $1 = destination
+  cat >"$1" <<'EOF'
+sk-[A-Za-z0-9_-]{20,}
+ghp_[A-Za-z0-9]{16,}
+gho_[A-Za-z0-9]{16,}
+github_pat_[A-Za-z0-9_]{16,}
+AKIA[0-9A-Z]{16}
+-----BEGIN (RSA |EC |OPENSSH |DSA |ED25519 |ENCRYPTED )?PRIVATE KEY-----
+EOF
+  [ -s "$1" ]
+}
+
 # ═══════════════════════════════════════════════════════════════════════════
 #  THE SELF-TEST - one control per INPUT FORM, in BOTH directions.
 #
@@ -402,6 +433,29 @@ bin/spycore.js')" 'README.md'
   st 'D6 grep rc=0 is a HIT' "$(scan_verdict 0)" 'hit'
   st 'D7 grep rc=1 is CLEAN' "$(scan_verdict 1)" 'clean'
   st 'D8  grep rc=2 is an ERROR, never CLEAN' "$(scan_verdict 2)" 'error'
+
+  # ── H-forms: a hit report must NEVER print matched content ───────────────
+  #  The matched line BY DEFINITION contains a denylisted string, so the
+  # report carries only the file path and the match count per file.
+  st 'D9  a hit report shows the path and count, never the matched line' \
+    "$(hit_report 'build/index.js:12:const k = '"'"'SENTINEL_MATCHED_CONTENT_XYZ'"'"'
+build/index.js:40:const j = '"'"'SENTINEL_MATCHED_CONTENT_XYZ'"'"'')" \
+    '  2 match(es) in build/index.js'
+  st 'D10  a hit report sorts per-file counts by path' \
+    "$(hit_report 'build/z.js:1:aaa
+build/a.js:2:bbb
+build/z.js:9:ccc')" \
+    '  1 match(es) in build/a.js
+  2 match(es) in build/z.js'
+  st 'D11  an empty hit report prints nothing' "$(hit_report '')" ''
+  st 'D12  the public pattern list is non-empty' \
+    "$(public_patterns "$T/pub.txt" && wc -l <"$T/pub.txt" | tr -d ' ')" '6'
+  printf '%s\n' 'const k = "github_pat_abcdefghijklmnopqrstuv";' >"$T/pub-hit.txt"
+  st 'D13  the public list catches a credential-shaped token' \
+    "$(grep -rEnIi -f "$T/pub.txt" "$T/pub-hit.txt" >/dev/null 2>&1 && echo hit || echo miss)" 'hit'
+  printf '%s\n' 'github_pat_[A-Za-z0-9_]{16,}' >"$T/pub-miss.txt"
+  st 'D14  the public list does NOT match its own spelling in redact.ts (no false positive on the shipped code)' \
+    "$(grep -rEnIi -f "$T/pub.txt" "$T/pub-miss.txt" >/dev/null 2>&1 && echo hit || echo miss)" 'miss'
 
   # ── C-forms: the case counter itself ─────────────────────────────────────
   #  The counter is the mechanism that makes every case above falsifiable, so
@@ -541,6 +595,15 @@ fi
 # silently pass for want of a list.
 DENYLIST="${IDENTITY_DENYLIST_FILE:-}"
 PATTERNS="$WORK/patterns.txt"
+# Fork-safe path (precondition 1): GitHub does not give the private denylist
+# secret to fork PRs, so the full scan cannot run there. When
+# PACK_VERIFY_PUBLIC_ONLY=1 (wired in ci.yml only for fork PRs) and no private
+# list is supplied, stage 3 runs the PUBLIC format scan above instead of
+# failing the job - and says PARTIAL in plain words, so a fork run can never
+# be mistaken for a clean full scan. The full scan still runs on internal
+# branches and on push to main, where the secret is available. The guard is
+# never weakened to make fork CI green: a hit in EITHER scan fails the job,
+# and without the flag a missing list still fails closed below.
 if load_denylist "$DENYLIST" "$PATTERNS"; then
   set +e
   HITS="$(grep -rEnIi -f "$PATTERNS" "$PKGDIR")"
@@ -548,11 +611,26 @@ if load_denylist "$DENYLIST" "$PATTERNS"; then
   set -e
   case "$(scan_verdict "$rc")" in
     hit)
-      bad "blocked-string hit inside the packed artifact:"; printf '%s\n' "$HITS" | head -20 ;;
+      bad "blocked-string hit inside the packed artifact:"; hit_report "$HITS" ;;
     error)
       bad "blocked-string scan read error (grep exit $rc) - a scanned path is missing" ;;
     *)
       ok "blocked-string scan clean across all $COUNT packed files" ;;
+  esac
+elif [ "${PACK_VERIFY_PUBLIC_ONLY:-}" = "1" ] || [ "${PACK_VERIFY_PUBLIC_ONLY:-}" = "true" ]; then
+  say "[pack-verify] PARTIAL identity scan: no private denylist in this run (fork PRs never receive the secret) - scanning with the public format list only. This does NOT certify the artifact free of denylisted identity strings; the full scan runs on internal branches and on merge to main."
+  public_patterns "$PATTERNS"
+  set +e
+  HITS="$(grep -rEnIi -f "$PATTERNS" "$PKGDIR")"
+  rc=$?
+  set -e
+  case "$(scan_verdict "$rc")" in
+    hit)
+      bad "PARTIAL scan hit: a generic secret format was found inside the packed artifact:"; hit_report "$HITS" ;;
+    error)
+      bad "PARTIAL scan read error (grep exit $rc) - a scanned path is missing" ;;
+    *)
+      ok "PARTIAL identity scan clean across all $COUNT packed files (public format list only - full scan runs on merge)" ;;
   esac
 else
   bad "identity denylist not supplied (IDENTITY_DENYLIST_FILE missing or empty) - refusing to report a clean scan"
