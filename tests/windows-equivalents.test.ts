@@ -119,6 +119,23 @@ function activeCount(type: string): number {
  * it (the 3f comment records the libuv EOF timer on a Windows pipe as
  * 50ms, the drain as 200ms, `STDIN_CLOSE_WAIT_MS` as 500ms). A handle
  * that has not drained in 2s is, for this test's purposes, a leak.
+ *
+ * PHASE 3j - the bound above was FALSIFIED on Windows (branch CI run
+ * 42514127594, head 24cc5b6): the after-quiescence dump ~2s after
+ * settle is byte-identical to after-settle, still 5 PipeWraps with the
+ * same destroyed+pending socket. The drain is NOT slow; it is gated on
+ * the survivor, which holds the stdin read end open and never reads,
+ * so the `end()` shutdown never completes until the survivor dies.
+ * The production fix is in `src/lib/hooks.ts`: the payload is sent with
+ * `write()` instead of `end()`, so no shutdown request is ever started
+ * and there is nothing to stall - the handle retires on the next loop
+ * turn on every platform. This wait stays as a guard (it returns at
+ * once when the fix works) and still fails a live leak. The 'hooks: a
+ * hook that reads stdin to EOF' test below pins the other half of the
+ * fix: write()+destroy() must still deliver the full payload followed
+ * by EOF to a reading hook. Windows CI is the verdict for the survivor
+ * test - on Linux the old code drained in ~2ms too, so no Linux test
+ * can discriminate the two teardown paths.
  */
 const PIPE_QUIESCENCE_TIMEOUT_MS = 2000;
 const PIPE_QUIESCENCE_POLL_MS = 10;
@@ -463,9 +480,58 @@ child.unref();
     // 'pipe census quiescence' tests below - so this cannot mask one.
     // The 3h dumps above stay: after-settle is the evidence, this dump
     // is the drain.
+    // Phase 3j: the 3i wait was falsified on Windows (CI run 42514127594
+    // - after-quiescence byte-identical at 2s): the shutdown is gated on
+    // the survivor, not slow. The production fix is in src/lib/hooks.ts
+    // (write() instead of end(), so no shutdown request is ever
+    // started); this wait stays as a guard and returns at once when the
+    // fix works.
     const settledCount = await waitForPipeQuiescence(before);
     dumpPipeCensus('after-quiescence');
     expect(settledCount).toBe(before);
+  });
+
+  test('hooks: a hook that reads stdin to EOF still receives the full payload', async () => {
+    // Phase 3j regression test for the write()-instead-of-end() fix in
+    // src/lib/hooks.ts. Destroying the write end must still deliver the
+    // payload followed by EOF: a hook that reads stdin to 'end' receives
+    // the whole JSON payload and exits promptly. If EOF were never
+    // delivered the hook would run to its 5s cap and this test would
+    // fail on the elapsed time, not hang the suite.
+    const outFile = join(scriptDir, 'reader-got.txt');
+    const reader = writeScript(
+      'reader-hook.mjs',
+      `import { writeFileSync } from 'node:fs';\n` +
+        `let d = '';\n` +
+        `process.stdin.setEncoding('utf8');\n` +
+        `process.stdin.on('data', (c) => { d += c; });\n` +
+        `process.stdin.on('end', () => { writeFileSync(${JSON.stringify(outFile)}, d, 'utf8'); });\n`,
+    );
+    writeFileSync(
+      join(configDir, 'hooks.json'),
+      JSON.stringify({
+        hooks: [
+          {
+            event: 'prompt-submit',
+            command: nodeCmd(reader),
+            timeoutSeconds: 5,
+          },
+        ],
+      }),
+      'utf8',
+    );
+    const { loadHookSession, fireHookEvent } = await import('../src/lib/hooks.js');
+    const s = await loadHookSession(workDir);
+    const started = Date.now();
+    const r = await fireHookEvent(s, 'prompt-submit', { prompt: 'hello world' });
+    const elapsed = Date.now() - started;
+    expect(elapsed).toBeLessThan(1_500);
+    expect(r.notices.some((n) => n.includes('timed out'))).toBe(false);
+    expect(existsSync(outFile)).toBe(true);
+    const payload = JSON.parse(readFileSync(outFile, 'utf8')) as Record<string, unknown>;
+    expect(payload.event).toBe('prompt-submit');
+    expect(payload.prompt).toBe('hello world');
+    expect(typeof payload.sessionId).toBe('string');
   });
 
   test('hooks: settle on the hook PROCESS exiting, not on its pipes closing', async () => {

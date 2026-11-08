@@ -368,15 +368,43 @@ interface SpawnOutcome {
  * operative half: the count was IDENTICAL (exactly one PipeWrap over
  * baseline, three consecutive Windows runs) with the destroy at settle
  * (3d) and with it at the flush callback (3e). Destroy placement is not
- * the variable - on Windows the close itself does not complete inside
- * the drain window, so no placement of the destroy can retire the handle
- * before a census taken synchronously after settle. What settles this is
- * not a third destroy in a third spot: `settle` below waits for the
- * stdin socket's actual `'close'` (bounded by STDIN_CLOSE_WAIT_MS) before
- * resolving, so the resolved state is the retired state. The flush
- * destroy stays - it starts the close as early as possible - and the
- * settle-time destroy stays as the fallback for a write that never
- * flushes (hook exited first / EPIPE).
+ * the variable. The 3f fix - `settle` below waits for the stdin socket's
+ * actual `'close'` (bounded by STDIN_CLOSE_WAIT_MS) - was falsified the
+ * same way by branch CI run 42514127594: the after-quiescence census
+ * ~2s after settle is byte-identical to after-settle, still 5 PipeWraps
+ * with the same `[4] NEW Socket destroyed=true pending=true` line.
+ * `'close'` never fires on Windows because the thing that is pending is
+ * not the close: it is the shutdown `end()` started. `end()` asks libuv
+ * for a graceful shutdown (EOF) of the named pipe, and on Windows that
+ * shutdown completes only once the peer has read the buffered data. The
+ * survivor holds the read end open and never reads, so the shutdown
+ * never completes - not in 2s, not ever, until the survivor dies.
+ * `destroy()` cannot retire the handle while that shutdown is pending
+ * (the census still lists the PipeWrap AND the `SimpleShutdownWrap`
+ * after the destroy), and `unref()` does not release a pending request
+ * either: measured on Linux, a process with nothing ref'd but a pending
+ * pipe write is held alive until the peer exits (probe5b, exit 124
+ * under `timeout 5`). The destroyed socket is therefore a REAL
+ * loop-keeping resource, not a dead one - excluding it from the census
+ * would hide a genuine hang (a one-shot CLI firing such a hook would
+ * not exit until the survivor dies), and waiting longer is unbounded
+ * (the stall is gated on the survivor's lifetime, not on a duration).
+ *
+ * The fix is to never start the shutdown: the payload is sent with
+ * `write()`, and the socket is destroyed in the write callback, exactly
+ * as before - but with no `end()` there is no shutdown request to get
+ * stuck, so the handle retires on the next loop turn on every platform
+ * (measured on Linux: no `SimpleShutdownWrap` ever appears, `'close'`
+ * ~2ms after the destroy, census at baseline by 100ms, 3/3 runs).
+ * Closing the write end still delivers EOF to the reader: a hook that
+ * reads stdin to end receives the full payload followed by EOF and
+ * exits promptly (measured: 5047/5047 bytes, exact match, reader exit
+ * at 344ms; and the pinned stdin-payload test in `tests/hooks.test.ts`
+ * reads stdin to `'end'` on all five events). The flush destroy stays -
+ * it starts the close as early as possible - and the settle-time
+ * destroy stays as the fallback for a write that never flushes (hook
+ * exited first / EPIPE), and the bounded `'close'` wait in `settle`
+ * stays as the fallback for a close that is slow for any other reason.
  *
  * Stdin is the one pipe this is safe for. The destroy-vs-unref reasoning
  * in `lib/child-stdio.ts` is about the READ direction - stdout/stderr,
@@ -556,10 +584,12 @@ function runHookCommand(
       stdinClosed = true;
     });
     try {
-      // Retire the stdin write end as soon as the payload has flushed -
-      // see destroyHookStdin: a destroy at settle lands too late for the
-      // handle census on Windows, where the socket does not self-close.
-      child.stdin?.end(payload, () => destroyHookStdin(child));
+      // Send the payload with write(), NOT end(): end() starts a graceful
+      // shutdown that on Windows completes only once the peer reads the
+      // buffered data, and a survivor that never reads stalls it forever
+      // (see destroyHookStdin). write() + destroy() in the flush callback
+      // delivers the payload followed by EOF with no shutdown request.
+      child.stdin?.write(payload, () => destroyHookStdin(child));
     } catch {
       /* the child may have exited before reading stdin - fine */
     }
