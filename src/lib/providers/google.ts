@@ -113,13 +113,20 @@ export class GoogleProvider implements Provider {
     try {
       res = await request(url, { method: 'POST', headers, body, signal: params.signal });
     } catch (err) {
-      if (params.signal?.aborted) throw new SpycoreCliError('Cancelled', EXIT_USER_ERROR);
+      if (params.signal?.aborted) {
+        session.messages.pop();
+        throw new SpycoreCliError('Cancelled', EXIT_USER_ERROR);
+      }
+      session.messages.pop();
       yield { type: 'error', message: connectionErrorMessage(err, url) };
       return;
     }
 
     if (res.statusCode >= 400) {
       const detail = await readErrorDetail(res.body);
+      // No assistant reply was produced: roll the user message back
+      // rather than leave a dangling user turn in the history.
+      session.messages.pop();
       yield {
         type: 'error',
         message: httpErrorMessage(res.statusCode, params.model, this.baseURL, detail),
@@ -131,15 +138,32 @@ export class GoogleProvider implements Provider {
     let sawUsage = false;
     let usageInput = 0;
     let usageOutput = 0;
+    /**
+     * A turn that ends in error must still leave the history alternating:
+     * keep the partial assistant reply when one exists, otherwise take
+     * the user message back. Without this the next streamChat on the
+     * session sends two user messages in a row and the API rejects it.
+     */
+    const settleErroredTurn = (): void => {
+      if (assistantText.length > 0) {
+        session.messages.push({ role: 'assistant', content: assistantText });
+      } else {
+        session.messages.pop();
+      }
+    };
     try {
       for await (const event of parseSSEStream(res.body as AsyncIterable<Buffer>)) {
-        if (params.signal?.aborted) throw new SpycoreCliError('Cancelled', EXIT_USER_ERROR);
+        if (params.signal?.aborted) {
+          settleErroredTurn();
+          throw new SpycoreCliError('Cancelled', EXIT_USER_ERROR);
+        }
         const data = event.data;
         if (typeof data !== 'object' || data === null) continue;
         const chunk = data as GoogleStreamData;
         // A mid-stream error object ends the turn.
         if (chunk.error) {
           const msg = typeof chunk.error.message === 'string' ? chunk.error.message : 'model stream error';
+          settleErroredTurn();
           yield { type: 'error', message: `Model endpoint reported an error: ${msg}` };
           return;
         }
@@ -163,7 +187,11 @@ export class GoogleProvider implements Provider {
         }
       }
     } catch (err) {
-      if (params.signal?.aborted) throw new SpycoreCliError('Cancelled', EXIT_USER_ERROR);
+      if (params.signal?.aborted) {
+        settleErroredTurn();
+        throw new SpycoreCliError('Cancelled', EXIT_USER_ERROR);
+      }
+      settleErroredTurn();
       yield { type: 'error', message: `Model stream interrupted: ${errText(err)}` };
       return;
     }

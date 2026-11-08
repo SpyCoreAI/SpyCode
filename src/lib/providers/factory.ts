@@ -23,11 +23,15 @@ export async function createByokProvider(config: ByokConfig): Promise<Provider> 
       const { GoogleProvider } = await import('./google.js');
       // If OAuth refresh token is present, get a fresh access token.
       // Otherwise use the API key.
-      if (config.oauthRefreshToken && config.oauthClientId) {
+      if (config.oauthRefreshToken) {
         const { refreshAccessToken, googleOAuthConfig } = await import('../oauth.js');
-        // Use a dummy port - we only need the token URL and client ID for refresh.
-        const oauthConfig = googleOAuthConfig(0);
-        oauthConfig.clientId = config.oauthClientId;
+        // The STORED client id first - it is the id the refresh token was
+        // issued against, and a stored provider must work without
+        // SPYCORE_GOOGLE_CLIENT_ID on later runs. The env var is the
+        // fallback for providers stored before the id was kept; with
+        // neither, googleOAuthConfig throws the setup hint. Use a dummy
+        // port - we only need the token URL and client ID for refresh.
+        const oauthConfig = googleOAuthConfig(0, config.oauthClientId);
         try {
           const tokens = await refreshAccessToken(oauthConfig, config.oauthRefreshToken);
           return new GoogleProvider({

@@ -26,4 +26,15 @@ describe('googleOAuthConfig', () => {
     expect(cfg.tokenUrl.length).toBeGreaterThan(0);
     expect(cfg.scopes.length).toBeGreaterThan(0);
   });
+
+  test('an explicitly passed client id works with no env var (H7)', () => {
+    const cfg = googleOAuthConfig(0, '  stored-client-id  ');
+    expect(cfg.clientId).toBe('stored-client-id'); // trimmed
+    expect(cfg.redirectPort).toBe(0);
+  });
+
+  test('an explicitly passed client id wins over the env var (H7)', () => {
+    process.env[ENV_KEY] = 'env-client-id';
+    expect(googleOAuthConfig(0, 'stored-client-id').clientId).toBe('stored-client-id');
+  });
 });

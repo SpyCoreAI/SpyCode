@@ -104,13 +104,22 @@ export class OpenAICompatibleProvider implements Provider {
     try {
       res = await request(url, { method: 'POST', headers, body, signal: params.signal });
     } catch (err) {
-      if (params.signal?.aborted) throw new SpycoreCliError('Cancelled', EXIT_USER_ERROR);
+      if (params.signal?.aborted) {
+        history.pop();
+        throw new SpycoreCliError('Cancelled', EXIT_USER_ERROR);
+      }
+      history.pop();
       yield { type: 'error', message: connectionErrorMessage(err, url) };
       return;
     }
 
     if (res.statusCode >= 400) {
       const detail = await readErrorDetail(res.body);
+      // No assistant reply was produced: roll the user message back
+      // rather than leave a dangling user turn in the history. OpenAI
+      // tolerates consecutive user messages, so this is consistency with
+      // the Anthropic/Google adapters, not a wire requirement.
+      history.pop();
       yield {
         type: 'error',
         message: httpErrorMessage(res.statusCode, params.model, this.baseURL, detail),
@@ -122,9 +131,24 @@ export class OpenAICompatibleProvider implements Provider {
     let sawUsage = false;
     let usageInput = 0;
     let usageOutput = 0;
+    /**
+     * A turn that ends in error must still leave the history alternating:
+     * keep the partial assistant reply when one exists, otherwise take
+     * the user message back.
+     */
+    const settleErroredTurn = (): void => {
+      if (assistantText.length > 0) {
+        history.push({ role: 'assistant', content: assistantText });
+      } else {
+        history.pop();
+      }
+    };
     try {
       for await (const event of parseSSEStream(res.body as AsyncIterable<Buffer>)) {
-        if (params.signal?.aborted) throw new SpycoreCliError('Cancelled', EXIT_USER_ERROR);
+        if (params.signal?.aborted) {
+          settleErroredTurn();
+          throw new SpycoreCliError('Cancelled', EXIT_USER_ERROR);
+        }
         const data = event.data;
         // OpenAI terminates the stream with a literal `data: [DONE]` (a raw
         // string, so parseSSEStream surfaces it verbatim rather than as JSON).
@@ -148,7 +172,11 @@ export class OpenAICompatibleProvider implements Provider {
         }
       }
     } catch (err) {
-      if (params.signal?.aborted) throw new SpycoreCliError('Cancelled', EXIT_USER_ERROR);
+      if (params.signal?.aborted) {
+        settleErroredTurn();
+        throw new SpycoreCliError('Cancelled', EXIT_USER_ERROR);
+      }
+      settleErroredTurn();
       yield { type: 'error', message: `Model stream interrupted: ${errText(err)}` };
       return;
     }

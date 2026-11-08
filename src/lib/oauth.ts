@@ -38,10 +38,16 @@ export interface OAuthConfig {
   redirectPort: number;
 }
 
-/** Google OAuth config. Client ID must be set via SPYCORE_GOOGLE_CLIENT_ID env var. */
-export function googleOAuthConfig(port: number): OAuthConfig {
-  const clientId = process.env.SPYCORE_GOOGLE_CLIENT_ID?.trim();
-  if (!clientId) {
+/**
+ * Google OAuth config. Client ID comes from `SPYCORE_GOOGLE_CLIENT_ID` env
+ * var, or from an explicitly passed `clientId` - a stored provider's
+ * `oauthClientId`, which exists precisely so the provider works without the
+ * env var on later runs. An explicit id wins over the env var; with neither,
+ * this throws the setup hint.
+ */
+export function googleOAuthConfig(port: number, clientId?: string): OAuthConfig {
+  const id = clientId?.trim() || process.env.SPYCORE_GOOGLE_CLIENT_ID?.trim();
+  if (!id) {
     throw new Error(
       'Google OAuth client ID not configured.\n' +
         'Register an OAuth client in Google Cloud Console (Desktop app type),\n' +
@@ -50,7 +56,7 @@ export function googleOAuthConfig(port: number): OAuthConfig {
     );
   }
   return {
-    clientId,
+    clientId: id,
     authUrl: GOOGLE_AUTH_URL,
     tokenUrl: GOOGLE_TOKEN_URL,
     scopes: GOOGLE_SCOPES,
