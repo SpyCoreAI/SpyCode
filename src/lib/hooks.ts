@@ -337,6 +337,34 @@ interface SpawnOutcome {
 // definition, shared with the agent's shell executor, which keys on the same
 // window. Its reasoning is documented there.
 
+/**
+ * Close our write end of the hook's stdin pipe at settle.
+ *
+ * `releaseChildStdio` unrefs the three pipes, which drops them from the
+ * event-loop census on POSIX - but on Windows the stdin PipeWrap stays
+ * listed when the hook exits without draining stdin: the payload write is
+ * still pending against a read end a surviving descendant holds open, and
+ * the unref does not retire that handle (measured in branch CI: one
+ * PipeWrap over baseline after a pipe-holding hook settled, while the
+ * stdin-less shell executor settled back to baseline on the same runner).
+ * Destroying the write end retires the handle outright.
+ *
+ * Stdin is the one pipe this is safe for. The destroy-vs-unref reasoning
+ * in `lib/child-stdio.ts` is about the READ direction - stdout/stderr,
+ * where destroying our end SIGPIPEs a descendant still writing. Stdin
+ * runs the other way: we write, the hook reads, and we already called
+ * `end()` after the payload, so every reader - hook or descendant -
+ * already sees EOF after the buffered bytes. Closing our end sooner
+ * signals nothing and kills nothing; it only retires our own handle.
+ */
+function destroyHookStdin(child: ChildProcess): void {
+  try {
+    child.stdin?.destroy();
+  } catch {
+    /* already closed - nothing to retire */
+  }
+}
+
 /** Run one hook command with the stdin payload. Never throws. */
 function runHookCommand(
   hook: LoadedHook,
@@ -359,6 +387,7 @@ function runHookCommand(
       // from mid-session to exit. See lib/child-stdio.ts for why this unrefs
       // rather than destroys, and why killing the descendant is the wrong axis.
       if (child) releaseChildStdio(child);
+      if (child) destroyHookStdin(child);
       resolvePromise(o);
     };
     let child: ChildProcess | undefined;

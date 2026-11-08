@@ -311,7 +311,15 @@ child.unref();
         'tree-spawner.mjs',
         `const { spawn } = await import('node:child_process');\n` +
           `const child = spawn(process.execPath, [${JSON.stringify(grandchild)}], { detached: true, stdio: 'inherit' });\n` +
-          `child.unref();\n`,
+          `child.unref();\n` +
+          // The hook itself must still be ALIVE at the 1s cap for the cap
+          // to kill it and the wait to report the timeout: the previous
+          // shape exited the moment the grandchild was spawned, so the
+          // hook settled at ~200ms with exit 0 and no timeout notice ever
+          // fired. The 5s sleep keeps the hook past the cap while the
+          // grandchild (3s marker) survives the single-process kill - the
+          // documented Windows tree-kill gap, unchanged.
+          `setTimeout(() => {}, 5000);\n`,
       );
       writeFileSync(
         join(configDir, 'hooks.json'),

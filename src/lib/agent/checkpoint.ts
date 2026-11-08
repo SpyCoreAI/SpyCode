@@ -36,6 +36,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   renameSync,
   rmdirSync,
   unlinkSync,
@@ -179,8 +180,27 @@ function checkpointsRoot(): string {
  */
 const JOURNAL_FILE_MODE = 0o600;
 const JOURNAL_DIR_MODE = 0o700;
+/**
+ * The per-cwd journal directory, keyed by a hash of the cwd.
+ *
+ * The cwd is canonicalised first: the same directory can be spelled two
+ * ways - macOS spells the temp dir `/var/folders/…` while `process.cwd()`
+ * reports `/private/var/folders/…`, and a symlinked workspace spells
+ * differently again - and a hash of the spelling would file the save and
+ * the lookup under different keys, so a fork (or rewind, or resume) of a
+ * just-saved session reports "No session for this directory". Hashing the
+ * resolved path makes every spelling of one directory the same journal.
+ * A path that cannot be resolved (not yet on disk) falls back to the
+ * spelling it was given rather than failing the journal write.
+ */
 function cwdDir(cwd: string): string {
-  return join(checkpointsRoot(), sha256(cwd));
+  let canonical = cwd;
+  try {
+    canonical = realpathSync(cwd);
+  } catch {
+    /* keep the given spelling - the journal write is best-effort */
+  }
+  return join(checkpointsRoot(), sha256(canonical));
 }
 function numericPrefix(id: string): number {
   const n = Number.parseInt(id.split('-')[0] ?? '0', 10);

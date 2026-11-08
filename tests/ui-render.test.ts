@@ -259,7 +259,13 @@ describe('chat components', () => {
     const deep = renderFrame(React.createElement(MessageView, { item, width: 80, depth: 2 }));
     expect(flat).toContain('child task');
     expect(deep).toContain('child task');
-    expect(deep).toContain('└');
+    // The branch glyph follows the detected terminal: `└` on Unicode
+    // terminals, `+` on the ASCII fallback (Windows CI runs with no
+    // Unicode host, so `detectUnicode` is false there and the renderer
+    // correctly emits `+`). Pin the glyph for the capabilities in effect,
+    // with the depth-2 indent (`  `) in front of it, on every platform.
+    const branch = detectCapabilities().unicode ? '└' : '+';
+    expect(deep).toContain(`  ${branch} `);
   });
 });
 

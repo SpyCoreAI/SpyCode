@@ -33,8 +33,8 @@
  *   node scripts/dependency-audit.mjs
  */
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
-import { join, dirname, resolve } from 'node:path';
+import { accessSync, constants as fsConstants, existsSync, readFileSync } from 'node:fs';
+import { delimiter, join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -68,12 +68,44 @@ function patchIsWired() {
 }
 
 /**
+ * Resolve the `pnpm` binary to spawn. Same Windows constraint as
+ * `src/lib/gh.ts` `resolveGhCommand`: Node's bare-name spawn skips
+ * `.cmd`/`.bat` shims on PATH, and pnpm is normally installed exactly as
+ * one (corepack ships `pnpm.cmd`). On Windows, probe PATH ourselves -
+ * directory by directory, extensions in PATHEXT order - and spawn the
+ * resolved path; on POSIX the bare name works as-is. Null when no `pnpm`
+ * of any form is on PATH.
+ */
+function resolvePnpmCommand() {
+  if (process.platform !== 'win32') return 'pnpm';
+  const exts = (process.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD')
+    .split(';')
+    .map((e) => e.trim())
+    .filter((e) => e.length > 0);
+  for (const dir of (process.env.PATH ?? '').split(delimiter)) {
+    if (dir.length === 0) continue;
+    for (const ext of exts) {
+      const candidate = join(dir, `pnpm${ext}`);
+      try {
+        accessSync(candidate, fsConstants.X_OK);
+        return candidate;
+      } catch {
+        /* try the next candidate */
+      }
+    }
+  }
+  return null;
+}
+
+/**
  * CLI entry point: run `pnpm audit --json` and judge it. Guarded so that
  * importing this module (the unit tests import `evaluateAuditReport`) does
  * NOT run the audit - only `node scripts/dependency-audit.mjs` does.
  */
 function runFromCli() {
-  const res = spawnSync('pnpm', ['audit', '--json'], { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  const pnpm = resolvePnpmCommand();
+  if (pnpm === null) fail('pnpm audit did not run: spawnSync pnpm ENOENT');
+  const res = spawnSync(pnpm, ['audit', '--json'], { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   if (res.error) fail(`pnpm audit did not run: ${res.error.message}`);
   const raw = res.stdout || '';
   if (!raw.trim()) {

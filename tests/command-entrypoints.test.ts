@@ -46,8 +46,17 @@ const origStderrWrite = process.stderr.write.bind(process.stderr);
 let workDir: string;
 let origCwd: string;
 
-beforeEach(() => {
+beforeEach(async () => {
   freshConfigDir();
+  // Token storage is NOT confined to the fresh config dir: where keytar
+  // loads (macOS, Windows) `login` stores the token in the OS keychain,
+  // which survives `freshConfigDir` - so the login test's token was still
+  // present when the logout-noop test ran and it reported "Logged out"
+  // instead of "No active token". Clear both backends before every test
+  // so each test starts genuinely logged out. On Linux keytar does not
+  // load and this only clears the (already fresh) file backend.
+  const { clearToken } = await import('../src/lib/auth.js');
+  await clearToken();
   responder = null;
   stdoutChunks = [];
   stderrChunks = [];

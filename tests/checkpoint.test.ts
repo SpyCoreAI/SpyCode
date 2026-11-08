@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { freshConfigDir } from './helpers.js';
@@ -264,6 +264,27 @@ describe('fork lineage (branchSession)', () => {
 
   test('branching an unknown id returns null', () => {
     expect(branchSession(workDir, 'nope')).toBeNull();
+  });
+
+  test('a symlinked spelling of the same cwd finds the session', () => {
+    // macOS spells the temp dir `/var/folders/…` while `process.cwd()`
+    // reports `/private/var/folders/…`: the save and the fork hash
+    // different spellings of one directory and the fork reports "No
+    // session for this directory". The journal key is the resolved path,
+    // so either spelling reaches the same session.
+    writeFileSync(fp('a.txt'), 'A1');
+    const source = seed('original task', [
+      { path: fp('a.txt'), op: 'modify', before: 'A0', after: 'A1' },
+    ]);
+    const link = join(workDir, 'alias');
+    // A junction on Windows: a plain directory symlink needs privileges
+    // there, a junction does not, and realpath resolves both.
+    symlinkSync(workDir, link, process.platform === 'win32' ? 'junction' : 'dir');
+    const forked = branchSession(link, source);
+    expect(forked).not.toBeNull();
+    expect(loadSession(link, forked!)?.parentId).toBe(source);
+    expect(loadSession(workDir, forked!)?.parentId).toBe(source);
+    rmSync(link, { force: true });
   });
 });
 
