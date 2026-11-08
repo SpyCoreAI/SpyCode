@@ -2,6 +2,7 @@ import { describe, expect, test } from 'vitest';
 import {
   isSecretKey,
   REDACTED,
+  redactConfigDump,
   redactFreeText,
   redactSecrets,
 } from '../src/lib/redact.js';
@@ -188,5 +189,39 @@ describe('redactFreeText (S2: transcript export)', () => {
     const start = Date.now();
     redactFreeText(big);
     expect(Date.now() - start).toBeLessThan(1000);
+  });
+});
+
+describe('redactConfigDump - MCP server command/args', () => {
+  const TOKEN = 'sk-ant-testtoken-1234567890abcdef';
+  test('a literal token in command/args is redacted, the command shape survives', () => {
+    const out = redactConfigDump({
+      mcpServers: [
+        {
+          name: 'srv',
+          transport: 'stdio',
+          command: `node server.js --token ${TOKEN}`,
+          args: ['--api-key', TOKEN, '--plain', 'value'],
+        },
+      ],
+    }) as { mcpServers: Array<{ command: string; args: string[] }> };
+    const server = out.mcpServers[0]!;
+    expect(server.command).not.toContain(TOKEN);
+    expect(server.command).toContain('node server.js');
+    expect(server.args.join(' ')).not.toContain(TOKEN);
+    expect(server.args).toContain('--plain');
+    expect(server.args).toContain('value');
+  });
+
+  test('a non-secret command/args passes through unchanged', () => {
+    const out = redactConfigDump({
+      mcpServers: [{ name: 'srv', transport: 'stdio', command: 'node server.js', args: ['--port', '8080'] }],
+    }) as { mcpServers: Array<{ command: string; args: string[] }> };
+    expect(out.mcpServers[0]).toEqual({
+      name: 'srv',
+      transport: 'stdio',
+      command: 'node server.js',
+      args: ['--port', '8080'],
+    });
   });
 });

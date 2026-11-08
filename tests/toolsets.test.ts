@@ -69,7 +69,10 @@ describe('applyToolsetFilter', () => {
 
   test('unknown toolset names are ignored, never fail open', () => {
     expect(applyToolsetFilter(all, { disabled: ['nope'] })).toEqual(all);
-    expect(applyToolsetFilter(all, { enabled: ['nope'] })).toEqual([]);
+    // An enabled list with only unknown names names no known toolset, so
+    // there is nothing to whitelist - it degrades to no filtering instead
+    // of an empty Set that would silently disable every tool.
+    expect(applyToolsetFilter(all, { enabled: ['nope'] })).toEqual(all);
   });
 
   test('non-inventory names (MCP/extra tools) pass through untouched', () => {

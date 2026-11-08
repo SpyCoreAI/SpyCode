@@ -207,19 +207,19 @@ describe('N7 MCP bridge lifecycle', () => {
     expect(made.map((b) => b.shutdowns)).toEqual([1]);
   });
 
-  // CHARACTERIZATION, NOT ENDORSEMENT. When opening the conversation fails, the
-  // already-started bridge is NOT shut down: the try/finally that tears it down
-  // begins after the conversation is open. That is a known defect, recorded for
-  // a separate fix; v0.9.2 is a pure refactor and preserves it exactly. The fix
-  // flips this assertion on purpose.
+  // The bridge is shut down when the conversation cannot be opened: the
+  // try/finally that tears it down starts before createConversation, so a
+  // failed open does not orphan the MCP child processes. This used to be a
+  // known defect (the bridge was left running); the fix flips this
+  // assertion on purpose.
   // Mutation: shut the bridge down when the conversation cannot be opened.
-  test('N7 (known defect, preserved) a conversation that cannot be opened leaves the bridge running', async () => {
+  test('N7 the bridge shuts down when the conversation cannot be opened', async () => {
     const cwd = workspace('spycli-n7c-');
     const made = useBridge(() => fakeBridge([looking()]));
     const provider = new ScriptProvider({ script: byTurn([]) });
     provider.createConversation = () => Promise.reject(new Error('cannot open'));
     await expect(runAgent({ task: 'c', cwd, model: 'm', provider })).rejects.toThrow('cannot open');
-    expect(made.map((b) => b.shutdowns)).toEqual([0]);
+    expect(made.map((b) => b.shutdowns)).toEqual([1]);
   });
 });
 
@@ -372,7 +372,11 @@ describe('N19 native declarations through the loop', () => {
     const cwd = workspace('spycli-n19p-');
     const provider = native();
     await runAgent({ task: 'decl', cwd, provider, planMode: true });
-    expect(provider.turns[0]!.tools).toEqual(toolNames().filter((n) => !['write_file', 'edit_file', 'run_command'].includes(n)));
+    // The mutating tools are write_file, edit_file, run_command and memory
+    // (memory writes are approval-gated, so plan mode never declares it).
+    expect(provider.turns[0]!.tools).toEqual(
+      toolNames().filter((n) => !['write_file', 'edit_file', 'run_command', 'memory'].includes(n)),
+    );
   });
 
   test('N19 every turn re-declares the same tools', async () => {

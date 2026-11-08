@@ -183,6 +183,41 @@ describe('AnthropicProvider', () => {
 
 // ───────────────────────── Google adapter ─────────────────────────
 
+describe('resolveAnthropicMaxTokens', () => {
+  test('Claude 3 family caps at 4096; newer models get 8192', async () => {
+    const { resolveAnthropicMaxTokens } = await import('../src/lib/providers/anthropic.js');
+    expect(resolveAnthropicMaxTokens('claude-3-haiku-20240307')).toBe(4096);
+    expect(resolveAnthropicMaxTokens('claude-3-opus-20240229')).toBe(4096);
+    expect(resolveAnthropicMaxTokens('claude-instant-1.2')).toBe(4096);
+    // 3.5 Sonnet genuinely supports 8192 output tokens - only the 3.0
+    // family caps at 4096.
+    expect(resolveAnthropicMaxTokens('claude-3-5-sonnet-20241022')).toBe(8192);
+    expect(resolveAnthropicMaxTokens('claude-sonnet-4-20250514')).toBe(8192);
+    expect(resolveAnthropicMaxTokens('claude-opus-4-1')).toBe(8192);
+    expect(resolveAnthropicMaxTokens('claude-x')).toBe(8192);
+  });
+
+  test('an explicit override wins when finite and positive', async () => {
+    const { resolveAnthropicMaxTokens } = await import('../src/lib/providers/anthropic.js');
+    expect(resolveAnthropicMaxTokens('claude-3-haiku-20240307', 1000)).toBe(1000);
+    expect(resolveAnthropicMaxTokens('claude-sonnet-4-20250514', 32000)).toBe(32000);
+    // Non-positive / non-finite overrides are ignored, not trusted.
+    expect(resolveAnthropicMaxTokens('claude-3-haiku-20240307', 0)).toBe(4096);
+    expect(resolveAnthropicMaxTokens('claude-3-haiku-20240307', -5)).toBe(4096);
+    expect(resolveAnthropicMaxTokens('claude-3-haiku-20240307', Number.NaN)).toBe(4096);
+    expect(resolveAnthropicMaxTokens('claude-3-haiku-20240307', Number.POSITIVE_INFINITY)).toBe(4096);
+  });
+
+  test('the provider sends the derived cap in the request body', async () => {
+    const { AnthropicProvider } = await import('../src/lib/providers/anthropic.js');
+    responder = () => anthropicSse(['hi'], { input: 1, output: 1 });
+    const p = new AnthropicProvider({ baseURL: 'https://api.anthropic.com', apiKey: 'sk-ant-SECRET' });
+    const id = await p.createConversation({ model: 'claude-3-haiku-20240307' });
+    await collect(p.streamChat({ conversationId: id, message: 'hi', model: 'claude-3-haiku-20240307' }));
+    expect(lastBody().max_tokens).toBe(4096);
+  });
+});
+
 describe('GoogleProvider', () => {
   const make = async () => {
     const { GoogleProvider } = await import('../src/lib/providers/google.js');
@@ -254,6 +289,47 @@ describe('GoogleProvider', () => {
     expect(e404.message).toMatch(/--model|--base-url/);
     const e429 = (await run(429, 'quota exceeded'))[0] as { message: string };
     expect(e429.message).toMatch(/429|rate/i);
+  });
+
+  test('a 401 refreshes the OAuth token once and replays the request with the fresh token', async () => {
+    const { GoogleProvider } = await import('../src/lib/providers/google.js');
+    let refreshes = 0;
+    const p = new GoogleProvider({
+      baseURL: 'https://generativelanguage.googleapis.com',
+      oauthAccessToken: 'expired-token',
+      refreshOAuthToken: async () => {
+        refreshes += 1;
+        return 'fresh-token';
+      },
+    });
+    let calls = 0;
+    responder = () => {
+      calls += 1;
+      if (calls === 1) return errResp(401, { error: { code: 401, message: 'invalid token', status: 'UNAUTHENTICATED' } });
+      return googleSse(['refreshed'], { input: 1, output: 1 });
+    };
+    const id = await p.createConversation({ model: 'g-model' });
+    const events = await collect(p.streamChat({ conversationId: id, message: 'hi', model: 'g-model' }));
+    expect(events[0]).toEqual({ type: 'text', text: 'refreshed' });
+    expect(events[events.length - 1]).toEqual({ type: 'done' });
+    expect(calls).toBe(2);
+    expect(refreshes).toBe(1);
+    // The replay carried the fresh token, not the expired one.
+    expect(requests[0]?.headers?.['authorization']).toBe('Bearer expired-token');
+    expect(requests[1]?.headers?.['authorization']).toBe('Bearer fresh-token');
+  });
+
+  test('a 401 with no refresher configured surfaces as an error (no retry)', async () => {
+    const { GoogleProvider } = await import('../src/lib/providers/google.js');
+    const p = new GoogleProvider({
+      baseURL: 'https://generativelanguage.googleapis.com',
+      oauthAccessToken: 'expired-token',
+    });
+    responder = () => errResp(401, { error: { code: 401, message: 'invalid token', status: 'UNAUTHENTICATED' } });
+    const id = await p.createConversation({ model: 'g-model' });
+    const events = await collect(p.streamChat({ conversationId: id, message: 'hi', model: 'g-model' }));
+    expect(events[0]?.type).toBe('error');
+    expect(requests).toHaveLength(1);
   });
 });
 

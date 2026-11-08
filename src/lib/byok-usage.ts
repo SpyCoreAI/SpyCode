@@ -130,6 +130,10 @@ export function isFallbackEligibleError(err: unknown): boolean {
     msg.includes('enotfound') ||
     msg.includes('etimedout') ||
     msg.includes('network') ||
-    msg.includes('timeout')
+    msg.includes('timeout') ||
+    // The probe throws 'BYOK provider probe timed out after 15s' - "timed
+    // out" does not contain "timeout", so probe timeouts were rethrown as
+    // hard errors instead of falling back to SpyCore.
+    msg.includes('timed out')
   );
 }

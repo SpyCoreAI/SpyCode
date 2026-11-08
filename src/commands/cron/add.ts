@@ -1,13 +1,7 @@
 import { Command, Option } from 'commander';
-import { getOutputOptions, json, print, success } from '../../lib/output.js';
-import { sanitizeForDisplay } from '../../lib/sanitize-display.js';
 import { EXIT_USER_ERROR, SpycoreCliError } from '../../lib/errors.js';
 import { resolveModelSlug } from '../../lib/models.js';
-import {
-  MAX_PROMPT_LENGTH,
-  addCronEntry,
-  validateSchedule,
-} from './store.js';
+import { MAX_PROMPT_LENGTH, validateSchedule } from './store.js';
 
 export function registerCronAddCommand(program: Command): void {
   program
@@ -41,23 +35,20 @@ export function registerCronAddCommand(program: Command): void {
           EXIT_USER_ERROR,
         );
       }
-      const schedule = validateSchedule(opts.schedule ?? '');
+      // Validate first, so a bad schedule or model still reports its own
+      // error rather than the not-implemented refusal below.
+      validateSchedule(opts.schedule ?? '');
+      if (opts.model !== undefined) resolveModelSlug(opts.model);
 
-      // resolveModelSlug validates against the known SpyCore chat labels and
-      // throws a friendly error listing them. Stored uppercase like `chat`
-      // sends it on the wire.
-      const model = opts.model !== undefined ? resolveModelSlug(opts.model).toUpperCase() : null;
-
-      const created = addCronEntry({ prompt, schedule, model });
-
-      if (getOutputOptions().json) {
-        json(created);
-        return;
-      }
-      success(
-        `Scheduled prompt ${sanitizeForDisplay(created.id)} (${sanitizeForDisplay(schedule)}${model ? `, ${sanitizeForDisplay(model)}` : ''})`,
+      // Automatic execution is NOT implemented: there is no daemon or
+      // scheduler that runs stored prompts, so accepting the entry would
+      // store a schedule that never fires and print success for it. Refuse
+      // outright (nothing is stored) rather than record a promise the CLI
+      // cannot keep. When execution lands, this guard goes away.
+      throw new SpycoreCliError(
+        'Scheduled prompts are not executed yet - automatic execution is not implemented.',
+        EXIT_USER_ERROR,
+        'Nothing was saved. Track the schedule yourself for now, or run the prompt with `spycore chat` / `spycore agent` when it is due.',
       );
-      // M8: be honest - execution is not yet implemented, only local storage.
-      print('Note: scheduled prompts are stored locally; automatic execution is not yet implemented.');
     });
 }

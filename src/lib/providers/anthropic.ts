@@ -15,6 +15,7 @@ import { request } from 'undici';
 import { parseSSEStream } from '../sse.js';
 import { EXIT_USER_ERROR, SpycoreCliError } from '../errors.js';
 import { connectionErrorMessage, errText, readErrorDetail } from './wire.js';
+import { pruneByokSessions, trimHistoryMessages } from './history.js';
 import type {
   CreateConversationParams,
   Provider,
@@ -27,6 +28,27 @@ import type {
 const ANTHROPIC_VERSION = '2023-06-01';
 /** Sane default - the Messages API requires max_tokens on every request. */
 const DEFAULT_MAX_TOKENS = 8192;
+/**
+ * Output cap of the original Claude 3 family (Haiku/Sonnet/Opus): sending
+ * the 8192 default to one of these 400s every request, because the cap is
+ * a hard model limit, not a request preference.
+ */
+const CLAUDE_3_MAX_TOKENS = 4096;
+
+/**
+ * Resolve the max_tokens for a request: an explicit override wins, else
+ * the model's known output cap (Claude 3 family: 4096), else the 8192
+ * default. The old code sent 8192 unconditionally, so low-cap models
+ * failed every request and newer large-budget models could never use a
+ * bigger budget.
+ */
+export function resolveAnthropicMaxTokens(model: string, override?: number | undefined): number {
+  if (override !== undefined && Number.isFinite(override) && override > 0) {
+    return Math.floor(override);
+  }
+  if (/claude-3[-_](haiku|sonnet|opus)|claude-instant/i.test(model)) return CLAUDE_3_MAX_TOKENS;
+  return DEFAULT_MAX_TOKENS;
+}
 
 /** Typed views of the SSE payloads we consume (each `data:` mirrors its event name in `type`). */
 interface AnthropicUsage {
@@ -55,24 +77,35 @@ export interface AnthropicProviderOptions {
   baseURL: string;
   /** Required - this endpoint has no keyless mode (resolution errors before here). */
   apiKey: string;
+  /**
+   * Per-request output cap. Defaults to the model's known cap (Claude 3
+   * family: 4096) or 8192 - see resolveAnthropicMaxTokens.
+   */
+  maxTokens?: number | undefined;
 }
 
 export class AnthropicProvider implements Provider {
   readonly id = 'anthropic' as const;
   private readonly baseURL: string;
   private readonly apiKey: string;
+  private readonly maxTokens: number | undefined;
   private readonly sessions = new Map<string, Session>();
+  /** Last use per session, for the idle-session prune (see history.ts). */
+  private readonly lastUsed = new Map<string, number>();
   private counter = 0;
 
   constructor(opts: AnthropicProviderOptions) {
     this.baseURL = opts.baseURL.replace(/\/+$/, '');
     this.apiKey = opts.apiKey;
+    this.maxTokens = opts.maxTokens;
   }
 
   createConversation(_params: CreateConversationParams): Promise<string> {
     this.counter += 1;
     const id = `byok-anthropic-${this.counter}`;
     this.sessions.set(id, { system: undefined, messages: [] });
+    this.lastUsed.set(id, Date.now());
+    pruneByokSessions(this.sessions, this.lastUsed);
     return Promise.resolve(id);
   }
 
@@ -86,6 +119,11 @@ export class AnthropicProvider implements Provider {
     // session remembers it and every request carries it in the TOP-LEVEL field.
     if (params.system && params.system.length > 0) session.system = params.system;
     session.messages.push({ role: 'user', content: params.message });
+    // Bound the replay (see history.ts): oldest pair first, so the
+    // alternation this API requires survives. The system prompt lives
+    // outside the message array, so trimming never drops it.
+    trimHistoryMessages(session.messages);
+    this.lastUsed.set(params.conversationId, Date.now());
 
     const url = `${this.baseURL}/v1/messages`;
     const headers: Record<string, string> = {
@@ -96,7 +134,7 @@ export class AnthropicProvider implements Provider {
     };
     const body = JSON.stringify({
       model: params.model,
-      max_tokens: DEFAULT_MAX_TOKENS,
+      max_tokens: resolveAnthropicMaxTokens(params.model, this.maxTokens),
       ...(session.system ? { system: session.system } : {}),
       messages: session.messages,
       stream: true,
@@ -126,6 +164,27 @@ export class AnthropicProvider implements Provider {
       yield {
         type: 'error',
         message: httpErrorMessage(res.statusCode, params.model, this.baseURL, detail),
+      };
+      return;
+    }
+
+    // Anything other than a 200 SSE stream is not a turn: a 3xx (undici
+    // does not follow redirects) or a non-SSE 2xx body used to parse as
+    // zero events and end the turn "done" with empty output. Fail loudly.
+    if (res.statusCode !== 200) {
+      session.messages.pop();
+      yield {
+        type: 'error',
+        message: `Model endpoint returned HTTP ${res.statusCode} (expected a 200 SSE stream). Check --base-url (${this.baseURL}) - a redirect or a proxy error page is not a chat stream.`,
+      };
+      return;
+    }
+    const contentType = String(res.headers['content-type'] ?? '').toLowerCase();
+    if (contentType.length > 0 && !contentType.includes('text/event-stream')) {
+      session.messages.pop();
+      yield {
+        type: 'error',
+        message: `Model endpoint returned HTTP 200 with content-type "${contentType}" (expected text/event-stream). Check --base-url (${this.baseURL}) - the endpoint did not return a chat stream.`,
       };
       return;
     }

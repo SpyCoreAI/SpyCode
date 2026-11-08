@@ -71,8 +71,18 @@ export async function openRunSession({
   // conversation; a BYOK provider mints a local handle for its client-side
   // history. Continuations reuse the same handle (and the same provider
   // instance), so BYOK history survives a verify fix-up.
-  const conversationId =
-    opts.conversationId ?? (await provider.createConversation({ model, apiUrlOverride }));
+  // The bridge is torn down on an open failure: createConversation runs
+  // AFTER the MCP servers were spawned, and runAgent's try/finally (which
+  // shuts the bridge down) only starts once this function returns - an
+  // error here used to orphan every spawned MCP child process.
+  let conversationId: string;
+  try {
+    conversationId =
+      opts.conversationId ?? (await provider.createConversation({ model, apiUrlOverride }));
+  } catch (err) {
+    await mcpBridge?.shutdown();
+    throw err;
+  }
 
   // Tool-call protocol: NATIVE when the SpyCore server advertised it and the
   // user didn't force fenced; FENCED otherwise (old server, BYOK provider, or

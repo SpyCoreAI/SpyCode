@@ -25,6 +25,7 @@ import {
   existsSync,
   readdirSync,
   readFileSync,
+  statSync,
   type Dirent,
 } from 'node:fs';
 import { delimiter, extname, join, resolve } from 'node:path';
@@ -125,6 +126,14 @@ const SKIP_DIRS = new Set([
 const DEFAULT_FILE_DIAG_TIMEOUT_MS = 20_000;
 const DEFAULT_WORKSPACE_DIAG_TIMEOUT_MS = 30_000;
 const DEFAULT_WORKSPACE_MAX_FILES = 50;
+/**
+ * Largest single file whose text is sent to a language server (a third-party
+ * process): without a cap, `diagnostics` on a 2 GB file read it whole and
+ * shipped it whole. Workspace mode additionally stops opening files once
+ * the cumulative text passes LSP_WORKSPACE_MAX_BYTES.
+ */
+export const LSP_MAX_FILE_BYTES = 1_000_000;
+export const LSP_WORKSPACE_MAX_BYTES = 8_000_000;
 
 export interface WorkspaceDiagnostics {
   diagnostics: LspDiagnostic[];
@@ -336,10 +345,15 @@ export class LspManager {
         args,
         rootUri: pathToFileURL(this.cwd).href,
         ...(opts?.initTimeoutMs !== undefined ? { initTimeoutMs: opts.initTimeoutMs } : {}),
-        onExit: () => this.onServerExit(language),
+        onExit: () => this.onServerExit(language, managed),
       });
       managed.client = client;
       managed.status = 'running';
+      // A successful start clears any stale start error: without this, a
+      // transient failure followed by a good start left `serverError()`
+      // returning the old message and every clean file reported
+      // "language server crashed".
+      managed.error = null;
       return client;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -383,8 +397,17 @@ export class LspManager {
     const uri = pathToFileURL(absPath).href;
     let text: string;
     try {
+      // Size-cap BEFORE the read: the whole text goes to a third-party
+      // server process via didOpen, so an uncapped read is a multi-GB
+      // memory spike and a multi-GB message.
+      if (statSync(absPath).size > LSP_MAX_FILE_BYTES) {
+        throw new LspError(
+          `file is too large for diagnostics (${LSP_MAX_FILE_BYTES.toLocaleString('en-US')} byte cap): "${absPath}"`,
+        );
+      }
       text = readFileSync(absPath, 'utf8');
-    } catch {
+    } catch (err) {
+      if (err instanceof LspError) throw err;
       throw new LspError(`cannot read "${absPath}"`);
     }
     client.openDocument(uri, spec.lspLanguageIds[ext] ?? language, text);
@@ -435,13 +458,29 @@ export class LspManager {
       // m2: skip secret files in workspace mode (single-file mode already
       // guards via the tool layer).
       const isSecret = opts?.isSecret;
+      // Size caps, same as fileDiagnostics: no single file over
+      // LSP_MAX_FILE_BYTES, and no more than LSP_WORKSPACE_MAX_BYTES of
+      // text in total across the opened files of this run.
+      let oversizeSkipped = 0;
+      let bytesOpened = 0;
+      let budgetSkipped = 0;
       try {
         for (const f of files) {
           if (isSecret?.(f)) continue;
           const ext = extname(f).toLowerCase();
           let text: string;
           try {
+            const size = statSync(f).size;
+            if (size > LSP_MAX_FILE_BYTES) {
+              oversizeSkipped += 1;
+              continue;
+            }
+            if (bytesOpened + size > LSP_WORKSPACE_MAX_BYTES) {
+              budgetSkipped += 1;
+              continue;
+            }
             text = readFileSync(f, 'utf8');
+            bytesOpened += size;
           } catch {
             continue; // vanished or unreadable — skip, don't fail the run
           }
@@ -457,6 +496,20 @@ export class LspManager {
         }
       } finally {
         for (const uri of uris) client.closeDocument(uri);
+      }
+      // Size-cap skips are reported, never silent: the user is told some
+      // files were not diagnosed, and why.
+      if (oversizeSkipped > 0) {
+        skipped.push({
+          language,
+          reason: `skipped ${oversizeSkipped} file${oversizeSkipped === 1 ? '' : 's'} over the ${LSP_MAX_FILE_BYTES.toLocaleString('en-US')} byte diagnostics size cap`,
+        });
+      }
+      if (budgetSkipped > 0) {
+        skipped.push({
+          language,
+          reason: `skipped ${budgetSkipped} file${budgetSkipped === 1 ? '' : 's'} after the ${(LSP_WORKSPACE_MAX_BYTES / 1_000_000).toFixed(0)} MB workspace diagnostics budget`,
+        });
       }
     }
     diagnostics.sort(
@@ -492,10 +545,20 @@ export class LspManager {
     this.servers.clear();
   }
 
-  /** A server exited on its own (crash): record it, drop the client. */
-  private onServerExit(language: LspLanguageId): void {
+  /**
+   * A server exited on its own (crash): record it, drop the client.
+   * `owner` is the ManagedServer record the exiting client belonged to:
+   * `shutdown()` clears the map and then awaits each client's shutdown, so
+   * a concurrent `ensureServer` can already have installed a FRESH record
+   * for the same language by the time the old client's exit fires. Acting
+   * on the language alone poisoned the fresh record (`status='error'`,
+   * `client=null`) and orphaned the new server - it was never shut down
+   * and the next call spawned yet another one. An exit for a record that
+   * is no longer current is simply ignored.
+   */
+  private onServerExit(language: LspLanguageId, owner: ManagedServer): void {
     const m = this.servers.get(language);
-    if (!m) return; // already shut down / cleared
+    if (!m || m !== owner) return; // superseded by a fresh server, or already shut down
     m.status = 'error';
     m.client = null;
     if (m.error === null) m.error = 'language server exited unexpectedly';

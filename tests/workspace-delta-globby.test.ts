@@ -15,7 +15,7 @@ import {
 } from '../src/lib/agent/workspace-delta.js';
 
 describe('workspace-delta without globby', () => {
-  test('snapshot, pause census, and diff all fail closed', async () => {
+  test('snapshot and pause census fail closed; the diff throws instead of reporting no changes', async () => {
     const workDir = mkdtempSync(join(tmpdir(), 'spycli-delta-mock-'));
     try {
       writeFileSync(join(workDir, 'a.txt'), 'a');
@@ -29,7 +29,10 @@ describe('workspace-delta without globby', () => {
       const census = await openPause(hand);
       expect(census.present).toBeNull();
 
-      expect(await diffWorkspace(hand, new Set())).toEqual({ changes: [], uncaptured: [] });
+      // The after-list errors (no globby), so the change could not be
+      // journaled - the diff throws rather than returning a false empty
+      // diff that would leave the run unjournaled in silence.
+      await expect(diffWorkspace(hand, new Set())).rejects.toThrow(/could not be journaled/);
     } finally {
       rmSync(workDir, { recursive: true, force: true });
     }

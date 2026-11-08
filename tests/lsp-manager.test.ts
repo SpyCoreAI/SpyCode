@@ -232,6 +232,78 @@ describe('LspManager (fixture-backed)', () => {
     }
   });
 
+  test('fileDiagnostics refuses a file over the size cap without reading it', async () => {
+    enableWithFixture();
+    const manager = new LspManager(cwd);
+    try {
+      const file = join(cwd, 'big.ts');
+      writeFileSync(file, 'x'.repeat(1_000_001));
+      await expect(manager.fileDiagnostics(file, { timeoutMs: 8000 })).rejects.toThrow(
+        /too large for diagnostics/,
+      );
+    } finally {
+      await manager.shutdown();
+    }
+  });
+
+  test('workspaceDiagnostics skips files over the size cap and reports why', async () => {
+    enableWithFixture();
+    const manager = new LspManager(cwd);
+    try {
+      writeFileSync(join(cwd, 'a.ts'), 'const a = foo;\n');
+      writeFileSync(join(cwd, 'big.ts'), 'x'.repeat(1_000_001));
+      const { diagnostics, skipped } = await manager.workspaceDiagnostics({
+        timeoutMs: 15000,
+        maxFiles: 10,
+      });
+      expect(diagnostics.length).toBeGreaterThanOrEqual(1);
+      const tsSkip = skipped.find((s) => s.language === 'typescript');
+      expect(tsSkip?.reason).toMatch(/byte diagnostics size cap/);
+    } finally {
+      await manager.shutdown();
+    }
+  });
+
+  test('a stale start error is cleared when the server later starts cleanly', async () => {
+    // Wrapper: exit 1 the first time (marker absent), then delegate to the
+    // fixture server. The first start records an error; the retry must
+    // clear it, or clean files keep reporting "language server crashed".
+    const marker = join(cwd, 'crashed-once');
+    const wrapper = join(cwd, 'flaky-server.mjs');
+    writeFileSync(
+      wrapper,
+      [
+        "import { existsSync, writeFileSync } from 'node:fs';",
+        "import { spawn } from 'node:child_process';",
+        `if (!existsSync(${JSON.stringify(marker)})) {`,
+        `  writeFileSync(${JSON.stringify(marker)}, 'crashed once');`,
+        '  process.exit(1);',
+        '}',
+        `const child = spawn(process.execPath, [${JSON.stringify(FIXTURE)}], { stdio: 'inherit' });`,
+        "child.on('exit', (code) => process.exit(code ?? 0));",
+        '',
+      ].join('\n'),
+    );
+    writeLspConfig({
+      enabled: true,
+      servers: { typescript: { command: process.execPath, args: [wrapper] } },
+    });
+    writeFileSync(join(cwd, 'package.json'), '{}');
+    const manager = new LspManager(cwd);
+    try {
+      await expect(manager.ensureServer('typescript')).rejects.toThrow(LspError);
+      expect(manager.serverError('typescript')).not.toBeNull();
+      const client = await manager.ensureServer('typescript');
+      expect(client.hasExited).toBe(false);
+      expect(manager.serverError('typescript')).toBeNull();
+      expect(manager.statuses()).toEqual([
+        { name: 'typescript-language-server', status: 'running', languages: ['TypeScript/JavaScript'] },
+      ]);
+    } finally {
+      await manager.shutdown();
+    }
+  });
+
   test('missing server binary → LspError and status error (no hang)', async () => {
     // Bogus override keeps this hermetic even where a real gopls is installed.
     writeLspConfig({

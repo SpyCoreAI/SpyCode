@@ -33,6 +33,8 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { dirname, join } from 'node:path';
 import { getConfigPath } from '../config.js';
 import { redactFreeText } from '../redact.js';
+import { APPROVAL_ANTI_SPAM_TEXT, resolveApproval } from './approval.js';
+import { computeFileDiff } from './diff.js';
 import { optString, registerTool, reqString, ToolError, type ToolContext } from './tool-core.js';
 
 /** The agent's own durable notes. */
@@ -122,6 +124,60 @@ function writeDurableFileAtomic(path: string, content: string): void {
 }
 
 /**
+ * Scrub entry lines for storage: redact secrets, drop empties, cap one
+ * entry at 4k chars. Shared by the writer and the approval preview so the
+ * card shows exactly what lands on disk.
+ */
+function cleanEntryLines(lines: string[]): string[] {
+  return lines
+    .map((l) => redactFreeText(l).trim())
+    .filter((l) => l.length > 0)
+    .map((l) => (l.length > DURABLE_MEMORY_ENTRY_CAP_CHARS ? `${l.slice(0, DURABLE_MEMORY_ENTRY_CAP_CHARS)}…` : l));
+}
+
+/** The file content after appending `addition` (already bulleted) to `current`. */
+function appendText(current: string, addition: string): string {
+  return current.length === 0 ? `${addition}\n` : `${current.replace(/\n+$/, '\n')}${addition}\n`;
+}
+
+/**
+ * Approval gate for memory writes, identical in shape to the write_file /
+ * edit_file gate: the user sees the diff and the write applies only after
+ * they approve. `mutating: true` on the tool already blocks plan mode at
+ * dispatch; this is the per-call gate for execute mode. Returns true when
+ * the write may proceed.
+ */
+async function approveMemoryWrite(
+  ctx: ToolContext,
+  file: 'memory' | 'user',
+  oldText: string,
+  newText: string,
+): Promise<{ approved: boolean; reason?: string }> {
+  const fd = await computeFileDiff(oldText, newText);
+  const outcome = await resolveApproval(ctx.requestApproval, {
+    kind: 'write',
+    tool: 'memory',
+    path: file === 'memory' ? DURABLE_MEMORY_FILE : DURABLE_USER_FILE,
+    isNew: oldText.length === 0,
+    added: fd.added,
+    removed: fd.removed,
+    diff: fd.lines,
+    truncated: fd.truncated,
+    hiddenLines: fd.hiddenLines,
+  });
+  return outcome.approved ? { approved: true } : { approved: false, reason: outcome.reason };
+}
+
+function memoryWriteRejected(file: 'memory' | 'user', reason: string | undefined) {
+  return {
+    ok: false,
+    kind: 'rejected' as const,
+    summary: 'rejected',
+    content: `Memory write to ${file === 'memory' ? DURABLE_MEMORY_FILE : DURABLE_USER_FILE} was not applied: ${reason ?? 'rejected by user'}. The file is unchanged. ${APPROVAL_ANTI_SPAM_TEXT}`,
+  };
+}
+
+/**
  * Append entries to one durable file. Lines are scrubbed for secrets before
  * they touch disk. Throws ToolError when the cap would be exceeded - the
  * caller must make room first; nothing is silently dropped.
@@ -131,14 +187,11 @@ export function appendDurableMemory(
   lines: string[],
   configDir?: string,
 ): { chars: number; capChars: number } {
-  const clean = lines
-    .map((l) => redactFreeText(l).trim())
-    .filter((l) => l.length > 0)
-    .map((l) => (l.length > DURABLE_MEMORY_ENTRY_CAP_CHARS ? `${l.slice(0, DURABLE_MEMORY_ENTRY_CAP_CHARS)}…` : l));
+  const clean = cleanEntryLines(lines);
   if (clean.length === 0) throw new ToolError('nothing to remember - the text was empty');
   const current = readDurableFile(file, configDir);
   const addition = clean.map((l) => `- ${l}`).join('\n');
-  const next = current.length === 0 ? `${addition}\n` : `${current.replace(/\n+$/, '\n')}${addition}\n`;
+  const next = appendText(current, addition);
   if (next.length > DURABLE_MEMORY_CAP_CHARS) {
     throw new ToolError(
       `${file === 'memory' ? DURABLE_MEMORY_FILE : DURABLE_USER_FILE} is full ` +
@@ -216,6 +269,12 @@ const MEMORY_TOOL_NAME = 'memory';
 
 registerTool({
   name: MEMORY_TOOL_NAME,
+  // Mutating: writes permanent memory. Plan mode blocks the tool at
+  // dispatch, and add/remove pause for user approval in execute mode
+  // (see approveMemoryWrite). `view` is read-only, but the tool is one
+  // registration - the plan-phase snapshot is already in the system
+  // prompt, so plan mode loses nothing by not calling it.
+  mutating: true,
   description:
     'Your durable two-file memory: MEMORY.md (your own notes across sessions) and USER.md (the user profile). ' +
     'Actions: view (read both files), add (append entries; file=memory|user, default memory), remove (delete lines containing `match`). ' +
@@ -253,6 +312,15 @@ registerTool({
     if (action === 'add') {
       assertMemoryWritable(ctx);
       const text = reqString(args, 'text');
+      // Approval BEFORE the write, on the exact diff that will land:
+      // the tool is mutating (plan mode blocks it at dispatch) and every
+      // execute-mode write pauses for the user like write_file does.
+      const current = readDurableFile(f);
+      const clean = cleanEntryLines(text.split('\n'));
+      if (clean.length === 0) throw new ToolError('nothing to remember - the text was empty');
+      const addition = clean.map((l) => `- ${l}`).join('\n');
+      const gate = await approveMemoryWrite(ctx, f, current, appendText(current, addition));
+      if (!gate.approved) return memoryWriteRejected(f, gate.reason);
       const res = appendDurableMemory(f, text.split('\n'));
       return {
         ok: true,
@@ -266,6 +334,12 @@ registerTool({
     if (action === 'remove') {
       assertMemoryWritable(ctx);
       const match = reqString(args, 'match');
+      const current = readDurableFile(f);
+      const needle = match.trim().toLowerCase();
+      if (needle.length === 0) throw new ToolError('match must not be empty');
+      const kept = current.split('\n').filter((l) => !l.toLowerCase().includes(needle));
+      const gate = await approveMemoryWrite(ctx, f, current, kept.join('\n'));
+      if (!gate.approved) return memoryWriteRejected(f, gate.reason);
       const res = removeDurableMemoryLines(f, match);
       return {
         ok: true,

@@ -252,7 +252,7 @@ export function registerSchemaCommand(program: Command, version: string): void {
               .map((o) => o.name)
               .join(', ');
             print(
-              `${[cmd.name, ...cmd.path.slice(1)].join(' ')}` +
+              `${cmd.path.join(' ')}` +
                 (flagSummary ? `   [${flagSummary}]` : ''),
             );
           }

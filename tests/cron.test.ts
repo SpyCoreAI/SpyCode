@@ -73,11 +73,21 @@ describe('cron schedule validation', () => {
 });
 
 describe('spycore cron add', () => {
-  test('creates an entry and prints its id', async () => {
-    await runCli(['add', '--prompt', 'Summarize the news', '--schedule', '0 8 * * *']);
-    const out = stdout();
-    expect(out).toContain('Scheduled prompt');
-    expect(out).toContain('0 8 * * *');
+  test('refuses to add: execution is not implemented, nothing is stored', async () => {
+    await expect(
+      runCli(['add', '--prompt', 'Summarize the news', '--schedule', '0 8 * * *']),
+    ).rejects.toThrow(/not executed yet/);
+    stdoutChunks = [];
+    await runCli(['list']);
+    expect(stdout()).toContain('(no scheduled prompts)');
+  });
+
+  test('refuses in --json mode too', async () => {
+    await expect(
+      runCli(['add', '--prompt', 'ping', '--schedule', '*/5 * * * *', '--model', 'minos'], ['--json']),
+    ).rejects.toThrow(/not executed yet/);
+    const { loadCronEntries } = await import('../src/commands/cron/store.js');
+    expect(loadCronEntries()).toHaveLength(0);
   });
 
   test('rejects an invalid schedule', async () => {
@@ -91,19 +101,14 @@ describe('spycore cron add', () => {
       runCli(['add', '--prompt', 'x', '--schedule', '* * * * *', '--model', 'gpt-99']),
     ).rejects.toThrow(/Unknown model/);
   });
-
-  test('--json emits the created entry', async () => {
-    await runCli(
-      ['add', '--prompt', 'ping', '--schedule', '*/5 * * * *', '--model', 'minos'],
-      ['--json'],
-    );
-    const payload = JSON.parse(stdout());
-    expect(payload.prompt).toBe('ping');
-    expect(payload.schedule).toBe('*/5 * * * *');
-    expect(payload.model).toBe('MINOS');
-    expect(typeof payload.id).toBe('string');
-  });
 });
+
+// `cron add` refuses (see above), so list/remove tests seed entries through
+// the store directly instead of the command.
+async function seedEntry(prompt: string, schedule: string): Promise<string> {
+  const { addCronEntry } = await import('../src/commands/cron/store.js');
+  return addCronEntry({ prompt, schedule, model: null }).id;
+}
 
 describe('spycore cron list', () => {
   test('reports empty state', async () => {
@@ -112,7 +117,7 @@ describe('spycore cron list', () => {
   });
 
   test('lists added entries', async () => {
-    await runCli(['add', '--prompt', 'Morning brief', '--schedule', '0 8 * * *']);
+    await seedEntry('Morning brief', '0 8 * * *');
     stdoutChunks = [];
     await runCli(['list']);
     expect(stdout()).toContain('Morning brief');
@@ -120,7 +125,7 @@ describe('spycore cron list', () => {
   });
 
   test('--json lists entries as payload', async () => {
-    await runCli(['add', '--prompt', 'A', '--schedule', '* * * * *']);
+    await seedEntry('A', '* * * * *');
     stdoutChunks = [];
     await runCli(['list'], ['--json']);
     const payload = JSON.parse(stdout());
@@ -135,8 +140,7 @@ describe('spycore cron remove', () => {
   });
 
   test('removes an entry by id', async () => {
-    await runCli(['add', '--prompt', 'temp', '--schedule', '* * * * *'], ['--json']);
-    const id = JSON.parse(stdout()).id as string;
+    const id = await seedEntry('temp', '* * * * *');
     stdoutChunks = [];
     await runCli(['remove', id, '--yes']);
     expect(stdout()).toContain('Removed scheduled prompt');
@@ -146,8 +150,7 @@ describe('spycore cron remove', () => {
   });
 
   test('--json reports the removed id', async () => {
-    await runCli(['add', '--prompt', 'temp', '--schedule', '* * * * *'], ['--json']);
-    const id = JSON.parse(stdout()).id as string;
+    const id = await seedEntry('temp', '* * * * *');
     stdoutChunks = [];
     await runCli(['remove', id, '--yes'], ['--json']);
     expect(JSON.parse(stdout())).toEqual({ removed: id });

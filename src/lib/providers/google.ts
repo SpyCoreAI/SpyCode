@@ -17,6 +17,7 @@ import { request } from 'undici';
 import { parseSSEStream } from '../sse.js';
 import { EXIT_USER_ERROR, SpycoreCliError } from '../errors.js';
 import { connectionErrorMessage, errText, readErrorDetail } from './wire.js';
+import { pruneByokSessions, trimHistoryMessages } from './history.js';
 import type {
   CreateConversationParams,
   Provider,
@@ -54,29 +55,69 @@ export interface GoogleProviderOptions {
   apiKey?: string;
   /** OAuth access token for Authorization: Bearer header (mutually exclusive with apiKey). */
   oauthAccessToken?: string;
+  /**
+   * Refresh the OAuth access token on demand: called with no arguments
+   * whenever the stored token is missing or a request comes back 401.
+   * When absent, the provider behaves as before (fixed token for the
+   * process lifetime). The factory wires the stored refresh token here
+   * so long agent runs survive the ~1h access-token expiry.
+   */
+  refreshOAuthToken?: (() => Promise<string>) | undefined;
 }
 
 export class GoogleProvider implements Provider {
   readonly id = 'google' as const;
   private readonly baseURL: string;
   private readonly apiKey?: string;
-  private readonly oauthAccessToken?: string;
+  private oauthAccessToken?: string;
+  private readonly refreshOAuthToken?: (() => Promise<string>) | undefined;
+  private oauthRefreshInFlight: Promise<string> | null = null;
   private readonly sessions = new Map<string, Session>();
+  /** Last use per session, for the idle-session prune (see history.ts). */
+  private readonly lastUsed = new Map<string, number>();
   private counter = 0;
 
   constructor(opts: GoogleProviderOptions) {
     this.baseURL = opts.baseURL.replace(/\/+$/, '');
     this.apiKey = opts.apiKey;
     this.oauthAccessToken = opts.oauthAccessToken;
-    if (!this.apiKey && !this.oauthAccessToken) {
+    this.refreshOAuthToken = opts.refreshOAuthToken;
+    if (!this.apiKey && !this.oauthAccessToken && !this.refreshOAuthToken) {
       throw new Error('GoogleProvider requires either apiKey or oauthAccessToken');
     }
+  }
+
+  /**
+   * One refresh at a time: concurrent turns share the in-flight refresh
+   * instead of each minting a token. The fresh token replaces the stored
+   * one; a failed refresh leaves the old token in place and throws.
+   */
+  private async refreshAccessToken(): Promise<string> {
+    if (!this.refreshOAuthToken) {
+      throw new Error('Google OAuth token refresh is not configured for this provider');
+    }
+    if (!this.oauthRefreshInFlight) {
+      this.oauthRefreshInFlight = this.refreshOAuthToken().then((token) => {
+        this.oauthAccessToken = token;
+        return token;
+      });
+      try {
+        await this.oauthRefreshInFlight;
+      } finally {
+        this.oauthRefreshInFlight = null;
+      }
+    } else {
+      await this.oauthRefreshInFlight;
+    }
+    return this.oauthAccessToken as string;
   }
 
   createConversation(_params: CreateConversationParams): Promise<string> {
     this.counter += 1;
     const id = `byok-google-${this.counter}`;
     this.sessions.set(id, { system: undefined, messages: [] });
+    this.lastUsed.set(id, Date.now());
+    pruneByokSessions(this.sessions, this.lastUsed);
     return Promise.resolve(id);
   }
 
@@ -88,18 +129,26 @@ export class GoogleProvider implements Provider {
     this.sessions.set(params.conversationId, session);
     if (params.system && params.system.length > 0) session.system = params.system;
     session.messages.push({ role: 'user', content: params.message });
+    // Bound the replay (see history.ts): oldest pair first, so the
+    // alternation this API requires survives. The system prompt lives
+    // outside the message array, so trimming never drops it.
+    trimHistoryMessages(session.messages);
+    this.lastUsed.set(params.conversationId, Date.now());
 
     const url = `${this.baseURL}/v1beta/models/${encodeURIComponent(params.model)}:streamGenerateContent?alt=sse`;
-    const headers: Record<string, string> = {
-      'content-type': 'application/json',
-      accept: 'text/event-stream',
+    const buildHeaders = (): Record<string, string> => {
+      const headers: Record<string, string> = {
+        'content-type': 'application/json',
+        accept: 'text/event-stream',
+      };
+      // Use OAuth Bearer token if available, otherwise API key header.
+      if (this.oauthAccessToken) {
+        headers['authorization'] = `Bearer ${this.oauthAccessToken}`;
+      } else if (this.apiKey) {
+        headers['x-goog-api-key'] = this.apiKey;
+      }
+      return headers;
     };
-    // Use OAuth Bearer token if available, otherwise API key header.
-    if (this.oauthAccessToken) {
-      headers['authorization'] = `Bearer ${this.oauthAccessToken}`;
-    } else if (this.apiKey) {
-      headers['x-goog-api-key'] = this.apiKey;
-    }
     const body = JSON.stringify({
       ...(session.system ? { systemInstruction: { parts: [{ text: session.system }] } } : {}),
       // History maps directly, except the role name: assistant → 'model'.
@@ -109,16 +158,50 @@ export class GoogleProvider implements Provider {
       })),
     });
 
-    let res;
-    try {
-      res = await request(url, { method: 'POST', headers, body, signal: params.signal });
-    } catch (err) {
-      if (params.signal?.aborted) {
+    // One request, plus ONE retry after an OAuth refresh: access tokens
+    // expire after ~1h, so a long agent run used to die mid-run with 401
+    // on a token minted at provider construction. A 401 refreshes the
+    // token (when a refresher is wired) and replays the request once.
+    let res: Awaited<ReturnType<typeof request>> | undefined;
+    let refreshed = false;
+    for (let attempt = 0; attempt < 2 && !res; attempt += 1) {
+      let attemptRes: Awaited<ReturnType<typeof request>>;
+      try {
+        attemptRes = await request(url, {
+          method: 'POST',
+          headers: buildHeaders(),
+          body,
+          signal: params.signal,
+        });
+      } catch (err) {
+        if (params.signal?.aborted) {
+          session.messages.pop();
+          throw new SpycoreCliError('Cancelled', EXIT_USER_ERROR);
+        }
         session.messages.pop();
-        throw new SpycoreCliError('Cancelled', EXIT_USER_ERROR);
+        yield { type: 'error', message: connectionErrorMessage(err, url) };
+        return;
       }
+      if (attemptRes.statusCode === 401 && this.refreshOAuthToken && !refreshed) {
+        refreshed = true;
+        await readErrorDetail(attemptRes.body); // drain, so the connection can be reused
+        try {
+          await this.refreshAccessToken();
+        } catch (err) {
+          session.messages.pop();
+          yield {
+            type: 'error',
+            message: `Google OAuth token refresh failed: ${err instanceof Error ? err.message : String(err)}`,
+          };
+          return;
+        }
+        continue;
+      }
+      res = attemptRes;
+    }
+    if (!res) {
       session.messages.pop();
-      yield { type: 'error', message: connectionErrorMessage(err, url) };
+      yield { type: 'error', message: 'Model endpoint did not answer the request.' };
       return;
     }
 
@@ -130,6 +213,27 @@ export class GoogleProvider implements Provider {
       yield {
         type: 'error',
         message: httpErrorMessage(res.statusCode, params.model, this.baseURL, detail),
+      };
+      return;
+    }
+
+    // Anything other than a 200 SSE stream is not a turn: a 3xx (undici
+    // does not follow redirects) or a non-SSE 2xx body used to parse as
+    // zero events and end the turn "done" with empty output. Fail loudly.
+    if (res.statusCode !== 200) {
+      session.messages.pop();
+      yield {
+        type: 'error',
+        message: `Model endpoint returned HTTP ${res.statusCode} (expected a 200 SSE stream). Check --base-url (${this.baseURL}) - a redirect or a proxy error page is not a chat stream.`,
+      };
+      return;
+    }
+    const contentType = String(res.headers['content-type'] ?? '').toLowerCase();
+    if (contentType.length > 0 && !contentType.includes('text/event-stream')) {
+      session.messages.pop();
+      yield {
+        type: 'error',
+        message: `Model endpoint returned HTTP 200 with content-type "${contentType}" (expected text/event-stream). Check --base-url (${this.baseURL}) - the endpoint did not return a chat stream.`,
       };
       return;
     }

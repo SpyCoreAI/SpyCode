@@ -325,7 +325,16 @@ export class McpHttpClient {
 
       if (res.statusCode >= 400) {
         await drainQuietly(res.body);
-        this.noteTransportFailure();
+        if (res.statusCode >= 400 && res.statusCode < 500 && res.statusCode !== 408) {
+          // App-level 4xx (bad arguments, unknown tool, …): the server is
+          // alive and speaking MCP - three rejected tools/call requests
+          // used to mark the whole server "failed for the session". A 4xx
+          // proves the transport works, so it resets the breaker instead
+          // of feeding it. 408 (timeout) and 5xx stay transport failures.
+          this.consecutiveFailures = 0;
+        } else {
+          this.noteTransportFailure();
+        }
         // Status only - the response body is never echoed (identity/redaction).
         throw new McpError(`server returned HTTP ${res.statusCode} for "${method}"`);
       }

@@ -1,5 +1,6 @@
 import { Command, Option } from 'commander';
 import { api } from '../../lib/api.js';
+import { parseIntFlag } from '../../lib/numeric-flags.js';
 import { formatOption, json, print, resolveFormat, writeFormatted } from '../../lib/output.js';
 import {
   bucketByRecency,
@@ -7,7 +8,7 @@ import {
   relativeTime,
   shortMimeLabel,
 } from '../../lib/files.js';
-import { clip, shortId } from '../../lib/text.js';
+import { clip } from '../../lib/text.js';
 import { sanitizeForDisplay } from '../../lib/sanitize-display.js';
 
 interface FileItem {
@@ -66,8 +67,8 @@ export function registerFilesListCommand(program: Command): void {
       ) => {
         const root = cmd.parent?.parent;
         const parentOpts = root?.opts<{ apiUrl?: string; json?: boolean }>() ?? {};
-        const limit = Math.max(1, Math.min(200, Number(opts.limit ?? 50)));
-        const page = Math.max(1, Number(opts.page ?? 1));
+        const limit = parseIntFlag(opts.limit, 'limit', { min: 1, max: 200, defaultValue: 50 });
+        const page = parseIntFlag(opts.page, 'page', { min: 1, defaultValue: 1 });
         const category = opts.filter ? FILTER_TO_CATEGORY[opts.filter] : undefined;
 
         const params = new URLSearchParams({
@@ -106,7 +107,9 @@ export function registerFilesListCommand(program: Command): void {
           return;
         }
 
-        const idCol = 14;
+        // Full ids, not shortId: lookups require the exact id (see
+        // conversations/list.ts). The column widens to the longest id.
+        const idCol = Math.max(14, ...items.map((f) => f.id.length));
         const nameCol = Math.max(
           18,
           Math.min(36, process.stdout.columns ? process.stdout.columns - 56 : 32),
@@ -129,7 +132,7 @@ export function registerFilesListCommand(program: Command): void {
         const renderRow = (f: FileItem) => {
           // Sanitize BEFORE clip()/padEnd() - see memory/list.ts.
           const row = [
-            sanitizeForDisplay(shortId(f.id)).padEnd(idCol),
+            sanitizeForDisplay(f.id).padEnd(idCol),
             clip(sanitizeForDisplay(f.filename || '(unnamed)'), nameCol).padEnd(nameCol),
             sanitizeForDisplay(shortMimeLabel(f.mimeType, f.filename)).padEnd(typeCol),
             formatFileSize(f.size ?? 0).padEnd(sizeCol),

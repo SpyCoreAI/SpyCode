@@ -507,6 +507,7 @@ export const COMMAND_SPEC: CommandSpec = {
       takesArgs: true,
       options: [
         { name: '--output', short: '-o', takesValue: true, description: 'Local path for the saved image' },
+        { name: '--force', short: '-f', description: 'Overwrite the existing file at --output' },
         {
           name: '--style',
           takesValue: true,

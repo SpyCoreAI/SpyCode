@@ -117,6 +117,30 @@ describe('AnthropicProvider: errored turn settles the session', () => {
     await collect(p.streamChat({ conversationId: id, message: 'second', model: 'm' }));
     expect(lastBody().messages).toEqual([{ role: 'user', content: 'second' }]);
   });
+
+  test('a 302 redirect and a non-SSE 200 body are errors, not empty turns', async () => {
+    const p = await make();
+    const id = await p.createConversation({ model: 'm' });
+
+    responder = () => ({ statusCode: 302, headers: { location: 'https://elsewhere.example/x' }, body: { text: async () => '' } });
+    const redirected = await collect(p.streamChat({ conversationId: id, message: 'first', model: 'm' }));
+    expect(redirected[0]?.type).toBe('error');
+    expect(redirected[0]).toMatchObject({ message: expect.stringContaining('302') });
+
+    responder = () => ({
+      statusCode: 200,
+      headers: { 'content-type': 'text/html; charset=utf-8' },
+      body: Readable.from([Buffer.from('<html>proxy error page</html>', 'utf8')]),
+    });
+    const html = await collect(p.streamChat({ conversationId: id, message: 'second', model: 'm' }));
+    expect(html[0]?.type).toBe('error');
+    expect(html[0]).toMatchObject({ message: expect.stringContaining('text/html') });
+
+    // Both turns failed before any reply, so the history is still clean.
+    responder = () => anthropicSse(['third-reply']);
+    await collect(p.streamChat({ conversationId: id, message: 'third', model: 'm' }));
+    expect(lastBody().messages).toEqual([{ role: 'user', content: 'third' }]);
+  });
 });
 
 describe('GoogleProvider: errored turn settles the session', () => {
@@ -145,6 +169,30 @@ describe('GoogleProvider: errored turn settles the session', () => {
       ['model', 'partial'],
       ['user', 'second'],
     ]);
+  });
+
+  test('a 302 redirect and a non-SSE 200 body are errors, not empty turns', async () => {
+    const p = await make();
+    const id = await p.createConversation({ model: 'm' });
+
+    responder = () => ({ statusCode: 302, headers: { location: 'https://elsewhere.example/x' }, body: { text: async () => '' } });
+    const redirected = await collect(p.streamChat({ conversationId: id, message: 'first', model: 'm' }));
+    expect(redirected[0]?.type).toBe('error');
+    expect(redirected[0]).toMatchObject({ message: expect.stringContaining('302') });
+
+    responder = () => ({
+      statusCode: 200,
+      headers: { 'content-type': 'text/html; charset=utf-8' },
+      body: Readable.from([Buffer.from('<html>proxy error page</html>', 'utf8')]),
+    });
+    const html = await collect(p.streamChat({ conversationId: id, message: 'second', model: 'm' }));
+    expect(html[0]?.type).toBe('error');
+    expect(html[0]).toMatchObject({ message: expect.stringContaining('text/html') });
+
+    responder = () => googleSse(['third-reply']);
+    await collect(p.streamChat({ conversationId: id, message: 'third', model: 'm' }));
+    const contents = lastBody().contents as Array<{ role: string; parts: Array<{ text: string }> }>;
+    expect(contents.map((c) => [c.role, c.parts[0]?.text])).toEqual([['user', 'third']]);
   });
 });
 
@@ -200,5 +248,32 @@ describe('OpenAICompatibleProvider: errored turn settles the session too', () =>
       { role: 'assistant', content: 'partial' },
       { role: 'user', content: 'second' },
     ]);
+  });
+
+  test('a 302 redirect and a non-SSE 200 body are errors, not empty turns', async () => {
+    const p = await make();
+    const id = await p.createConversation({ model: 'm' });
+
+    responder = () => ({ statusCode: 302, headers: { location: 'https://elsewhere.example/x' }, body: { text: async () => '' } });
+    const redirected = await collect(p.streamChat({ conversationId: id, message: 'first', model: 'm' }));
+    expect(redirected[0]?.type).toBe('error');
+    expect(redirected[0]).toMatchObject({ message: expect.stringContaining('302') });
+
+    responder = () => ({
+      statusCode: 200,
+      headers: { 'content-type': 'text/html; charset=utf-8' },
+      body: Readable.from([Buffer.from('<html>proxy error page</html>', 'utf8')]),
+    });
+    const html = await collect(p.streamChat({ conversationId: id, message: 'second', model: 'm' }));
+    expect(html[0]?.type).toBe('error');
+    expect(html[0]).toMatchObject({ message: expect.stringContaining('text/html') });
+
+    responder = () =>
+      sseResp([
+        'data: {"choices":[{"delta":{"content":"third-reply"}}]}\n\n',
+        'data: [DONE]\n\n',
+      ]);
+    await collect(p.streamChat({ conversationId: id, message: 'third', model: 'm' }));
+    expect(lastBody().messages).toEqual([{ role: 'user', content: 'third' }]);
   });
 });

@@ -2,6 +2,7 @@ import { Command, Option } from 'commander';
 import chalk from 'chalk';
 import { api } from '../../lib/api.js';
 import { createMarkdownRenderer } from '../../lib/markdown.js';
+import { parseIntFlag } from '../../lib/numeric-flags.js';
 import { getOutputOptions, json, print } from '../../lib/output.js';
 import { sanitizeForDisplay } from '../../lib/sanitize-display.js';
 import { EXIT_USER_ERROR, SpycoreCliError, isSpycoreCliError } from '../../lib/errors.js';
@@ -46,7 +47,7 @@ export function registerConversationsShowCommand(program: Command): void {
           json?: boolean;
           color?: boolean;
         }>() ?? {};
-        const limit = Math.max(1, Math.min(500, Number(opts.limit ?? 50)));
+        const limit = parseIntFlag(opts.limit, 'limit', { min: 1, max: 500, defaultValue: 50 });
 
         let convo: ConversationGetResp;
         try {

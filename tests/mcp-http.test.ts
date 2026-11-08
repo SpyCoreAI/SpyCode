@@ -496,6 +496,41 @@ describe('remote MCP - security invariants', () => {
       await client.shutdown();
     }
   });
+
+  test(`app-level 4xx responses do NOT trip the transport breaker (${HTTP_MAX_CONSECUTIVE_FAILURES} 400s, then a good call)`, async () => {
+    const m = await mock({
+      onRpc: (rpc, _req, res) => {
+        if (rpc.method === 'tools/call') {
+          res.writeHead(400, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ error: { code: -32602, message: 'bad arguments' } }));
+          return true;
+        }
+        return false;
+      },
+    });
+    const notices: string[] = [];
+    const client = await McpHttpClient.connect({
+      url: m.url,
+      headers: {},
+      initTimeoutMs: 5000,
+      requestTimeoutMs: 5000,
+      onPermanentFailure: (r) => notices.push(r),
+    });
+    try {
+      // Three 400s used to mark the server failed for the session; the
+      // server is alive and answering, so the breaker must stay silent.
+      for (let i = 0; i < HTTP_MAX_CONSECUTIVE_FAILURES; i += 1) {
+        await expect(client.callTool('echo', { text: 'x' })).rejects.toThrow(/400/);
+      }
+      expect(notices).toHaveLength(0);
+      // And the next call still reaches the server (no fast-fail).
+      const requestsBefore = m.captured.length;
+      await expect(client.callTool('echo', { text: 'x' })).rejects.toThrow(/400/);
+      expect(m.captured.length).toBeGreaterThan(requestsBefore);
+    } finally {
+      await client.shutdown();
+    }
+  });
 });
 
 // ─────────────────────── 4. ${ENV} header expansion ───────────────────────

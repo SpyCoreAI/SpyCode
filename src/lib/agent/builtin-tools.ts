@@ -931,6 +931,15 @@ async function applyMutation(ctx: ToolContext, spec: MutationSpec): Promise<Tool
   // fd-relative write that cannot be re-pointed - which Node does not expose.
   // Recorded as a structural limit rather than described as containment.
   assertNoSymlinkEscape(ctx.cwd, spec.abs);
+  // RE-CHECK THE SECRET GUARD TOO. The same pause lets a path be swapped
+  // to point at a secret file inside the workspace (a symlink retarget, or
+  // the guard's own inputs changing) after the execute-time check passed.
+  // Only containment was re-checked here, so the swapped write sailed
+  // through and overwrote a secret file with model text.
+  const isSecret = await secretGuardFor(ctx);
+  if (isSecret(spec.abs)) {
+    throw new ToolError(`blocked: sensitive path "${spec.rel}"`);
+  }
   writeAtomic(spec.abs, spec.newText);
   // Journal the applied change so `spycore rewind` can undo it. Record the
   // REAL resolved target (post-symlink): if the path rode through a

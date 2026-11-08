@@ -44,6 +44,7 @@ import {
   attachmentChip,
   buildTextAttachmentBlocks,
   collectAttachOption,
+  composeMessageWithAttachments,
   inspectAttachments,
   isVisionModelSlug,
   uploadImageAttachments,
@@ -398,15 +399,24 @@ async function sendMessage(opts: SendOpts): Promise<{ conversationId: string; as
 
 /**
  * Resolve the conversation we should append to:
- * 1. --conversation <id> + must exist
- * 2. --resume + lastConversationId in config
- * 3. otherwise: create a new conversation and remember its id
+ * 1. --new forces a fresh conversation (overrides --conversation/--resume)
+ * 2. --conversation <id> + must exist
+ * 3. --resume + lastConversationId in config
+ * 4. otherwise: create a new conversation and remember its id
  */
 async function resolveConversationId(
   opts: ChatOpts,
   apiUrl: string | undefined,
   model: ModelSlug,
 ): Promise<string> {
+  if (opts.new) {
+    const created = await api.post<ConversationCreateResp>('/conversations', {
+      apiUrlOverride: apiUrl,
+      body: { model: model.toUpperCase() },
+    });
+    setLastConversationId(created.id);
+    return created.id;
+  }
   if (opts.conversation) {
     try {
       // The GET endpoint returns { conversation: {...}, messages: [...] }
@@ -478,6 +488,32 @@ async function runByokChat(
     );
   }
 
+  // --effort has no meaning on a BYOK provider (no SpyCore routing or
+  // effort clamp) - reject it rather than silently ignoring it.
+  if (opts.effort !== undefined) {
+    throw new SpycoreCliError(
+      '--effort is not supported with BYOK providers.',
+      EXIT_USER_ERROR,
+      'Omit --effort, or run without --provider to use SpyCore routing.',
+    );
+  }
+
+  // --attach: text files are inlined into the message, exactly as the
+  // SpyCore path inlines them. Images need the SpyCore files API (upload
+  // + vision), which BYOK bypasses by design - reject them explicitly
+  // instead of dropping them silently (agent.ts does the same).
+  const attachments = opts.attach?.length
+    ? inspectAttachments(opts.attach, process.cwd())
+    : [];
+  const imageAttachments = attachments.filter((a) => a.kind === 'image');
+  if (imageAttachments.length > 0) {
+    throw new SpycoreCliError(
+      'Image attachments are not supported with BYOK providers.',
+      EXIT_USER_ERROR,
+      'Omit --attach, attach a text file instead, or run without --provider to use SpyCore.',
+    );
+  }
+
   // BYOK chat always starts fresh - warn if user passed conversation flags.
   if (opts.conversation || opts.resume) {
     const { warn } = await import('../lib/output.js');
@@ -506,6 +542,10 @@ async function runByokChat(
       'Pass a message: `spycore chat --provider <name> "hello"`.',
     );
   }
+  // Text attachments ride inside the message (same "[Attached files]"
+  // block the SpyCore path builds); --raw needs nothing here, the BYOK
+  // path already prints plain text with no markdown rendering.
+  const wireMessage = composeMessageWithAttachments(body, attachments);
 
   const { createByokProvider } = await import('../lib/providers/factory.js');
   const { withUsageTracking } = await import('../lib/byok-usage.js');
@@ -518,16 +558,19 @@ async function runByokChat(
 
   const json = Boolean(parentOpts.json);
   let assistantText = '';
+  // --no-stream buffers the reply and prints it once at the end instead
+  // of streaming it progressively (the SpyCore path does the same).
+  const noStream = opts.stream === false;
 
   for await (const ev of provider.streamChat({
     conversationId,
-    message: body,
+    message: wireMessage,
     model: selection.config.model,
   })) {
     if (ev.type === 'text') {
       const content = ev.text;
       assistantText += content;
-      if (!json) process.stdout.write(sanitizeForDisplay(content));
+      if (!json && !noStream) process.stdout.write(sanitizeForDisplay(content));
     } else if (ev.type === 'error') {
       throw new SpycoreCliError(
         `BYOK provider error: ${ev.message}`,
@@ -539,6 +582,9 @@ async function runByokChat(
 
   if (json) {
     process.stdout.write(JSON.stringify({ provider: opts.provider, message: assistantText }) + '\n');
+  } else if (noStream) {
+    process.stdout.write(sanitizeForDisplay(assistantText));
+    if (assistantText.length > 0 && !assistantText.endsWith('\n')) process.stdout.write('\n');
   } else if (!assistantText) {
     process.stdout.write('\n');
   }
@@ -585,20 +631,21 @@ export function registerChatCommand(program: Command): void {
         color?: boolean;
       }>() ?? {};
 
+      // BYOK provider routing FIRST: BYOK runs without a SpyCore account,
+      // so the login gate below must not apply to it (agent --provider
+      // <byok> already works logged out; chat did not). The SpyCore path
+      // below is unchanged when --provider is unset or 'spycore'.
+      if (opts.provider && opts.provider.toLowerCase() !== 'spycore') {
+        await runByokChat(messageParts, opts, parentOpts);
+        return;
+      }
+
       if (!(await isAuthenticated())) {
         throw new SpycoreCliError(
           'Not logged in.',
           EXIT_AUTH_ERROR,
           'Run `spycore login` to authenticate.',
         );
-      }
-
-      // BYOK provider routing. If --provider names a BYOK provider,
-      // route to the BYOK chat path (one-shot only). The SpyCore path below
-      // is unchanged when --provider is unset or 'spycore'.
-      if (opts.provider && opts.provider.toLowerCase() !== 'spycore') {
-        await runByokChat(messageParts, opts, parentOpts);
-        return;
       }
 
       const model = resolveModelSlug(opts.model);
@@ -717,7 +764,7 @@ export function registerChatCommand(program: Command): void {
           // exactly where a project-context preamble belongs (after the server
           // identity prompt, never overriding it). Re-read from disk each run.
           // A resumed/continued conversation already has it from when it began.
-          const isNewConversation = !opts.conversation && !opts.resume;
+          const isNewConversation = opts.new === true || (!opts.conversation && !opts.resume);
           // Assemble the wire message from its parts - the once-per-
           // conversation project-context prefix, the user's text, and the
           // inlined text-file blocks - through the single 1.8 clamp: the

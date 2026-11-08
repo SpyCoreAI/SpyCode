@@ -13,7 +13,8 @@ import {
   renderDurableMemoryBlock,
   loadDurableMemorySnapshot,
 } from '../src/lib/agent/durable-memory.js';
-import { DEFAULT_LIMITS, dispatchTool } from '../src/lib/agent/tools.js';
+import { DEFAULT_LIMITS, dispatchTool, type ToolContext } from '../src/lib/agent/tools.js';
+import { headlessApproval } from '../src/lib/agent/approval.js';
 
 let cfgDir: string;
 
@@ -80,7 +81,16 @@ describe('durable-memory readers and writers', () => {
 });
 
 describe('memory tool dispatch arms', () => {
-  const run = (args: unknown) =>
+  // Memory writes are approval-gated (mutating tool): approve them here so
+  // the add/remove arms exercise the write path, not the approval gate.
+  const run = (args: unknown, extra: Partial<ToolContext> = {}) =>
+    dispatchTool('memory', args, {
+      cwd: tmpdir(),
+      limits: DEFAULT_LIMITS,
+      requestApproval: headlessApproval(true),
+      ...extra,
+    });
+  const runUnapproved = (args: unknown) =>
     dispatchTool('memory', args, { cwd: tmpdir(), limits: DEFAULT_LIMITS });
 
   test('no action defaults to view, invalid file and action throw', async () => {
@@ -151,5 +161,26 @@ describe('memory tool dispatch arms', () => {
     expect(added.ok).toBe(true);
     expect(added.summary).toBe('remembered in USER.md');
     expect(added.content).toContain('Appended to USER.md');
+  });
+
+  test('a rejected approval blocks the write - nothing lands on disk', async () => {
+    const rejected = await runUnapproved({ action: 'add', text: 'never written' });
+    expect(rejected.ok).toBe(false);
+    expect(rejected.content).toMatch(/not approved|approval/i);
+    expect(readDurableFile('memory', cfgDir)).not.toContain('never written');
+    appendDurableMemory('memory', ['drop me'], cfgDir);
+    const rejectedRemove = await runUnapproved({ action: 'remove', match: 'drop me' });
+    expect(rejectedRemove.ok).toBe(false);
+    expect(readDurableFile('memory', cfgDir)).toContain('drop me');
+  });
+
+  test('plan mode blocks memory writes (and view - the snapshot is already frozen in the prompt)', async () => {
+    const blocked = await run({ action: 'add', text: 'plan write' }, { planMode: true });
+    expect(blocked.ok).toBe(false);
+    expect(blocked.content).toContain('disabled in planning mode');
+    expect(readDurableFile('memory', cfgDir)).not.toContain('plan write');
+    const blockedView = await run({ action: 'view' }, { planMode: true });
+    expect(blockedView.ok).toBe(false);
+    expect(blockedView.content).toContain('disabled in planning mode');
   });
 });

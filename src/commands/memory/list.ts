@@ -1,8 +1,9 @@
 import { Command, Option } from 'commander';
 import { api } from '../../lib/api.js';
+import { parseIntFlag } from '../../lib/numeric-flags.js';
 import { formatOption, json, print, resolveFormat } from '../../lib/output.js';
 import { relativeTime } from '../../lib/files.js';
-import { clipOneLine, shortId } from '../../lib/text.js';
+import { clipOneLine } from '../../lib/text.js';
 import { sanitizeForDisplay } from '../../lib/sanitize-display.js';
 
 interface MemoryItem {
@@ -50,7 +51,7 @@ export function registerMemoryListCommand(program: Command): void {
       ) => {
         const root = cmd.parent?.parent;
         const parentOpts = root?.opts<{ apiUrl?: string; json?: boolean }>() ?? {};
-        const limit = Math.max(1, Math.min(200, Number(opts.limit ?? 50)));
+        const limit = parseIntFlag(opts.limit, 'limit', { min: 1, max: 200, defaultValue: 50 });
 
         const data = await api.get<ListResp>('/api/memory', {
           apiUrlOverride: parentOpts.apiUrl,
@@ -72,7 +73,9 @@ export function registerMemoryListCommand(program: Command): void {
           return;
         }
 
-        const idCol = 14;
+        // Full ids, not shortId: lookups require the exact id (see
+        // conversations/list.ts). The column widens to the longest id.
+        const idCol = Math.max(14, ...memories.map((m) => m.id.length));
         const catCol = 12;
         const createdCol = 10;
         const snippetCol = Math.max(
@@ -93,7 +96,7 @@ export function registerMemoryListCommand(program: Command): void {
           // otherwise cut an escape sequence in half, and column widths must be
           // computed on the bytes that actually render.
           const row = [
-            sanitizeForDisplay(shortId(m.id)).padEnd(idCol),
+            sanitizeForDisplay(m.id).padEnd(idCol),
             sanitizeForDisplay(m.category || '').padEnd(catCol),
             relativeTime(m.createdAt).padEnd(createdCol),
             clipOneLine(sanitizeForDisplay(m.content || ''), snippetCol),

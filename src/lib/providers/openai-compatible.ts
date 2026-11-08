@@ -20,6 +20,7 @@ import { request } from 'undici';
 import { parseSSEStream } from '../sse.js';
 import { EXIT_USER_ERROR, SpycoreCliError } from '../errors.js';
 import { connectionErrorMessage, errText, readErrorDetail } from './wire.js';
+import { pruneByokSessions, trimHistoryMessages } from './history.js';
 import type {
   CreateConversationParams,
   Provider,
@@ -56,6 +57,8 @@ export class OpenAICompatibleProvider implements Provider {
   private readonly apiKey: string | undefined;
   /** Stateless endpoint → keep the conversation client-side per session handle. */
   private readonly sessions = new Map<string, ProviderMessage[]>();
+  /** Last use per session, for the idle-session prune (see history.ts). */
+  private readonly lastUsed = new Map<string, number>();
   private counter = 0;
 
   constructor(opts: OpenAICompatibleOptions) {
@@ -67,6 +70,8 @@ export class OpenAICompatibleProvider implements Provider {
     this.counter += 1;
     const id = `byok-${this.counter}`;
     this.sessions.set(id, []);
+    this.lastUsed.set(id, Date.now());
+    pruneByokSessions(this.sessions, this.lastUsed);
     return Promise.resolve(id);
   }
 
@@ -84,6 +89,12 @@ export class OpenAICompatibleProvider implements Provider {
         ? `${params.system}\n\n${params.message}`
         : params.message;
     history.push({ role: 'user', content });
+    // Bound the replay: the full array is resent every turn, so an unbounded
+    // history is quadratic cost and an eventual context overflow. Oldest
+    // pair first - the alternation survives, and the system prompt is
+    // re-folded into each turn above, so trimming never drops it.
+    trimHistoryMessages(history);
+    this.lastUsed.set(params.conversationId, Date.now());
     this.sessions.set(params.conversationId, history);
 
     const url = `${this.baseURL}/chat/completions`;
@@ -93,23 +104,42 @@ export class OpenAICompatibleProvider implements Provider {
     };
     // Auth header ONLY when a key is present - omit entirely for local servers.
     if (this.apiKey) headers.authorization = `Bearer ${this.apiKey}`;
-    const body = JSON.stringify({
-      model: params.model,
-      messages: history,
-      stream: true,
-      stream_options: { include_usage: true },
-    });
-
-    let res;
-    try {
-      res = await request(url, { method: 'POST', headers, body, signal: params.signal });
-    } catch (err) {
-      if (params.signal?.aborted) {
+    // `stream_options` rides the first attempt only: several
+    // OpenAI-compatible servers (Ollama, llama.cpp, LM Studio, old vLLM)
+    // reject the unknown field with 400. A 400 on the first attempt is
+    // retried once without it - usage accounting then degrades gracefully
+    // (the loop already tolerates a missing usage event).
+    let res: Awaited<ReturnType<typeof request>> | undefined;
+    let usedStreamOptions = true;
+    for (let attempt = 0; attempt < 2 && !res; attempt += 1) {
+      const body = JSON.stringify({
+        model: params.model,
+        messages: history,
+        stream: true,
+        ...(usedStreamOptions ? { stream_options: { include_usage: true } } : {}),
+      });
+      let attemptRes: Awaited<ReturnType<typeof request>>;
+      try {
+        attemptRes = await request(url, { method: 'POST', headers, body, signal: params.signal });
+      } catch (err) {
+        if (params.signal?.aborted) {
+          history.pop();
+          throw new SpycoreCliError('Cancelled', EXIT_USER_ERROR);
+        }
         history.pop();
-        throw new SpycoreCliError('Cancelled', EXIT_USER_ERROR);
+        yield { type: 'error', message: connectionErrorMessage(err, url) };
+        return;
       }
+      if (attemptRes.statusCode === 400 && usedStreamOptions) {
+        await readErrorDetail(attemptRes.body); // drain, so the connection can be reused
+        usedStreamOptions = false;
+        continue;
+      }
+      res = attemptRes;
+    }
+    if (!res) {
       history.pop();
-      yield { type: 'error', message: connectionErrorMessage(err, url) };
+      yield { type: 'error', message: 'Model endpoint did not answer the request.' };
       return;
     }
 
@@ -123,6 +153,29 @@ export class OpenAICompatibleProvider implements Provider {
       yield {
         type: 'error',
         message: httpErrorMessage(res.statusCode, params.model, this.baseURL, detail),
+      };
+      return;
+    }
+
+    // Anything other than a 200 SSE stream is not a turn: a 3xx (undici
+    // does not follow redirects) or a non-SSE 2xx body (an HTML error
+    // page from a proxy, a plain JSON blob) used to parse as zero events
+    // and end the turn "done" with empty output - indistinguishable from
+    // a genuinely empty reply. Fail loudly instead.
+    if (res.statusCode !== 200) {
+      history.pop();
+      yield {
+        type: 'error',
+        message: `Model endpoint returned HTTP ${res.statusCode} (expected a 200 SSE stream). Check --base-url (${this.baseURL}) - a redirect or a proxy error page is not a chat stream.`,
+      };
+      return;
+    }
+    const contentType = String(res.headers['content-type'] ?? '').toLowerCase();
+    if (contentType.length > 0 && !contentType.includes('text/event-stream')) {
+      history.pop();
+      yield {
+        type: 'error',
+        message: `Model endpoint returned HTTP 200 with content-type "${contentType}" (expected text/event-stream). Check --base-url (${this.baseURL}) - the endpoint did not return a chat stream.`,
       };
       return;
     }

@@ -19,9 +19,14 @@ let responder:
   | ((url: string, init: { method: string }) => MockResp)
   | null = null;
 
+// Every undici request init, so tests can assert on the options the
+// command passes (e.g. maxRedirections on presigned-URL fetches).
+let capturedInits: Array<{ url: string; init: Record<string, unknown> }> = [];
+
 vi.mock('undici', () => ({
   request: vi.fn(async (url: string, init: { method?: string } = {}) => {
     if (!responder) throw new Error('test forgot to set responder');
+    capturedInits.push({ url, init: init as Record<string, unknown> });
     return responder(url, { method: init.method ?? 'GET' });
   }),
 }));
@@ -34,6 +39,7 @@ const origStderrWrite = process.stderr.write.bind(process.stderr);
 beforeEach(async () => {
   freshConfigDir();
   responder = null;
+  capturedInits = [];
   stdoutChunks = [];
   stderrChunks = [];
   process.stdout.write = ((chunk: unknown) => {
@@ -242,6 +248,40 @@ describe('files show', () => {
       expect(caught.message).toContain('File not found');
     }
   });
+
+  test('the preview caps the bytes actually read, not just the declared size', async () => {
+    // The server declares 512 bytes but serves 20 KB: the old code read
+    // the whole body via arrayBuffer(). The preview must stop at 8 KB.
+    const big = Buffer.concat([Buffer.alloc(20000, 0x41), Buffer.from('TAIL-MARKER')]);
+    responder = (url) => {
+      if (url.includes('/api/files/file_1')) {
+        return jsonResp(200, {
+          success: true,
+          data: {
+            id: 'file_1',
+            filename: 'doc.md',
+            mimeType: 'text/markdown',
+            size: 512,
+            url: 'https://r2.example.com/doc.md?sig=abc',
+            createdAt: new Date().toISOString(),
+          },
+        });
+      }
+      if (url.includes('r2.example.com')) {
+        return streamResp(big);
+      }
+      throw new Error(`unexpected ${url}`);
+    };
+    await runCli(['show', 'file_1']);
+    const out = stdout();
+    expect(out).toContain('--- preview ---');
+    expect(out).not.toContain('TAIL-MARKER');
+    const preview = out.split('--- preview ---')[1] ?? '';
+    expect(preview.length).toBeLessThanOrEqual(8192 + 16); // 8 KB + framing
+    // The presigned-URL fetch follows redirects like a normal client.
+    const r2 = capturedInits.find((c) => c.url.includes('r2.example.com'));
+    expect(r2?.init.maxRedirections).toBe(5);
+  });
 });
 
 describe('files download', () => {
@@ -284,6 +324,10 @@ describe('files download', () => {
     await runCli(['download', 'file_1', '--output', out, '--force']);
     const got = readFileSync(out);
     expect(got.equals(payload)).toBe(true);
+    // The presigned-URL fetch follows redirects like a normal client
+    // (presigned S3/R2 URLs 302 to the object).
+    const r2 = capturedInits.find((c) => c.url.includes('r2.example.com'));
+    expect(r2?.init.maxRedirections).toBe(5);
   });
 
   test('refuses to overwrite without --force in non-TTY', async () => {

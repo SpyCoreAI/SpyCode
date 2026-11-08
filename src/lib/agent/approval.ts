@@ -22,7 +22,7 @@ export type ToolResultKind = MutationOutcome | 'command';
 /** A file write/edit awaiting approval - the diff is what the user approves. */
 export interface WriteApprovalRequest {
   kind: 'write';
-  tool: 'write_file' | 'edit_file';
+  tool: 'write_file' | 'edit_file' | 'memory';
   /** Path relative to cwd, for display. */
   path: string;
   isNew: boolean;

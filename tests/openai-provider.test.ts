@@ -226,6 +226,34 @@ describe('OpenAICompatibleProvider - error handling', () => {
     expect(e.message).toMatch(/429|rate.?limit/i);
   });
 
+  test('400 on the first attempt retries once without stream_options (Ollama/llama.cpp/LM Studio)', async () => {
+    let calls = 0;
+    responder = () => {
+      calls += 1;
+      if (calls === 1) {
+        return errResp(400, { error: { message: "unknown field 'stream_options'" } });
+      }
+      return openaiSse(['retried']);
+    };
+    const p = await newProvider({ baseURL: REMOTE, apiKey: 'sk-test' });
+    const id = await p.createConversation({ model: 'm' });
+    const events = await collect(p.streamChat({ conversationId: id, message: 'hi', model: 'm' }));
+    expect(events).toEqual([{ type: 'text', text: 'retried' }, { type: 'done' }]);
+    expect(calls).toBe(2);
+    expect(JSON.parse(requests[0]?.body ?? '{}')).toHaveProperty('stream_options');
+    expect(JSON.parse(requests[1]?.body ?? '{}')).not.toHaveProperty('stream_options');
+  });
+
+  test('a 400 on the retry (not a stream_options rejection) surfaces as an error', async () => {
+    responder = () => errResp(400, { error: { message: 'bad request' } });
+    const p = await newProvider({ baseURL: REMOTE, apiKey: 'sk-test' });
+    const id = await p.createConversation({ model: 'm' });
+    const events = await collect(p.streamChat({ conversationId: id, message: 'hi', model: 'm' }));
+    expect(events).toHaveLength(1);
+    expect(events[0]?.type).toBe('error');
+    expect(requests).toHaveLength(2); // first attempt + one retry
+  });
+
   test('connection refused → local server not running', async () => {
     responder = () => {
       const err = new Error('connect ECONNREFUSED 127.0.0.1:11434') as Error & { code?: string };

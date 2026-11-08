@@ -147,8 +147,23 @@ export const HERESTRING_OP = '<<<';
  */
 const EXPANSION_SOURCE = /\$\([^)]*\)|`[^`]*`|\$\{[^}]*\}|\$[A-Za-z_][A-Za-z0-9_]*/;
 
+/**
+ * `${IFS}` / `$IFS` expand to WHITESPACE, not to nothing: the default IFS is
+ * space/tab/newline, so `rm${IFS}-rf` is the two words `rm` and `-rf`, not
+ * the one word `rm-rf`. Removing the expansion outright spliced the
+ * neighbours together and the deny screen never saw the real command, so
+ * `rm${IFS}-rf` sailed past a deny for `rm`. IFS expansions are replaced
+ * with a single space first; every other expansion is removed as before.
+ * Callers that match whole words must re-split on whitespace after this
+ * (see `unconfidentDenyWords` in command-rules.ts) - a space inside the
+ * returned string is a word boundary, not part of a word.
+ */
+const IFS_EXPANSION = /\$\{IFS\}|\$IFS(?![A-Za-z0-9_])/g;
+
 export function stripExpansions(v: string): string {
-  return v.replace(new RegExp(EXPANSION_SOURCE.source, 'g'), '');
+  return v
+    .replace(IFS_EXPANSION, ' ')
+    .replace(new RegExp(EXPANSION_SOURCE.source, 'g'), '');
 }
 
 /** Does this word contain an expansion at all? (Non-global: `.test` is safe.) */

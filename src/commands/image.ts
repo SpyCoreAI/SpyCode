@@ -61,12 +61,29 @@ interface DownloadedImage {
  *
  * The first chunk is buffered so the magic-byte sniff can run before the
  * filename is committed; the rest streams straight to disk.
+ *
+ * Overwrite discipline: an explicit --output that already exists is refused
+ * unless --force is given (createWriteStream used to truncate it silently);
+ * an auto-generated name that already exists (same-second rerun) gets a
+ * numeric suffix instead of overwriting.
  */
 async function downloadImage(
   url: string,
   explicitOutput: string | undefined,
+  opts?: { force?: boolean | undefined },
 ): Promise<DownloadedImage> {
-  const res = await request(url);
+  const explicitPath =
+    explicitOutput && explicitOutput.length > 0 ? resolvePath(explicitOutput) : null;
+  if (explicitPath && existsSync(explicitPath) && !opts?.force) {
+    throw new SpycoreCliError(
+      `Refusing to overwrite ${explicitPath}.`,
+      EXIT_USER_ERROR,
+      'Pass --force to overwrite, or --output to write elsewhere.',
+    );
+  }
+  // Presigned S3/R2 URLs 302 to the object: follow redirects like a
+  // normal client (bounded), instead of failing with "HTTP 302".
+  const res = await request(url, { maxRedirections: 5 });
   if (res.statusCode < 200 || res.statusCode >= 300) {
     throw new SpycoreCliError(
       `Image download failed: HTTP ${res.statusCode}`,
@@ -83,11 +100,20 @@ async function downloadImage(
       ? first.value
       : Buffer.from(first.value);
 
-  const outPath = resolvePath(
-    explicitOutput && explicitOutput.length > 0
-      ? explicitOutput
-      : `image_${todaySlug()}${imageExtensionFor(res.headers['content-type'], firstChunk)}`,
-  );
+  // Explicit output was existence-checked up front; an auto-generated name
+  // gets a numeric suffix when it collides (same-second rerun) instead of
+  // truncating the previous image.
+  let outPath: string;
+  if (explicitPath) {
+    outPath = explicitPath;
+  } else {
+    const ext = imageExtensionFor(res.headers['content-type'], firstChunk);
+    const base = `image_${todaySlug()}`;
+    outPath = resolvePath(`${base}${ext}`);
+    for (let n = 2; existsSync(outPath); n += 1) {
+      outPath = resolvePath(`${base}-${n}${ext}`);
+    }
+  }
 
   let total = firstChunk.length;
   const sink = createWriteStream(outPath);
@@ -119,7 +145,7 @@ const EDIT_USAGE = 'Usage: spycore image edit <file> -p "<instruction>"';
  */
 async function runImageEdit(
   inputArgs: string[],
-  opts: { output?: string; style?: string; count?: string; prompt?: string },
+  opts: { output?: string; style?: string; count?: string; prompt?: string; force?: boolean },
   cmd: Command,
 ): Promise<void> {
   const root = cmd.parent;
@@ -323,7 +349,7 @@ async function runImageEdit(
   if (spinner) spinner.text = 'Downloading image…';
 
   const targetUrl = imageUrls[0]!;
-  const { path: outPath, size } = await downloadImage(targetUrl, opts.output);
+  const { path: outPath, size } = await downloadImage(targetUrl, opts.output, { force: opts.force });
 
   spinner?.succeed(`Saved ${outPath} (${formatFileSize(size)})`);
   if (!useSpinner && !getOutputOptions().json) {
@@ -355,6 +381,7 @@ export function registerImageCommand(program: Command): void {
       'Generate an image with Hephaestus and save it to disk, or edit one: spycore image edit <file> -p "<instruction>"',
     )
     .addOption(new Option('-o, --output <path>', 'Local path for the saved image'))
+    .addOption(new Option('-f, --force', 'Overwrite the existing file at --output'))
     .addOption(
       new Option('--style <style>', 'Generation style hint')
         .choices(['low', 'medium', 'high'])
@@ -367,7 +394,7 @@ export function registerImageCommand(program: Command): void {
     .action(
       async (
         promptArg: string[],
-        opts: { output?: string; style?: string; count?: string; prompt?: string },
+        opts: { output?: string; style?: string; count?: string; prompt?: string; force?: boolean },
         cmd: Command,
       ) => {
         // `spycore image edit <file> -p "…"` - the edit sub-surface. Exact
@@ -539,7 +566,7 @@ export function registerImageCommand(program: Command): void {
         if (spinner) spinner.text = 'Downloading image…';
 
         const targetUrl = imageUrls[0]!;
-        const { path: outPath, size } = await downloadImage(targetUrl, opts.output);
+        const { path: outPath, size } = await downloadImage(targetUrl, opts.output, { force: opts.force });
 
         spinner?.succeed(`Saved ${outPath} (${formatFileSize(size)})`);
         if (!useSpinner && !getOutputOptions().json) {

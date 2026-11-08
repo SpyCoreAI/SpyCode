@@ -14,6 +14,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { loadSecretGuardSync } from './agent/secrets.js';
+import { redactFreeText } from './redact.js';
 
 /** The newest-first changelog at the user's project root. */
 export const CHANGELOG_FILE = 'CODEBASE_CHANGELOG.md';
@@ -130,7 +131,12 @@ function oneLine(s: string): string {
  * one-line action summary, then any extra notes. Pure + deterministic.
  */
 export function formatChangelogEntry(input: ChangelogEntryInput): string {
-  const summary = oneLine(input.summary);
+  // The summary is raw task text (finalizeTaskMemory passes `input.task`
+  // straight through) and this file is a repo file that can be committed -
+  // a pasted credential in the task used to land here verbatim, the 120-char
+  // cap notwithstanding (a token fits easily). Scrub it at the formatter,
+  // the one choke point every entry passes through.
+  const summary = redactFreeText(oneLine(input.summary));
   const trimmed =
     summary.length > ENTRY_SUMMARY_CAP ? `${summary.slice(0, ENTRY_SUMMARY_CAP - 1).trimEnd()}…` : summary;
   const heading = trimmed.length > 0 ? `## ${input.stamp} - ${trimmed}` : `## ${input.stamp}`;

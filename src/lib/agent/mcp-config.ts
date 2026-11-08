@@ -15,7 +15,7 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'no
 import { join } from 'node:path';
 import { getStoredMcpServers, setStoredMcpServers } from '../config.js';
 // redact.ts imports nothing, so this cannot form a cycle with config.ts.
-import { redactUrlCredentials } from '../redact.js';
+import { redactFreeText, redactUrlCredentials } from '../redact.js';
 
 /**
  * One environment variable handed to a server child. `value === undefined` means
@@ -214,7 +214,9 @@ export function describeHeader(name: string, rawValue: string): string {
  */
 export function describeServerTarget(s: McpServerConfig): string {
   if (isRemoteServer(s)) return redactUrlCredentials(s.url ?? '');
-  return [s.command ?? '', ...(s.args ?? [])].join(' ');
+  // Same screen as the config dump: a literal token in command/args must
+  // not print cleartext from `mcp list` / `mcp test` either.
+  return [s.command ?? '', ...(s.args ?? [])].map((a) => redactFreeText(a)).join(' ');
 }
 
 /**

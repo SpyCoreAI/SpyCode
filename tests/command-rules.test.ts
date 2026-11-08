@@ -233,6 +233,21 @@ describe('evaluateCommandRules - deny', () => {
     expect(evaluateCommandRules('rm x', R).action).toBe('deny');
   });
 
+  test('deny sees through ${IFS} splices: rm${IFS}-rf is rm + -rf, not rm-rf', () => {
+    const R = rules([], ['rm']);
+    expect(evaluateCommandRules('rm${IFS}-rf /tmp/x', R).action).toBe('deny');
+    expect(evaluateCommandRules('rm$IFS -rf /tmp/x', R).action).toBe('deny');
+    // A non-deny command with ${IFS} is unaffected (no false denial).
+    expect(evaluateCommandRules('echo${IFS}hello', rules([], ['rm'])).action).toBe('ask');
+  });
+
+  test('deny matches Windows paths and .exe suffixes', () => {
+    const R = rules([], ['rm']);
+    expect(evaluateCommandRules('C:\\bin\\rm.exe x', R).action).toBe('deny');
+    expect(evaluateCommandRules('C:\\bin\\rm x', R).action).toBe('deny');
+    expect(evaluateCommandRules('rm.exe x', R).action).toBe('deny');
+  });
+
   test('deny matches at any token offset (runner-prefixed forms)', () => {
     const R = rules([], ['npm install']);
     expect(evaluateCommandRules('env npm install left-pad', R).action).toBe('deny');

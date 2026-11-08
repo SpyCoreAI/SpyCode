@@ -204,6 +204,18 @@ describe('formatChangelogEntry - Part 3b entry format', () => {
     });
     expect(entry.split('\n')[0]).toBe('## 2026-02-02');
   });
+
+  test('a token in the summary is redacted at the formatter choke point', () => {
+    const entry = formatChangelogEntry({
+      stamp: '2026-02-02',
+      summary: 'Wire up the API key sk-test-abcdef0123456789 for the client',
+      created: [],
+      modified: ['a.ts'],
+      deleted: [],
+    });
+    expect(entry).not.toContain('sk-test-abcdef0123456789');
+    expect(entry).toContain('Wire up the API key');
+  });
 });
 
 describe('nowStamp', () => {

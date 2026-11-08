@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseTurn, stripToolBlocksForDisplay } from '../src/lib/agent/protocol.js';
+import { assertContainedGlob } from '../src/lib/agent/tool-core.js';
 import {
   DEFAULT_LIMITS,
   dispatchTool,
@@ -66,6 +67,16 @@ describe('parseTurn (tool-call protocol)', () => {
     expect(r.hasUnclosedBlock).toBe(true);
   });
 
+  test('a tool block whose content holds a fenced code block parses whole', () => {
+    const content = 'Here is the snippet:\n\n```ts\nconst x = 1;\n```\n\nDone.';
+    const text = '```spycore:tool\n' + JSON.stringify({ tool: 'write_file', args: { path: 'a.md', content } }) + '\n```';
+    const r = parseTurn(text);
+    expect(r.calls).toHaveLength(1);
+    expect(r.calls[0]).toMatchObject({ tool: 'write_file' });
+    expect((r.calls[0]!.args as { content: string }).content).toBe(content);
+    expect(r.errors).toHaveLength(0);
+  });
+
   test('treats a message with no block as a final answer', () => {
     const r = parseTurn('This project is a CLI written in TypeScript.');
     expect(r.calls).toHaveLength(0);
@@ -108,6 +119,25 @@ describe('stripToolBlocksForDisplay (display-only)', () => {
 
   test('a message that is only a tool block renders as empty', () => {
     expect(stripToolBlocksForDisplay(block('repo_map', {})).trim()).toBe('');
+  });
+});
+
+describe('assertContainedGlob (brace-expansion containment)', () => {
+  test('a brace alternative that escapes is rejected', () => {
+    expect(() => assertContainedGlob('{../secret,foo}')).toThrow(/outside|escape/i);
+    expect(() => assertContainedGlob('src/{../../etc,ok}')).toThrow(/outside|escape/i);
+    expect(() => assertContainedGlob('{a,b}/../secret')).toThrow(/outside|escape/i);
+  });
+
+  test('contained braces pass, including a no-comma group', () => {
+    expect(() => assertContainedGlob('{src,lib}/**/*.ts')).not.toThrow();
+    expect(() => assertContainedGlob('src/{a}.ts')).not.toThrow();
+    expect(() => assertContainedGlob('**/*.ts')).not.toThrow();
+  });
+
+  test('a plain .. segment is still rejected', () => {
+    expect(() => assertContainedGlob('../secret')).toThrow(/outside|escape/i);
+    expect(() => assertContainedGlob('src/../../secret')).toThrow(/outside|escape/i);
   });
 });
 

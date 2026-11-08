@@ -111,9 +111,15 @@ export interface ToolsetFilter {
  */
 export function applyToolsetFilter(toolNames: string[], filter: ToolsetFilter): string[] {
   const disabled = new Set((filter.disabled ?? []).filter(isKnownToolset));
+  // An `enabled` list naming ONLY unknown toolsets means "nothing I
+  // recognise" - not "nothing is enabled". Unknown names are ignored (the
+  // module contract), so an all-unknown list degrades to no whitelist at
+  // all; the previous shape returned an empty Set here and silently
+  // disabled every inventoried tool (e.g. after a rename, or a typo).
+  const knownEnabled = (filter.enabled ?? []).filter(isKnownToolset);
   const enabled =
-    filter.enabled && filter.enabled.length > 0
-      ? new Set(filter.enabled.filter(isKnownToolset))
+    filter.enabled && filter.enabled.length > 0 && knownEnabled.length > 0
+      ? new Set(knownEnabled)
       : null;
   if (disabled.size === 0 && enabled === null) return toolNames;
   return toolNames.filter((name) => {

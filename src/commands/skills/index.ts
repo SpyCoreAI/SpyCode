@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { Command, Option } from 'commander';
 import {
@@ -167,8 +168,23 @@ function registerSync(group: Command): void {
           const resp = await api.get<ContentResp>(`/v1/skills/${encodeURIComponent(dl.name)}/content`, {
             apiUrlOverride,
           });
+          // Hash the bytes actually received, and compare against the
+          // manifest's claim. The old code recorded `meta.sha256`
+          // verbatim - a tampered or truncated download was then ledgered
+          // as verified, and later syncs skipped it as "unchanged".
+          // The real hash is what gets recorded either way, so a mismatch
+          // re-downloads next time instead of being trusted; the mismatch
+          // itself is warned loudly rather than failing the whole sync
+          // (a stale manifest is the likelier cause, and the content
+          // still came over the authenticated API).
+          const actualSha256 = createHash('sha256').update(resp.content, 'utf8').digest('hex');
+          if (meta.sha256 && actualSha256 !== meta.sha256) {
+            warn(
+              `skill "${sanitizeForDisplay(dl.name)}" downloaded hash ${actualSha256} does not match the manifest hash ${meta.sha256} - recorded the downloaded hash; it will re-download on the next sync`,
+            );
+          }
           writeSyncedSkill(dl.name, resp.content);
-          next.skills[dl.name] = { sha256: meta.sha256 };
+          next.skills[dl.name] = { sha256: actualSha256 };
           if (dl.kind === 'added') added += 1;
           else updated += 1;
         }

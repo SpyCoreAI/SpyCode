@@ -129,7 +129,10 @@ describe('N24 registry order and catalogue bytes', () => {
     expect(extra[1]!.description).toBe('e'.repeat(1000));
     expect(extra[2]!.parameters).toEqual({ type: 'object', properties: { q: { type: 'array' } }, required: ['q'] });
     expect(extra[0]!.parameters).toEqual({ type: 'object', properties: {} });
-    expect(buildToolDeclarations({ extraTools: extras, readOnlyOnly: true }).slice(toolNames().length - 3).map((d) => d.name)).toEqual([
+    // In read-only mode the four mutating native tools (write_file,
+    // edit_file, run_command, memory) are dropped, so the extras start at
+    // toolNames().length - 4; the mutating extra is dropped too.
+    expect(buildToolDeclarations({ extraTools: extras, readOnlyOnly: true }).slice(toolNames().length - 4).map((d) => d.name)).toEqual([
       'mcp__x__long',
       'mcp__x__exact',
       'mcp__x__schema',

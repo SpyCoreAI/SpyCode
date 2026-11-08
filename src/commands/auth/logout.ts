@@ -1,7 +1,7 @@
 import { Command } from 'commander';
 import { api } from '../../lib/api.js';
 import { clearToken, getToken } from '../../lib/auth.js';
-import { fail, getOutputOptions, json, success } from '../../lib/output.js';
+import { getOutputOptions, json, success, warn } from '../../lib/output.js';
 
 export function registerLogoutCommand(program: Command): void {
   program
@@ -20,33 +20,45 @@ export function registerLogoutCommand(program: Command): void {
         return;
       }
 
-      // Defensively clear the local copy first. If the server call fails
-      // (network blip, expired token, server already revoked it) we still
-      // want subsequent commands to behave like the user is logged out.
+      // Clear the local copy FIRST. The old order called the server first
+      // and failed out before clearToken() on any revoke error, so the
+      // local token stayed valid and later commands still ran logged in.
+      // The server revoke is best-effort after that: a failure warns but
+      // never resurrects the local session.
+      await clearToken();
+      let revokeError: string | null = null;
       try {
         await api.post('/auth/cli/logout', { apiUrlOverride: parentOpts.apiUrl });
       } catch (err) {
-        // Don't surface failure as a hard error - just warn in non-JSON
-        // mode and continue with the local clear.
-        if (getOutputOptions().json) {
-          json({
-            status: 'partial',
-            message:
-              err instanceof Error
-                ? err.message
-                : 'Server revoke failed; local token cleared',
-          });
-          await clearToken();
-          return;
-        }
-        fail(err);
+        revokeError = err instanceof Error ? err.message : 'Server revoke failed';
       }
 
-      await clearToken();
+      // getToken() prefers SPYCORE_TOKEN over the keychain/file, and
+      // clearToken() only clears the keychain + file - it cannot unset an
+      // environment variable. Say so plainly instead of reporting success
+      // while the env token keeps authenticating every command.
+      const envTokenStillActive = Boolean(
+        process.env.SPYCORE_TOKEN && process.env.SPYCORE_TOKEN.length > 0,
+      );
+      const envNote = envTokenStillActive
+        ? 'SPYCORE_TOKEN is still set in this environment - you are still authenticated until it is unset.'
+        : null;
+
       if (getOutputOptions().json) {
-        json({ status: 'ok' });
-      } else {
-        success('Logged out');
+        const messages: string[] = [];
+        if (revokeError) messages.push(`${revokeError}; local token cleared`);
+        if (envNote) messages.push(envNote);
+        json({
+          status: revokeError ? 'partial' : 'ok',
+          ...(messages.length > 0 ? { message: messages.join(' ') } : {}),
+          ...(envTokenStillActive ? { envTokenActive: true } : {}),
+        });
+        return;
       }
+      if (revokeError) {
+        warn(`Server revoke failed (${revokeError}) - local token cleared anyway.`);
+      }
+      success('Logged out');
+      if (envNote) warn(envNote);
     });
 }

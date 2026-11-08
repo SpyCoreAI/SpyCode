@@ -141,6 +141,26 @@ describe('conversations list edges', () => {
     expect(stdout()).toContain('T-cnv_b');
   });
 
+  test('an invalid --limit errors clearly instead of silently returning nothing', async () => {
+    responder = () =>
+      jsonResp(200, { success: true, data: { conversations: [], page: 1 } });
+    await expect(runCli(['list', '--limit', 'abc'])).rejects.toThrow(/Invalid --limit/);
+    await expect(runCli(['list', '--page', '1.5'])).rejects.toThrow(/Invalid --page/);
+  });
+
+  test('the list shows the FULL id, copy-pasteable into show/delete', async () => {
+    const fullId = 'cnv_0123456789abcdef0123456789abcdef';
+    responder = () =>
+      jsonResp(200, {
+        success: true,
+        data: { conversations: [conv(fullId, new Date().toISOString())], total: 1, page: 1 },
+      });
+    await runCli(['list']);
+    // The id column carries the whole id (the title next to it is still
+    // clipped, but the id itself must be copy-pasteable into show/delete).
+    expect(stdout()).toContain(fullId);
+  });
+
   test('JSON includes total and hasMore when the server sends total', async () => {
     responder = () =>
       jsonResp(200, {

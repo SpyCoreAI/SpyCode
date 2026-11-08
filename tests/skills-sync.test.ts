@@ -154,6 +154,25 @@ describe('skills sync', () => {
     expect(readFileSync(skillFile('beta'), 'utf8')).toBe('B v1');
   });
 
+  test('a manifest sha that does not match the download records the REAL hash and warns', async () => {
+    // The manifest claims a sha the bytes do not have (stale manifest or
+    // tampered download). The old code ledgered the manifest's claim
+    // verbatim, so later syncs skipped the skill as "unchanged".
+    setSkill('alpha', 'Alpha body');
+    manifest[0]!.sha256 = shaFor('something else entirely');
+    const r = await runSkills(['sync']);
+    expect(r.stdout + r.stderr).toMatch(/does not match the manifest hash/);
+    const ledger = JSON.parse(readFileSync(join(configDir, 'skills', '.sync.json'), 'utf8')) as {
+      skills: Record<string, { sha256: string }>;
+    };
+    expect(ledger.skills['alpha']?.sha256).toBe(shaFor('Alpha body'));
+    expect(ledger.skills['alpha']?.sha256).not.toBe(shaFor('something else entirely'));
+    // …and the next sync re-downloads it instead of trusting the mismatch.
+    requests = [];
+    await runSkills(['sync']);
+    expect(contentDownloads()).toBe(1);
+  });
+
   test('removed from the manifest + in the ledger → deleted locally', async () => {
     setSkill('alpha', 'A');
     setSkill('beta', 'B');

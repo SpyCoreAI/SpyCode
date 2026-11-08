@@ -348,13 +348,84 @@ export function safeResolve(ctx: ToolContext, p: string): string {
  * on where each result RESOLVES - this front check sees only the pattern text,
  * so it can never bound a symlink.
  */
+/**
+ * Does any brace-expansion of `pattern` contain a `..` path segment?
+ * globby expands `{a,b}` AFTER this check runs, so a purely lexical
+ * segment test misses `{../secret,foo}` (its `/`-separated segments are
+ * `{..` and `secret,foo}`). The check is done per alternative instead:
+ * find the first top-level `{…}` group, split it on top-level commas, and
+ * recurse on `prefix + alternative + suffix` for each one. A group with
+ * no top-level comma is a range (`{1..3}`) or a literal - neither can
+ * introduce a `..` segment, so it is checked as written. Nested groups
+ * recurse naturally; backslash-escaped braces are skipped.
+ */
+function globExpansionEscapes(pattern: string): boolean {
+  let depth = 0;
+  let groupStart = -1;
+  for (let i = 0; i < pattern.length; i += 1) {
+    const ch = pattern[i]!;
+    if (ch === '\\') {
+      i += 1; // escaped character - never a brace
+      continue;
+    }
+    if (ch === '{') {
+      if (depth === 0) groupStart = i;
+      depth += 1;
+    } else if (ch === '}') {
+      depth -= 1;
+      if (depth === 0 && groupStart !== -1) {
+        const prefix = pattern.slice(0, groupStart);
+        const suffix = pattern.slice(i + 1);
+        const content = pattern.slice(groupStart + 1, i);
+        const alternatives = splitTopLevelCommas(content);
+        if (alternatives.length <= 1) {
+          // No comma: a range or a literal - the group expands to itself,
+          // so it can never introduce a `..` segment. Replace it with a
+          // placeholder and keep scanning: a LATER group may still expand
+          // to an escape (`{1..3}/{../x,y}`).
+          return globExpansionEscapes(`${prefix}\u0001${suffix}`);
+        }
+        return alternatives.some((alt) => globExpansionEscapes(prefix + alt + suffix));
+      }
+      if (depth < 0) depth = 0; // unbalanced `}` - treat as literal
+    }
+  }
+  return pattern.split(/[\\/]/).some((seg) => seg === '..');
+}
+
+/** Split on commas that are not nested inside a deeper `{…}` group. */
+function splitTopLevelCommas(content: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let cur = '';
+  for (let i = 0; i < content.length; i += 1) {
+    const ch = content[i]!;
+    if (ch === '\\') {
+      cur += ch;
+      if (i + 1 < content.length) cur += content[i + 1]!;
+      i += 1;
+      continue;
+    }
+    if (ch === '{') depth += 1;
+    else if (ch === '}') depth -= 1;
+    if (ch === ',' && depth === 0) {
+      out.push(cur);
+      cur = '';
+    } else {
+      cur += ch;
+    }
+  }
+  out.push(cur);
+  return out;
+}
+
 export function assertContainedGlob(pattern: string): void {
   // A leading '!' is globby's negation marker - inspect the path portion only.
   const p = pattern.startsWith('!') ? pattern.slice(1) : pattern;
   if (isAbsolute(p) || p.startsWith('/')) {
     throw new ToolError(`glob pattern escapes the working directory: ${pattern}`);
   }
-  if (p.split(/[\\/]/).some((seg) => seg === '..')) {
+  if (globExpansionEscapes(p)) {
     throw new ToolError(`glob pattern escapes the working directory: ${pattern}`);
   }
 }

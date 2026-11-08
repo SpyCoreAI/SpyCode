@@ -1,6 +1,6 @@
 import { Command } from 'commander';
 import { formatOption, json, print, resolveFormat, writeFormatted } from '../../lib/output.js';
-import { clip, shortId } from '../../lib/text.js';
+import { clip } from '../../lib/text.js';
 import { sanitizeForDisplay } from '../../lib/sanitize-display.js';
 import { loadCronEntries, type CronEntry } from './store.js';
 
@@ -28,7 +28,9 @@ export function registerCronListCommand(program: Command): void {
         return;
       }
 
-      const idCol = 14;
+      // Full ids, not shortId: lookups require the exact id (see
+      // conversations/list.ts). The column widens to the longest id.
+      const idCol = Math.max(14, ...sorted.map((e) => e.id.length));
       const schedCol = 20;
       const modelCol = 10;
       const promptCol = Math.max(
@@ -44,7 +46,7 @@ export function registerCronListCommand(program: Command): void {
       for (const e of sorted) {
         // Sanitize BEFORE clip()/padEnd() - see conversations/list.ts.
         const row = [
-          sanitizeForDisplay(shortId(e.id)).padEnd(idCol),
+          sanitizeForDisplay(e.id).padEnd(idCol),
           sanitizeForDisplay(e.schedule).padEnd(schedCol),
           sanitizeForDisplay(e.model ?? '').padEnd(modelCol),
           clip(sanitizeForDisplay(e.prompt), promptCol),

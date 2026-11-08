@@ -32,11 +32,21 @@ export async function createByokProvider(config: ByokConfig): Promise<Provider> 
         // neither, googleOAuthConfig throws the setup hint. Use a dummy
         // port - we only need the token URL and client ID for refresh.
         const oauthConfig = googleOAuthConfig(0, config.oauthClientId);
+        const refreshToken = config.oauthRefreshToken;
+        // Refresh on demand, not just once at construction: access tokens
+        // expire after ~1h, so a provider built here used to die mid-run
+        // with 401. The initial refresh still runs now (a bad refresh
+        // token fails fast, as before); the provider replays it on 401.
+        const refresh = async (): Promise<string> => {
+          const tokens = await refreshAccessToken(oauthConfig, refreshToken);
+          return tokens.accessToken;
+        };
         try {
-          const tokens = await refreshAccessToken(oauthConfig, config.oauthRefreshToken);
+          const accessToken = await refresh();
           return new GoogleProvider({
             baseURL: config.baseURL,
-            oauthAccessToken: tokens.accessToken,
+            oauthAccessToken: accessToken,
+            refreshOAuthToken: refresh,
           });
         } catch (err) {
           throw new SpycoreCliError(

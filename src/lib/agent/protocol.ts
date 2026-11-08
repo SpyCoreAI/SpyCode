@@ -48,12 +48,81 @@ export interface ParsedTurn {
   hasUnclosedBlock: boolean;
 }
 
-// Matches a complete fenced block: opening fence + `spycore:tool` info string,
-// a newline, the body (non-greedy), then the closing triple-backtick fence.
-// `[\s\S]*?` lets the body span lines without the `s` flag.
-const COMPLETE_BLOCK_RE = /```[ \t]*spycore:tool[ \t]*\r?\n([\s\S]*?)\r?\n?[ \t]*```/g;
 // Matches an opening fence regardless of whether it is ever closed.
 const OPENING_FENCE_RE = /```[ \t]*spycore:tool/g;
+
+/** One complete fenced block: its span in the turn plus its raw body. */
+interface CompleteBlock {
+  start: number;
+  end: number;
+  body: string;
+}
+
+/**
+ * True when `body` parses as a JSON object - the shape every tool block
+ * must have. Used to pick the REAL closing fence: a `write_file` whose
+ * content holds a fenced code block contains ``` lines INSIDE the JSON
+ * string, and the old non-greedy regex stopped at the first of them and
+ * truncated the block. A truncated body cannot parse (the string is
+ * unterminated / the braces unbalanced), so a fence that yields a
+ * parseable object is the close, and any earlier fence is content.
+ */
+function parsesAsToolBlockBody(body: string): boolean {
+  let value: unknown;
+  try {
+    value = JSON.parse(body.trim());
+  } catch {
+    return false;
+  }
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Find every complete tool block in `text`, in document order. For each
+ * opening fence, the closing fence is the FIRST ``` after it whose
+ * preceding body parses as a JSON object; when no fence yields a
+ * parseable body the block is malformed and the FIRST fence is its close
+ * (so the error is still reported, exactly as before, instead of the
+ * block silently becoming "unclosed").
+ */
+function findCompleteBlocks(text: string): CompleteBlock[] {
+  const blocks: CompleteBlock[] = [];
+  const openRe = /```[ \t]*spycore:tool[ \t]*\r?\n/g;
+  let open: RegExpExecArray | null;
+  while ((open = openRe.exec(text)) !== null) {
+    const bodyStart = open.index + open[0].length;
+    const fenceRe = /```/g;
+    fenceRe.lastIndex = bodyStart;
+    let fence: RegExpExecArray | null;
+    let firstFence: { start: number; end: number } | null = null;
+    let accepted: CompleteBlock | null = null;
+    while ((fence = fenceRe.exec(text)) !== null) {
+      const fenceStart = fence.index;
+      const fenceEnd = fence.index + fence[0].length;
+      if (!firstFence) firstFence = { start: fenceStart, end: fenceEnd };
+      if (parsesAsToolBlockBody(text.slice(bodyStart, fenceStart))) {
+        accepted = { start: open.index, end: fenceEnd, body: text.slice(bodyStart, fenceStart) };
+        break;
+      }
+    }
+    if (accepted) {
+      blocks.push(accepted);
+      openRe.lastIndex = accepted.end;
+    } else if (firstFence) {
+      blocks.push({
+        start: open.index,
+        end: firstFence.end,
+        body: text.slice(bodyStart, firstFence.start),
+      });
+      openRe.lastIndex = firstFence.end;
+    } else {
+      // No closing fence at all: an unclosed/streaming block - stop here;
+      // `hasUnclosedBlock` is derived from the opening count below.
+      break;
+    }
+  }
+  return blocks;
+}
 
 /** Parse one assistant turn into tool calls + prose. Never throws. */
 export function parseTurn(raw: string): ParsedTurn {
@@ -65,13 +134,11 @@ export function parseTurn(raw: string): ParsedTurn {
   let prose = '';
   let lastIndex = 0;
   let completeBlocks = 0;
-  COMPLETE_BLOCK_RE.lastIndex = 0;
-  let match: RegExpExecArray | null;
-  while ((match = COMPLETE_BLOCK_RE.exec(text)) !== null) {
+  for (const block of findCompleteBlocks(text)) {
     completeBlocks += 1;
-    prose += text.slice(lastIndex, match.index);
-    lastIndex = match.index + match[0].length;
-    const body = (match[1] ?? '').trim();
+    prose += text.slice(lastIndex, block.start);
+    lastIndex = block.end;
+    const body = block.body.trim();
     const parsed = parseBlockBody(body);
     if ('error' in parsed) {
       errors.push({ raw: body, message: parsed.error });
@@ -130,10 +197,15 @@ function parseBlockBody(body: string): BlockParse {
  */
 export function stripToolBlocksForDisplay(text: string): string {
   if (typeof text !== 'string' || text.length === 0) return '';
-  // Local regex instances so we never disturb the module-level regexes'
-  // lastIndex (which parseTurn relies on).
-  const completeRe = /```[ \t]*spycore:tool[ \t]*\r?\n[\s\S]*?\r?\n?[ \t]*```/g;
-  let out = text.replace(completeRe, '');
+  // Remove every complete block by span (same JSON-aware scan as
+  // parseTurn, so display and execution agree on where a block ends).
+  let out = '';
+  let lastIndex = 0;
+  for (const block of findCompleteBlocks(text)) {
+    out += text.slice(lastIndex, block.start);
+    lastIndex = block.end;
+  }
+  out += text.slice(lastIndex);
   // After removing complete blocks, any remaining opening fence must be an
   // unclosed/partial block still streaming in - hide it (and anything after).
   const openIdx = out.search(/```[ \t]*spycore:tool/);

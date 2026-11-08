@@ -243,8 +243,18 @@ export function createRunDispatcher({
       recordDelta(delta.changes);
       const notice = uncapturedNotice(delta.uncaptured);
       if (notice) emit({ type: 'hook_notice', level: 'warn', text: notice });
-    } catch {
-      /* observation must never break the run - the tool already succeeded */
+    } catch (err) {
+      // Observation must never break the run - the tool already succeeded -
+      // but a failed observation must never pass as "no changes" either.
+      // diffWorkspace throws exactly when the after-listing failed, so the
+      // run is reported unjournaled (same shape as the before===null branch).
+      if (opaqueTool(toolCtx, name)) {
+        emit({
+          type: 'hook_notice',
+          level: 'warn',
+          text: `workspace observation failed after "${name}" (${err instanceof Error ? err.message : String(err)}) - changes made by "${name}" are NOT undoable with \`spycore rewind\``,
+        });
+      }
     }
     return res;
   };

@@ -140,7 +140,21 @@ export function tokenizeSimpleCommand(command: string): string[] | null {
  * ("npm run test" → "npm run test:unit" / "test-unit", never "testevil"). */
 const CONTINUATION_BOUNDARY = new Set([':', '-', '_', '.', '/']);
 
-const baseName = (token: string): string => token.slice(token.lastIndexOf('/') + 1);
+/**
+ * The file name of a command token, on EITHER separator: `/bin/rm` and
+ * `C:\bin\rm.exe` both reduce to `rm`. The `.exe` suffix is stripped here
+ * too - a deny for `rm` must catch `rm.exe`, the spelling Windows actually
+ * runs. (Callers that need the raw name compare against the unstripped
+ * form as well - see `matchesAt`.)
+ */
+const baseName = (token: string): string => {
+  const base = token.slice(Math.max(token.lastIndexOf('/'), token.lastIndexOf('\\')) + 1);
+  return base.replace(/\.exe$/i, '');
+};
+
+/** The file name without any `.exe` handling - for entries that name one. */
+const rawBaseName = (token: string): string =>
+  token.slice(Math.max(token.lastIndexOf('/'), token.lastIndexOf('\\')) + 1);
 
 /**
  * Match entry tokens against `words` starting at `start`. First token must be
@@ -159,7 +173,11 @@ function matchesAt(
   if (words.length - start < entryTokens.length) return false;
   const w0 = words[start]!;
   const e0 = entryTokens[0]!;
-  if (w0 !== e0 && !(denyBasename && baseName(w0) === e0)) return false;
+  if (
+    w0 !== e0 &&
+    !(denyBasename && (baseName(w0) === e0 || baseName(w0) === baseName(e0) || rawBaseName(w0) === e0))
+  )
+    return false;
   for (let i = 1; i < entryTokens.length; i++) {
     const e = entryTokens[i]!;
     const w = words[start + i]!;
@@ -219,6 +237,12 @@ function unconfidentDenyWords(command: string): string[][] {
   const noQuotesOrEscapes = raw.map((w) => w.replace(/['"\\]/g, '')).filter((w) => w.length > 0);
   const noExpansions = raw
     .map((w) => stripExpansions(w.replace(/['"\\]/g, '')))
+    // `stripExpansions` turns `${IFS}` into a space (it IS a word
+    // separator in the shell), so the stripped form must be re-split:
+    // `rm${IFS}-rf` becomes the two words `rm` and `-rf`, which is what
+    // the deny rules match against. Without the split the reading would
+    // stay the single token `rm -rf` and match nothing.
+    .flatMap((w) => w.split(/\s+/))
     .filter((w) => w.length > 0);
   return [surroundingQuotes, noQuotesOrEscapes, noExpansions];
 }

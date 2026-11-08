@@ -73,7 +73,7 @@
  * `globby` the read tools already import. No repository, no index, no stash.
  */
 import { createHash } from 'node:crypto';
-import { readFileSync, statSync } from 'node:fs';
+import { createReadStream, readFileSync, statSync } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
 import { containmentBound, realRoot } from '../path-containment.js';
 import type { RecordedChange } from './checkpoint.js';
@@ -155,6 +155,19 @@ function looksBinary(buf: Buffer): boolean {
 
 function sha256(buf: Buffer): string {
   return createHash('sha256').update(buf).digest('hex');
+}
+
+/**
+ * Hash a file by streaming it: secret and over-cap files need their hash
+ * (so a change is still detected) but must never be read whole into
+ * memory - the old code did `sha256(readFileSync(abs))` for exactly the
+ * files it had already decided not to retain, so a multi-GB file in the
+ * workspace cost a multi-GB read on every snapshot/diff.
+ */
+async function hashFile(abs: string): Promise<string> {
+  const hash = createHash('sha256');
+  for await (const chunk of createReadStream(abs)) hash.update(chunk as Buffer);
+  return hash.digest('hex');
 }
 
 /**
@@ -272,13 +285,14 @@ export async function snapshotWorkspace(cwd: string): Promise<WorkspaceSnapshot 
       // nothing at all and a live-shaped credential survives verbatim. Wiring
       // it here would have shipped a control that cannot fire.
       if (isSecret(abs)) {
-        entries.set(rel, { sha: sha256(readFileSync(abs)), content: null });
+        entries.set(rel, { sha: await hashFile(abs), content: null });
         continue;
       }
       if (statSync(abs).size > DELTA_MAX_FILE_BYTES) {
         // Too big to retain: hash it so a CHANGE is still detectable, and let
         // the diff report it as uncaptured rather than pretend it is unchanged.
-        entries.set(rel, { sha: sha256(readFileSync(abs)), content: null });
+        // Streamed, never read whole (see hashFile).
+        entries.set(rel, { sha: await hashFile(abs), content: null });
         continue;
       }
       buf = readFileSync(abs);
@@ -387,15 +401,15 @@ export async function closePause(
   for (const e of before.entries.values()) budget -= e.content?.length ?? 0;
 
   /** Read one path into an entry under the snapshot's own capture rules. */
-  const capture = (abs: string): Entry | null => {
+  const capture = async (abs: string): Promise<Entry | null> => {
     try {
       // - the same guard as the snapshot pass. A class closed at
       // one site is not a class closed, and the pause rebases the BASELINE, so
       // a guard here only in the snapshot would let a secret file's plaintext
       // in through the rebase instead.
-      if (isSecret(abs)) return { sha: sha256(readFileSync(abs)), content: null };
+      if (isSecret(abs)) return { sha: await hashFile(abs), content: null };
       if (statSync(abs).size > DELTA_MAX_FILE_BYTES) {
-        return { sha: sha256(readFileSync(abs)), content: null };
+        return { sha: await hashFile(abs), content: null };
       }
       const buf = readFileSync(abs);
       const binary = looksBinary(buf);
@@ -423,7 +437,7 @@ export async function closePause(
       continue;
     }
     if (st.size === at.size && st.mtimeMs === at.mtimeMs) continue;
-    const entry = capture(abs);
+    const entry = await capture(abs);
     if (entry === null) {
       // Cannot retain it now. Dropping the entry would make the delta read the
       // path as CREATED, so keep it out of `entries` and let the diff report it
@@ -461,7 +475,7 @@ export async function closePause(
       if (before.entries.has(rel)) continue;
       const abs = join(root, rel);
       if (!inside(abs)) continue;
-      const entry = capture(abs);
+      const entry = await capture(abs);
       if (entry !== null) before.entries.set(rel, entry);
       rebased.push(rel);
     }
@@ -503,7 +517,16 @@ export async function diffWorkspace(
   const changes: RecordedChange[] = [];
   const uncaptured: string[] = [];
   const files = await listWorkspace(root);
-  if (files === null) return { changes, uncaptured };
+  if (files === null) {
+    // The after-listing failed (enumeration error, or the workspace grew
+    // past DELTA_MAX_FILES mid-run). Returning an empty delta here
+    // reported "no changes" - a false clean bill that left mutations
+    // unjournaled with no warning. Throw instead: the caller reports the
+    // run unjournaled rather than silently claiming nothing changed.
+    throw new Error(
+      'workspace listing failed after the change (enumeration error or over the file cap) - the change could not be journaled',
+    );
+  }
   const inside = containmentBound(root);
   const seen = new Set<string>();
   /**
@@ -530,18 +553,28 @@ export async function diffWorkspace(
     seen.add(rel);
     if (alreadyJournaled.has(abs)) continue;
     const prior = before.entries.get(rel);
-    let buf: Buffer;
-    let oversize = false;
+    const secret = isSecret(abs);
+    let buf: Buffer | null = null;
+    let sha: string;
     try {
-      oversize = statSync(abs).size > DELTA_MAX_FILE_BYTES;
+      const size = statSync(abs).size;
+      if (secret || size > DELTA_MAX_FILE_BYTES) {
+        // Secret or over-cap: hash by streaming (never read whole, never
+        // retained) - the hash alone tells changed from unchanged, and a
+        // change is reported uncaptured below.
+        sha = await hashFile(abs);
+        if (prior && prior.sha === sha) continue; // unchanged - the common case
+        uncaptured.push(rel);
+        continue;
+      }
       buf = readFileSync(abs);
+      sha = sha256(buf);
     } catch {
       continue;
     }
-    const sha = sha256(buf);
     if (prior && prior.sha === sha) continue; // unchanged - the common case
-    const binary = looksBinary(buf);
-    if (binary || oversize || isSecret(abs) || (prior && prior.content === null)) {
+    const binary = looksBinary(buf as Buffer);
+    if (binary || (prior && prior.content === null)) {
       uncaptured.push(rel);
       continue;
     }
@@ -562,7 +595,8 @@ export async function diffWorkspace(
       path: abs,
       op: prior ? 'modify' : 'create',
       before: prior ? prior.content : null,
-      after: buf.toString('utf8'),
+      // Secret/oversize/binary paths continued above, so buf is set here.
+      after: (buf as Buffer).toString('utf8'),
     });
   }
 

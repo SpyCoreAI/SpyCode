@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
@@ -16,20 +16,21 @@ interface MockResp {
 }
 
 let responder:
-  | ((url: string, init: { method: string; body?: unknown; headers?: Record<string, string> }) => MockResp)
+  | ((url: string, init: { method: string; body?: unknown; headers?: Record<string, string>; maxRedirections?: number }) => MockResp)
   | null = null;
 
 vi.mock('undici', () => ({
   request: vi.fn(
     async (
       url: string,
-      init: { method?: string; body?: unknown; headers?: Record<string, string> } = {},
+      init: { method?: string; body?: unknown; headers?: Record<string, string>; maxRedirections?: number } = {},
     ) => {
       if (!responder) throw new Error('test forgot to set responder');
       return responder(url, {
         method: init.method ?? 'GET',
         body: init.body,
         headers: init.headers,
+        maxRedirections: init.maxRedirections,
       });
     },
   ),
@@ -118,6 +119,43 @@ async function runCli(argv: string[], parentArgs: string[] = []): Promise<void> 
 describe('spycore image', () => {
   test('streams image event then downloads', async () => {
     const png = Buffer.from('PNGDATA'.repeat(50));
+    const downloadInits: Array<Record<string, unknown>> = [];
+    responder = (url, init) => {
+      if (init.method === 'POST' && url.endsWith('/conversations')) {
+        return jsonResp(200, {
+          success: true,
+          data: { id: 'cnv_img', title: 'New', model: 'HEPHAESTUS' },
+        });
+      }
+      if (init.method === 'POST' && url.includes('/api/chat/stream')) {
+        return sseResp([
+          {
+            type: 'image',
+            urls: ['https://r2.example.com/img.png?sig=abc'],
+            revisedPrompt: 'a sunset over mountains',
+            cost: 0.04,
+          },
+          { type: 'done' },
+        ]);
+      }
+      if (url.includes('r2.example.com')) {
+        downloadInits.push(init as unknown as Record<string, unknown>);
+        return binaryResp(png);
+      }
+      throw new Error(`unexpected ${url}`);
+    };
+
+    const out = join(workDir, 'pic.png');
+    await runCli(['a sunset', '--output', out]);
+    const got = readFileSync(out);
+    expect(got.equals(png)).toBe(true);
+    // Presigned URLs 302: the download follows redirects like a client.
+    expect(downloadInits).toHaveLength(1);
+    expect(downloadInits[0]?.['maxRedirections']).toBe(5);
+  });
+
+  test('an existing --output is refused unless --force is given', async () => {
+    const png = Buffer.from('PNGDATA'.repeat(50));
     responder = (url, init) => {
       if (init.method === 'POST' && url.endsWith('/conversations')) {
         return jsonResp(200, {
@@ -142,10 +180,68 @@ describe('spycore image', () => {
       throw new Error(`unexpected ${url}`);
     };
 
-    const out = join(workDir, 'pic.png');
-    await runCli(['a sunset', '--output', out]);
-    const got = readFileSync(out);
-    expect(got.equals(png)).toBe(true);
+    const out = join(workDir, 'existing.png');
+    writeFileSync(out, 'keep me');
+    // Refused BEFORE any download: the original file is untouched.
+    await expect(runCli(['a sunset', '--output', out])).rejects.toThrow(/Refusing to overwrite/);
+    expect(readFileSync(out, 'utf8')).toBe('keep me');
+    // With --force the same path is overwritten with the download.
+    await runCli(['a sunset', '--output', out, '--force']);
+    expect(readFileSync(out).equals(png)).toBe(true);
+  });
+
+  test('an auto-named file that already exists gets a numeric suffix', async () => {
+    const png = Buffer.from('PNGDATA'.repeat(50));
+    responder = (url, init) => {
+      if (init.method === 'POST' && url.endsWith('/conversations')) {
+        return jsonResp(200, {
+          success: true,
+          data: { id: 'cnv_img', title: 'New', model: 'HEPHAESTUS' },
+        });
+      }
+      if (init.method === 'POST' && url.includes('/api/chat/stream')) {
+        return sseResp([
+          {
+            type: 'image',
+            urls: ['https://r2.example.com/img.png?sig=abc'],
+            revisedPrompt: 'a sunset over mountains',
+            cost: 0.04,
+          },
+          { type: 'done' },
+        ]);
+      }
+      if (url.includes('r2.example.com')) {
+        return binaryResp(png);
+      }
+      throw new Error(`unexpected ${url}`);
+    };
+
+    // The second auto-named download must not truncate the first. The
+    // name is 1-second resolution, so two runs in the same second collide
+    // - but a slow run can cross a second boundary, so pre-create the
+    // colliding name for BOTH the current second and the next one; the
+    // download then always lands on a `-2` name, whatever second it is in.
+    // No --output: the name resolves against cwd, so run inside the temp
+    // dir to keep the repo clean.
+    const slugFor = (d: Date): string => {
+      const pad = (n: number) => String(n).padStart(2, '0');
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+    };
+    const now = new Date();
+    const next = new Date(now.getTime() + 1000);
+    writeFileSync(join(workDir, `image_${slugFor(now)}.png`), png);
+    writeFileSync(join(workDir, `image_${slugFor(next)}.png`), png);
+    const prevCwd = process.cwd();
+    process.chdir(workDir);
+    try {
+      await runCli(['a sunset']);
+    } finally {
+      process.chdir(prevCwd);
+    }
+    const files = readdirSync(workDir).filter((f) => f.startsWith('image_'));
+    const suffixed = files.filter((f) => /-2\.png$/.test(f));
+    expect(suffixed).toHaveLength(1);
+    expect(readFileSync(join(workDir, suffixed[0] as string)).equals(png)).toBe(true);
   });
 
   test('moderation rejection produces a sanitised message', async () => {

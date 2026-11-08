@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
+import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -42,6 +43,17 @@ describe('snapshotWorkspace capture rules', () => {
     expect(s.entries.get('bin.dat')?.sha).toHaveLength(64);
   });
 
+  test('hash-only entries carry the true streaming sha256', async () => {
+    // The oversize branch hashes by stream, never by reading the whole
+    // file into memory - the digest must still be exactly sha256 of the
+    // bytes (the secret-file branch calls the same hashFile()).
+    const big = Buffer.alloc(2 * 1024 * 1024 + 1, 0x61);
+    writeFileSync(fp('big.txt'), big);
+    const s = await snap();
+    expect(s.entries.get('big.txt')?.sha).toBe(createHash('sha256').update(big).digest('hex'));
+    expect(s.entries.get('big.txt')?.content).toBeNull();
+  });
+
   test('the retained-bytes cap fails the snapshot closed', async () => {
     for (let i = 0; i < 33; i += 1) {
       writeFileSync(fp(`f${i}.txt`), Buffer.alloc(2 * 1024 * 1024, 0x61));
@@ -49,13 +61,15 @@ describe('snapshotWorkspace capture rules', () => {
     expect(await snapshotWorkspace(workDir)).toBeNull();
   });
 
-  test('the file-count cap fails the snapshot and the diff closed', { timeout: 60_000 }, async () => {
+  test('the file-count cap fails the snapshot and the diff throws instead of reporting no changes', { timeout: 60_000 }, async () => {
     for (let i = 0; i < 20001; i += 1) {
       writeFileSync(fp(`f${i}.txt`), '');
     }
     expect(await snapshotWorkspace(workDir)).toBeNull();
     const hand: WorkspaceSnapshot = { root: workDir, entries: new Map(), present: null };
-    expect(await diffWorkspace(hand, new Set())).toEqual({ changes: [], uncaptured: [] });
+    // The after-list is over the cap, so the change could not be
+    // journaled - surfacing the error beats a false "no changes".
+    await expect(diffWorkspace(hand, new Set())).rejects.toThrow(/could not be journaled/);
   });
 });
 

@@ -54,6 +54,11 @@ describe('B4: fallback error detection', () => {
     expect(isFallbackEligibleError(new Error('Rate limit exceeded'))).toBe(true);
   });
 
+  test('detects the probe timeout wording ("timed out" has no "timeout" in it)', () => {
+    expect(isFallbackEligibleError(new Error('BYOK provider probe timed out after 15s'))).toBe(true);
+    expect(isFallbackEligibleError(new Error('request timed out'))).toBe(true);
+  });
+
   test('detects network errors', () => {
     expect(isFallbackEligibleError(new Error('ECONNREFUSED'))).toBe(true);
     expect(isFallbackEligibleError(new Error('ENOTFOUND'))).toBe(true);

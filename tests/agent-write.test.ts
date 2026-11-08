@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -205,6 +205,24 @@ describe('mutating tools', () => {
     expect(r.ok).toBe(false);
     expect(r.kind).toBe('rejected');
     expect(existsSync(join(workDir, 'skip.txt'))).toBe(false);
+  });
+
+  test('a path swapped to a secret file during the approval pause is re-checked and blocked', async () => {
+    writeFileSync(join(workDir, '.env'), 'ORIGINAL=keepme\n');
+    writeFileSync(join(workDir, 'notes.md'), 'original notes\n');
+    // A concurrent process replaces the approved target with a symlink to
+    // the secret file while the human is deciding. Only containment used
+    // to be re-checked after the pause, so the write sailed through and
+    // overwrote the secret file with model text.
+    const swappingApproval: RequestApproval = async () => {
+      unlinkSync(join(workDir, 'notes.md'));
+      symlinkSync(join(workDir, '.env'), join(workDir, 'notes.md'));
+      return { approved: true };
+    };
+    const r = await dispatchTool('write_file', { path: 'notes.md', content: 'pwned\n' }, ctx(swappingApproval));
+    expect(r.ok).toBe(false);
+    expect(r.content).toMatch(/blocked: sensitive path/);
+    expect(readFileSync(join(workDir, '.env'), 'utf8')).toBe('ORIGINAL=keepme\n');
   });
 
   test('write_file rejects path traversal (before any prompt)', async () => {

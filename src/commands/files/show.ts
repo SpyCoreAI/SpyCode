@@ -89,10 +89,23 @@ export function registerFilesShowCommand(program: Command): void {
       ) {
         try {
           const { request } = await import('undici');
-          const res = await request(file.url);
+          // Presigned URLs 302: follow redirects like a normal client.
+          const res = await request(file.url, { maxRedirections: 5 });
           if (res.statusCode >= 200 && res.statusCode < 300) {
-            const buf = await res.body.arrayBuffer();
-            const text = Buffer.from(buf).toString('utf8');
+            // Cap the bytes ACTUALLY read, not just the server-declared
+            // size: a body larger than the declared 8 KB used to be read
+            // whole into memory via arrayBuffer().
+            const chunks: Buffer[] = [];
+            let total = 0;
+            for await (const chunk of res.body as AsyncIterable<Buffer | Uint8Array>) {
+              const buf = chunk instanceof Buffer ? chunk : Buffer.from(chunk);
+              const room = PREVIEW_MAX_BYTES - total;
+              if (room <= 0) break;
+              chunks.push(buf.subarray(0, room));
+              total += Math.min(buf.length, room);
+              if (total >= PREVIEW_MAX_BYTES) break;
+            }
+            const text = Buffer.concat(chunks).toString('utf8');
             const clipped =
               text.length > PREVIEW_MAX_BYTES ? `${text.slice(0, PREVIEW_MAX_BYTES)}…` : text;
             print('');

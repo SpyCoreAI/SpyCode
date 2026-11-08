@@ -106,7 +106,9 @@ export function registerFilesDownloadCommand(program: Command): void {
           }).start();
         }
 
-        const res = await request(downloadUrl);
+        // Presigned S3/R2 URLs 302 to the object: follow redirects like a
+        // normal client (bounded), instead of failing with "HTTP 302".
+        const res = await request(downloadUrl, { maxRedirections: 5 });
         if (res.statusCode < 200 || res.statusCode >= 300) {
           spinner?.fail();
           throw new SpycoreCliError(

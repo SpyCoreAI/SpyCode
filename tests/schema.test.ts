@@ -184,6 +184,38 @@ describe('schema command (via direct invocation)', () => {
     ).toEqual([]);
   });
 
+  test('--commands text output names nested commands by their full path', async () => {
+    const writes: string[] = [];
+    const origWrite = process.stdout.write.bind(process.stdout);
+    (process.stdout.write as unknown) = (chunk: string | Uint8Array): boolean => {
+      writes.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf-8'));
+      return true;
+    };
+
+    const { Command } = await import('commander');
+    const { configureOutput } = await import('../src/lib/output.js');
+    const { registerSchemaCommand } = await import('../src/commands/schema.js');
+
+    const program = new Command();
+    program.exitOverride();
+    configureOutput({ json: false, color: false });
+    registerSchemaCommand(program, '0.0.0');
+
+    try {
+      await program.parseAsync(['schema', '--commands'], { from: 'user' });
+    } finally {
+      process.stdout.write = origWrite;
+      configureOutput({ json: false, color: true });
+    }
+
+    const out = writes.join('');
+    // The parent is part of the name: ['conversations', 'list'] renders as
+    // "conversations list", never "list list".
+    expect(out).toContain('conversations list');
+    expect(out).not.toMatch(/^list list/m);
+    expect(out).toContain('cron list');
+  });
+
   test('schema output passes JSON.parse round-trip', async () => {
     // Capture stdout via process.stdout.write hook.
     const writes: string[] = [];

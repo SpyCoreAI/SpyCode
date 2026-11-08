@@ -140,6 +140,15 @@ function redactMcpServer(entry: unknown): unknown {
   if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) return entry;
   const out = { ...(entry as Record<string, unknown>) };
   if (typeof out.url === 'string') out.url = redactUrlCredentials(out.url);
+  // A literal token in a stdio server's command or args printed cleartext
+  // from `config get/list --json` - the same free-text screen the rest of
+  // the package applies to model-facing text. `${ENV_VAR}` references are
+  // not secret values (the value lives in the environment), so only
+  // secret-shaped runs are replaced, exactly as redactFreeText does.
+  if (typeof out.command === 'string') out.command = redactFreeText(out.command);
+  if (Array.isArray(out.args)) {
+    out.args = out.args.map((a) => (typeof a === 'string' ? redactFreeText(a) : a));
+  }
   if (out.headers !== null && typeof out.headers === 'object' && !Array.isArray(out.headers)) {
     const headers: Record<string, unknown> = {};
     for (const [name, value] of Object.entries(out.headers as Record<string, unknown>)) {

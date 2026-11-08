@@ -2,11 +2,15 @@ import { Command, Option } from 'commander';
 import { execFileSync, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import {
+  closeSync,
   createWriteStream,
   existsSync,
+  fstatSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
+  readSync,
   renameSync,
   unlinkSync,
   writeFileSync,
@@ -485,47 +489,83 @@ async function attachRun(rec: DetachedRunRecord, opts: AttachOpts): Promise<void
   const follow = opts.follow !== false;
   const maxLines = Math.max(0, Number(opts.lines ?? 50) || 0);
 
+  // --follow used to re-read the whole log file every 500ms
+  // (readFileSync per poll is O(n^2) CPU/IO over a long run). Keep one fd
+  // open and read only the bytes appended since the last poll; reset the
+  // offset to 0 when the file shrinks (truncation / rotation). The
+  // initial --lines tail stays a single read.
+  let fd: number | null = null;
   let offset = 0;
-  const printNewBytes = (): void => {
-    let data: Buffer;
+  const openFd = (): number | null => {
+    if (fd !== null) return fd;
     try {
-      data = readFileSync(rec.logFile);
+      fd = openSync(rec.logFile, 'r');
+    } catch {
+      return null;
+    }
+    return fd;
+  };
+  const printNewBytes = (): void => {
+    const f = openFd();
+    if (f === null) return;
+    let size: number;
+    try {
+      size = fstatSync(f).size;
     } catch {
       return;
     }
-    if (data.length <= offset) return;
-    const chunk = data.subarray(offset).toString('utf-8');
-    offset = data.length;
+    if (size < offset) offset = 0; // truncated or rotated
+    if (size <= offset) return;
+    const chunk = Buffer.alloc(size - offset);
+    let read: number;
+    try {
+      read = readSync(f, chunk, 0, chunk.length, offset);
+    } catch {
+      return;
+    }
+    offset += read;
+    if (read <= 0) return;
+    const text = chunk.subarray(0, read).toString('utf-8');
     // The log carries raw agent output (model narration, tool results, MCP
     // text) - it bypassed every display boundary on the way in. Sanitize
     // here so OSC-52 clipboard writes, CSI cursor moves, and fake-prompt
     // line rewrites from a hostile run cannot drive the terminal.
-    process.stdout.write(sanitizeForDisplay(chunk));
+    process.stdout.write(sanitizeForDisplay(text));
   };
 
-  if (maxLines > 0) {
-    let data = Buffer.alloc(0);
-    try {
-      data = readFileSync(rec.logFile);
-    } catch {
-      // log not written yet - fall through to follow
+  try {
+    if (maxLines > 0) {
+      let data = Buffer.alloc(0);
+      try {
+        data = readFileSync(rec.logFile);
+      } catch {
+        // log not written yet - fall through to follow
+      }
+      const lines = data.toString('utf-8').split('\n');
+      const tail = lines.slice(-maxLines).join('\n');
+      process.stdout.write(tail.length > 0 ? `${sanitizeForDisplay(tail)}\n` : '');
+      offset = data.length;
     }
-    const lines = data.toString('utf-8').split('\n');
-    const tail = lines.slice(-maxLines).join('\n');
-    process.stdout.write(tail.length > 0 ? `${sanitizeForDisplay(tail)}\n` : '');
-    offset = data.length;
-  }
 
-  if (!follow) return;
+    if (!follow) return;
 
-  let current = refreshStatus(rec);
-  while (current.status === 'running') {
+    let current = refreshStatus(rec);
+    while (current.status === 'running') {
+      printNewBytes();
+      await sleep(500);
+      current = refreshStatus(current);
+    }
     printNewBytes();
-    await sleep(500);
-    current = refreshStatus(current);
+    print(`\nRun ${rec.id} ${statusChip(current.status)}.`);
+  } finally {
+    if (fd !== null) {
+      try {
+        closeSync(fd);
+      } catch {
+        // already closed - nothing to do
+      }
+    }
   }
-  printNewBytes();
-  print(`\nRun ${rec.id} ${statusChip(current.status)}.`);
 }
 
 /**

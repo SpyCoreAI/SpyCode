@@ -1,7 +1,8 @@
 import { Command, Option } from 'commander';
 import { api } from '../../lib/api.js';
+import { parseIntFlag } from '../../lib/numeric-flags.js';
 import { formatOption, json, print, resolveFormat, writeFormatted } from '../../lib/output.js';
-import { clip, shortId } from '../../lib/text.js';
+import { clip } from '../../lib/text.js';
 import { sanitizeForDisplay } from '../../lib/sanitize-display.js';
 
 interface ConvSummary {
@@ -63,8 +64,8 @@ export function registerConversationsListCommand(program: Command): void {
     .action(async (opts: { limit?: string; page?: string; format?: string }, cmd: Command) => {
       const root = cmd.parent?.parent;
       const parentOpts = root?.opts<{ apiUrl?: string; json?: boolean }>() ?? {};
-      const limit = Math.max(1, Math.min(100, Number(opts.limit ?? SERVER_PAGE_SIZE)));
-      const page = Math.max(1, Number(opts.page ?? 1));
+      const limit = parseIntFlag(opts.limit, 'limit', { min: 1, max: 100, defaultValue: SERVER_PAGE_SIZE });
+      const page = parseIntFlag(opts.page, 'page', { min: 1, defaultValue: 1 });
 
       const data = await api.get<ListResp>(
         `/conversations?page=${encodeURIComponent(String(page))}`,
@@ -103,7 +104,11 @@ export function registerConversationsListCommand(program: Command): void {
         return;
       }
 
-      const idCol = 14;
+      // Full ids, not shortId: the lookup commands (show/delete/export/
+      // share/remove) require the exact id, and a 12-char + … display
+      // made copy-paste from a list fail with "not found". The column
+      // widens to the longest id on the page.
+      const idCol = Math.max(14, ...items.map((c) => c.id.length));
       const titleCol = Math.max(20, Math.min(40, process.stdout.columns ? process.stdout.columns - 50 : 40));
       const modelCol = 10;
 
@@ -118,7 +123,7 @@ export function registerConversationsListCommand(program: Command): void {
       for (const c of items) {
         // Sanitize BEFORE clip()/padEnd() - see memory/list.ts.
         const row = [
-          sanitizeForDisplay(shortId(c.id)).padEnd(idCol),
+          sanitizeForDisplay(c.id).padEnd(idCol),
           clip(sanitizeForDisplay(c.title || '(untitled)'), titleCol).padEnd(titleCol),
           sanitizeForDisplay(c.model || '').padEnd(modelCol),
           relTime(c.updatedAt),
