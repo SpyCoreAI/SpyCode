@@ -29,7 +29,7 @@ import { accessSync, constants, existsSync, readFileSync, statSync } from 'node:
 import { basename, isAbsolute, relative, resolve as resolvePath, sep } from 'node:path';
 import { detectMime, formatFileSize } from './files.js';
 import { getToken } from './auth.js';
-import { isTrustedTokenHost, resolveApiUrl } from './config.js';
+import { isTrustedTokenHost, normalizeApiBase, resolveApiUrl } from './config.js';
 import { uploadFile, type UploadResult } from './upload.js';
 import { MODEL_DISPLAY } from './models.js';
 import { EXIT_USER_ERROR, SpycoreCliError } from './errors.js';
@@ -357,8 +357,10 @@ export async function uploadImageAttachment(
   att: LocalAttachment,
   opts: { apiUrlOverride?: string | undefined; signal?: AbortSignal | undefined } = {},
 ): Promise<UploadResult> {
-  const apiUrl = resolveApiUrl(opts.apiUrlOverride).replace(/\/+$/, '');
-  // `apiUrl` already ends in `/api`; the route is `/api/files/upload`.
+  // `normalizeApiBase` guarantees exactly one trailing `/api`, so a base
+  // set without it (env, --api-url, config) still uploads to the right
+  // route - the same normalization api.ts and sse.ts apply.
+  const apiUrl = normalizeApiBase(resolveApiUrl(opts.apiUrlOverride));
   const url = `${apiUrl}/files/upload`;
   const headers: Record<string, string> = {
     'user-agent': '@spycore/cli',

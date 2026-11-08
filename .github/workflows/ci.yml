@@ -20,17 +20,19 @@ jobs:
     # Windows runs via the suite's own `skipIf(win32)` guards for POSIX-only
     # assertions; native Windows remains otherwise untested per SECURITY.md.
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, macos-latest, windows-latest]
-        node-version: [22]
+        node-version: [22, 24]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       # standalone: pnpm runs on its own bundled runtime — pnpm 11.6+ needs
       # newer node builtins than node 20 provides (node:sqlite, used by the
-      # session search, requires node 22.5+). The matrix therefore runs node
-      # 22 only; the project itself builds and tests on the matrix node version.
+      # session search, requires node 22.5+). The matrix therefore runs the
+      # two supported LTS lines, 22 and 24; the project itself builds and
+      # tests on the matrix node version.
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         with:
           version: 11
@@ -49,6 +51,7 @@ jobs:
     # vitest.config.ts (set from measured suite coverage - the gate pins "no
     # regression", not an aspirational number).
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
@@ -69,6 +72,7 @@ jobs:
     # is actually wired. The licenses check keeps THIRD-PARTY-LICENSES fresh
     # (L-9); the pack-verify self-test is pure (no pack, no network).
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
@@ -81,6 +85,11 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: node scripts/dependency-audit.mjs
+      # The resolved-install audit re-asks the registry for what a user's
+      # fresh install actually resolves (no lockfile, no overrides) - the
+      # workspace audit above cannot see that. Live run exits 3 on
+      # precondition failure (fail-closed); see scripts/audit-resolved-install.mjs.
+      - run: node scripts/audit-resolved-install.mjs
       - run: node scripts/gen-third-party-licenses.mjs --check
       - run: sh scripts/pack-verify.sh --self-test
 
@@ -106,3 +115,66 @@ jobs:
         env:
           PACK_VERIFY_PUBLIC_ONLY: ${{ github.event.pull_request.head.repo.fork == 'true' }}
         run: sh scripts/pack-verify.sh
+
+  pack-verify-macos:
+    # The installed artifact was verified only on Ubuntu: the full
+    # pack-verify run above lives in the audit job (ubuntu-24.04), and its
+    # fallback branch is the one macOS takes. This job runs the same full
+    # check on macOS, with the same denylist-secret / PACK_VERIFY_PUBLIC_ONLY
+    # fork pattern as the audit job.
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        with:
+          version: 11
+          standalone: true
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Provide identity denylist (private)
+        env:
+          IDENTITY_DENYLIST: ${{ secrets.SPYCODE_IDENTITY_DENYLIST }}
+        run: |
+          printf '%s' "$IDENTITY_DENYLIST" > "$RUNNER_TEMP/identity-denylist.txt"
+          echo "IDENTITY_DENYLIST_FILE=$RUNNER_TEMP/identity-denylist.txt" >> "$GITHUB_ENV"
+      - name: Pack-verify (full artifact check)
+        env:
+          PACK_VERIFY_PUBLIC_ONLY: ${{ github.event.pull_request.head.repo.fork == 'true' }}
+        run: sh scripts/pack-verify.sh
+
+  pack-smoke-windows:
+    # pack-verify.sh cannot run on Windows (no sh), so the installed
+    # artifact gets a Windows smoke instead: pack, install the tarball into
+    # an isolated prefix, and check the shim starts, reports the manifest
+    # version, and lists commands. Native Windows remains otherwise
+    # untested per SECURITY.md.
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        with:
+          version: 11
+          standalone: true
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Pack and install the tarball into an isolated prefix
+        run: |
+          npm pack --pack-destination $env:RUNNER_TEMP
+          $tarball = Get-ChildItem $env:RUNNER_TEMP\*.tgz | Select-Object -First 1
+          npm install -g $tarball.FullName --prefix $env:RUNNER_TEMP\prefix
+          $env:PATH = "$env:RUNNER_TEMP\prefix;$env:PATH"
+          spycore --version
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $ver = (spycore --version).Trim()
+          $manifest = node -p "require('./package.json').version"
+          if ($ver -ne $manifest) { Write-Error "installed --version [$ver] != manifest [$manifest]"; exit 1 }
+          spycore --help
+          if ($LASTEXITCODE -ne 0) { exit 1 }

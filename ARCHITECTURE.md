@@ -22,7 +22,11 @@ Plus a set of management commands (`mcp`, `provider`, `runs`, `cron`,
 ```
 src/index.ts            CLI entry: builds the commander program,
                         registers every command group.
-src/commands/           One directory per command group.
+src/commands/           Command groups: mostly flat files (agent.ts, chat.ts,
+                        rewind.ts, git-workflow.ts, …); directories only
+                        where a group has several commands (auth/, config/,
+                        conversations/, cron/, files/, mcp/, memory/,
+                        projects/, provider/, skills/).
 src/lib/                Shared library: agent engine, providers,
                         output, config, sanitization.
 src/ui/                 Ink/React renderers: tui, agent, chat.

@@ -2,11 +2,8 @@ import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { freshConfigDir } from './helpers.js';
+import { fakeChatIo, freshConfigDir } from './helpers.js';
 import type { Provider, ProviderEvent, StreamChatParams } from '../src/lib/providers/types.js';
-import type { ApprovalRequest } from '../src/lib/agent/approval.js';
-import type { AgentEvent } from '../src/lib/agent/loop.js';
-import type { ChatAgentIo } from '../src/lib/chat-agent-run.js';
 import type { CommandRule } from '../src/lib/agent/command-rules.js';
 import {
   applyDeleteLine,
@@ -79,48 +76,6 @@ afterEach(async () => {
     /* ignore */
   }
 });
-
-interface IoHarness {
-  notices: Array<{ kind: string; text: string }>;
-  events: AgentEvent[];
-  plans: string[];
-  approvals: ApprovalRequest[];
-  questions: string[];
-  io: ChatAgentIo;
-}
-
-/** The chat-modes harness, extended with queued ask/readText answers. */
-function fakeIo(opts: { asks?: string[]; texts?: string[] } = {}, overrides: Partial<ChatAgentIo> = {}): IoHarness {
-  const notices: Array<{ kind: string; text: string }> = [];
-  const events: AgentEvent[] = [];
-  const plans: string[] = [];
-  const approvals: ApprovalRequest[] = [];
-  const questions: string[] = [];
-  const asks = [...(opts.asks ?? [])];
-  const texts = [...(opts.texts ?? [])];
-  return {
-    notices,
-    events,
-    plans,
-    approvals,
-    questions,
-    io: {
-      notify: (kind, text) => void notices.push({ kind, text }),
-      renderEvent: (e) => void events.push(e),
-      presentPlan: (p) => void plans.push(p),
-      ask: async (q) => {
-        questions.push(q);
-        return asks.shift() ?? 'c';
-      },
-      readText: async () => texts.shift() ?? '',
-      requestApproval: async (req) => {
-        approvals.push(req);
-        return 'reject';
-      },
-      ...overrides,
-    },
-  };
-}
 
 // ───────────────────────── pure operations truth table ─────────────────────
 
@@ -319,7 +274,7 @@ const PLAIN_HEADER = 'The user reviewed and APPROVED this plan - carry it out no
 describe('chat host - [e]dit through the plan menu', () => {
   test('menu string exposes [e]dit alongside a/r/c', async () => {
     const provider = new StubProvider(['PLAN: 1. x']);
-    const h = fakeIo({ asks: ['c'] });
+    const h = fakeChatIo({ asks: ['c'] });
     const { runChatAgentTurn } = await import('../src/lib/chat-agent-run.js');
     await runChatAgentTurn({ cwd, task: 't', mode: 'plan', model: 'hermes', provider, io: h.io });
     expect(h.questions[0]).toBe('[a]pprove & execute / [e]dit / [r]evise (give feedback) / [c]ancel: ');
@@ -332,7 +287,7 @@ describe('chat host - [e]dit through the plan menu', () => {
       'Done.',
     ]);
     // menu [e] → session: edit line 1 → done → menu [a]pprove.
-    const h = fakeIo(
+    const h = fakeChatIo(
       { asks: ['e', 'e 1', '', 'a'], texts: ['PLAN: 1. Create hello.txt (user-edited)'] },
       { requestApproval: async () => 'accept' },
     );
@@ -357,7 +312,7 @@ describe('chat host - [e]dit through the plan menu', () => {
       block('write_file', { path: 'hello.txt', content: 'hi\n' }),
       'Done.',
     ]);
-    const h = fakeIo({ asks: ['a'] }, { requestApproval: async () => 'accept' });
+    const h = fakeChatIo({ asks: ['a'] }, { requestApproval: async () => 'accept' });
     const { runChatAgentTurn } = await import('../src/lib/chat-agent-run.js');
     await runChatAgentTurn({ cwd, task: 'create hello', mode: 'plan', model: 'hermes', provider, io: h.io });
     const wire = provider.params[1]?.message ?? '';
@@ -371,7 +326,7 @@ describe('chat host - [e]dit through the plan menu', () => {
       block('write_file', { path: 'a.txt', content: 'a' }),
       'Done.',
     ]);
-    const h = fakeIo(
+    const h = fakeChatIo(
       { asks: ['e', 'e 1', 'x', 'a'], texts: ['PLAN: 1. Hijacked'] },
       { requestApproval: async () => 'accept' },
     );
@@ -394,7 +349,7 @@ describe('chat host - [e]dit through the plan menu', () => {
       'PLAN: 1. regenerated plan',
       'Done.',
     ]);
-    const h = fakeIo(
+    const h = fakeChatIo(
       { asks: ['e', 'e 1', '', 'r', 'a'], texts: ['PLAN: 1. big plan (user-edited)', 'make it shorter'] },
       { requestApproval: async () => 'accept' },
     );
@@ -414,7 +369,7 @@ describe('chat host - [e]dit through the plan menu', () => {
 
   test('UNEDITED [r]evise payload is byte-identical to 1.7 (feedback only)', async () => {
     const provider = new StubProvider(['PLAN: 1. big', 'PLAN: 1. small', 'Done.']);
-    const h = fakeIo({ asks: ['r', 'a'], texts: ['make it shorter'] }, { requestApproval: async () => 'accept' });
+    const h = fakeChatIo({ asks: ['r', 'a'], texts: ['make it shorter'] }, { requestApproval: async () => 'accept' });
     const { runChatAgentTurn } = await import('../src/lib/chat-agent-run.js');
     await runChatAgentTurn({ cwd, task: 't', mode: 'plan', model: 'hermes', provider, io: h.io });
     const revise = provider.params[1]?.message ?? '';
@@ -434,7 +389,7 @@ describe('INVARIANT - editing a plan never changes what requires approval', () =
       block('write_file', { path: 'hello.txt', content: 'hi\n' }),
       'Done.',
     ]);
-    const h = fakeIo({ asks: ['e', 'e 1', '', 'a'], texts: [HOSTILE_EDIT] });
+    const h = fakeChatIo({ asks: ['e', 'e 1', '', 'a'], texts: [HOSTILE_EDIT] });
     const { runChatAgentTurn } = await import('../src/lib/chat-agent-run.js');
     const result = await runChatAgentTurn({ cwd, task: 'create hello', mode: 'plan', model: 'hermes', provider, io: h.io });
     expect(result.completed).toBe(true);
@@ -450,7 +405,7 @@ describe('INVARIANT - editing a plan never changes what requires approval', () =
       'Done.',
     ]);
     const rule: CommandRule = { entry: 'touch allowed.txt', tokens: ['touch', 'allowed.txt'], kind: 'allow', scope: 'user' };
-    const h = fakeIo({ asks: ['e', 'e 1', '', 'a'], texts: [HOSTILE_EDIT] });
+    const h = fakeChatIo({ asks: ['e', 'e 1', '', 'a'], texts: [HOSTILE_EDIT] });
     const { runChatAgentTurn } = await import('../src/lib/chat-agent-run.js');
     await runChatAgentTurn({
       cwd,
@@ -472,7 +427,7 @@ describe('INVARIANT - editing a plan never changes what requires approval', () =
       block('run_command', { command: 'rm -rf /' }),
       'Done.',
     ]);
-    const h = fakeIo({ asks: ['e', 'e 1', '', 'a'], texts: [HOSTILE_EDIT] });
+    const h = fakeChatIo({ asks: ['e', 'e 1', '', 'a'], texts: [HOSTILE_EDIT] });
     const { runChatAgentTurn } = await import('../src/lib/chat-agent-run.js');
     await runChatAgentTurn({ cwd, task: 'wipe', mode: 'plan', model: 'hermes', provider, io: h.io });
     expect(h.approvals).toHaveLength(0); // blocked BEFORE approval
@@ -495,7 +450,7 @@ describe('INVARIANT - editing a plan never changes what requires approval', () =
       block('write_file', { path: 'hello.txt', content: 'hi\n' }),
       'Done.',
     ]);
-    const h = fakeIo({ asks: ['e', 'e 1', '', 'a'], texts: [HOSTILE_EDIT] }, { requestApproval: async () => 'accept' });
+    const h = fakeChatIo({ asks: ['e', 'e 1', '', 'a'], texts: [HOSTILE_EDIT] }, { requestApproval: async () => 'accept' });
     const { runChatAgentTurn } = await import('../src/lib/chat-agent-run.js');
     await runChatAgentTurn({ cwd, task: 't', mode: 'plan', model: 'hermes', provider, hooks, io: h.io });
     const res = h.events.find((e) => e.type === 'tool_result' && e.tool === 'write_file') as
@@ -517,7 +472,7 @@ describe('resume (1.4) with an edited approvedPlan', () => {
       'Done.',
     ]);
     const EDITED = 'PLAN: 1. Create a.txt (edited: add a header comment)';
-    const h = fakeIo({ asks: ['e', 'e 1', '', 'a'], texts: [EDITED] }, { requestApproval: async () => 'accept' });
+    const h = fakeChatIo({ asks: ['e', 'e 1', '', 'a'], texts: [EDITED] }, { requestApproval: async () => 'accept' });
     const { runChatAgentTurn } = await import('../src/lib/chat-agent-run.js');
     await runChatAgentTurn({ cwd, task: 't', mode: 'plan', model: 'hermes', provider, io: h.io });
     const { listSessions, getResumeState } = await import('../src/lib/agent/checkpoint.js');

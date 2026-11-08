@@ -47,6 +47,7 @@
     "test:coverage": "pnpm build && vitest run --coverage",
     "lint": "tsc --noEmit && tsc -p tsconfig.test.json",
     "gen:licenses": "node scripts/gen-third-party-licenses.mjs",
+    "audit:resolved-install": "node scripts/audit-resolved-install.mjs",
     "prepack": "pnpm build",
     "prepublishOnly": "pnpm lint && pnpm build && pnpm test"
   },

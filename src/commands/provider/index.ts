@@ -32,6 +32,17 @@ import { redactUrlCredentials } from '../../lib/redact.js';
 /** Reserved names that map to built-in behaviour and can't be saved. */
 const RESERVED = new Set<string>(PROVIDER_KINDS); // 'spycore', 'openai', 'anthropic', 'google'
 
+/**
+ * Health-check stall timeout (default 30s). Overridable via
+ * SPYCORE_HEALTH_CHECK_TIMEOUT_MS - a test hook, so the stalled-stream
+ * test exercises the timeout in ~1s instead of waiting the full 30s.
+ * An unset, non-numeric, or non-positive value keeps the default.
+ */
+export function healthCheckTimeoutMs(): number {
+  const raw = Number(process.env.SPYCORE_HEALTH_CHECK_TIMEOUT_MS ?? '');
+  return Number.isFinite(raw) && raw > 0 ? raw : 30_000;
+}
+
 /** How a provider's key is sourced, for `list` - never the key itself. */
 function keySource(p: StoredProviderConfig): string {
   if (p.apiKeyEnv && p.apiKeyEnv.length > 0) return `env:${p.apiKeyEnv}`;
@@ -199,7 +210,7 @@ function registerAdd(group: Command): void {
             // Timeout: abort the stream if it stalls. The AbortController
             // ensures the background network connection is actually closed,
             // not just abandoned by Promise.race.
-            const timeoutMs = 30_000;
+            const timeoutMs = healthCheckTimeoutMs();
             const abort = new AbortController();
             let timer: ReturnType<typeof setTimeout> | undefined;
             const streamPromise = (async () => {
@@ -226,7 +237,7 @@ function registerAdd(group: Command): void {
             // Abort the stream on timeout so the connection doesn't leak.
             if (result === 'timeout') abort.abort();
             if (result === 'timeout') {
-              warn('Health check timed out after 30s.');
+              warn(`Health check timed out after ${timeoutMs / 1000}s.`);
               warn('The provider was saved, but may not work. Check the key and base URL.');
             } else if (errMsg) {
               // m2: errMsg comes from the provider SSE error event (server-

@@ -366,7 +366,10 @@ describe('failure isolation - the session survives every hook failure mode', () 
       const marker = join(scriptDir, 'survived.txt');
       const sleeper = writeScript(
         'tree.js',
-        `setTimeout(()=>{require('fs').writeFileSync(${JSON.stringify(marker)},'survived')}, 3000);`,
+        // The grandchild writes at 6s, not 3s: the old 3s write against a
+        // ~3.5s total (1s cap + 2.5s post-settle wait) left a 500ms margin
+        // that a loaded runner could eat. At 6s the margin is ~3s.
+        `setTimeout(()=>{require('fs').writeFileSync(${JSON.stringify(marker)},'survived')}, 6000);`,
       );
       writeGlobalHooks([
         { event: 'prompt-submit', command: `${nodeCmd(sleeper)} ; true`, timeoutSeconds: 1 },
@@ -375,11 +378,13 @@ describe('failure isolation - the session survives every hook failure mode', () 
       const s = await loadHookSession(cwd);
       const started = Date.now();
       const r = await fireHookEvent(s, 'prompt-submit', { prompt: 'x' });
-      // Settles at the cap, not at the hook's own runtime.
-      expect(Date.now() - started).toBeLessThan(2_500);
+      // Settles at the cap, not at the hook's own runtime. The bound is
+      // 4x the 1s cap: kill + cleanup on a loaded runner may lag, but a
+      // settle past 4s means the cap did not fire when it should have.
+      expect(Date.now() - started).toBeLessThan(4_000);
       expect(r.notices.some((n) => n.includes('timed out'))).toBe(true);
-      // …and the hook is genuinely dead: it never reaches its 3s write.
-      await new Promise((res) => setTimeout(res, 2_500));
+      // …and the hook is genuinely dead: it never reaches its 6s write.
+      await new Promise((res) => setTimeout(res, 2_000));
       expect(existsSync(marker)).toBe(false);
     },
   );

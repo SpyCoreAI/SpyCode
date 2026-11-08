@@ -31,7 +31,8 @@ changes in this release.
   could clear the advisories. The 4.1 line also clears the critical UI server
   advisory (arbitrary file read and execution when the UI server is
   listening) that covers every 4.0 release, so the vitest range moves to
-  `~4.1.0`; `^4.1.0` would float to the 5.x line, so the tilde range stays.
+  `~4.1.0`; `^4.1.0` would admit later 4.x minors (`>=4.1.0 <5.0.0`), so the
+  tilde range pins the 4.1 patch line instead.
   The resolved tree still carries `vite` 7.3.7, not 8.x: the 4.1 line admits
   8.x in its range, but the locked 7.3.7 satisfies it, so pnpm keeps it.
   Gate semantics unchanged: no new exceptions.

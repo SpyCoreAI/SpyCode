@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
-import { freshConfigDir } from './helpers.js';
+import { fakeCommitIo, freshConfigDir } from './helpers.js';
 
 /**
  * TUI `/commit` - PHASE-1 1.6, wrapping the 1.5 machinery.
@@ -109,32 +109,6 @@ function genResponder(texts: string[]) {
   };
 }
 
-interface FakeIo {
-  notices: Array<{ kind: string; text: string }>;
-  presented: string[];
-  io: {
-    notify(kind: 'info' | 'success' | 'warning' | 'error', text: string): void;
-    present(text: string): void;
-    ask(q: string): Promise<string>;
-    readText(q: string): Promise<string>;
-  };
-}
-
-function fakeIo(answers: string[], texts: string[] = []): FakeIo {
-  const notices: Array<{ kind: string; text: string }> = [];
-  const presented: string[] = [];
-  return {
-    notices,
-    presented,
-    io: {
-      notify: (kind, text) => void notices.push({ kind, text }),
-      present: (text) => void presented.push(text),
-      ask: async () => answers.shift() ?? 'c',
-      readText: async () => texts.shift() ?? '',
-    },
-  };
-}
-
 describe('runCommitFlow', () => {
   test('happy path: accept → committed via message FILE; the trailer net holds', async () => {
     writeFileSync(join(repoDir, 'hello.txt'), 'hello world\n');
@@ -143,7 +117,7 @@ describe('runCommitFlow', () => {
       'feat: add greeting\n\nAdds hello output.\n\nCo-Authored-By: Bot <b@x>\n🤖 Generated with tooling',
     ]);
     const { runCommitFlow } = await import('../src/lib/slash/commit-flow.js');
-    const h = fakeIo(['a']);
+    const h = fakeCommitIo(['a']);
     const result = await runCommitFlow({
       cwd: repoDir,
       model: 'hermes',
@@ -166,7 +140,7 @@ describe('runCommitFlow', () => {
     const shaBefore = git(['rev-parse', 'HEAD']).trim();
     const statusBefore = git(['status', '--porcelain']);
     const { runCommitFlow } = await import('../src/lib/slash/commit-flow.js');
-    const h = fakeIo(['c']);
+    const h = fakeCommitIo(['c']);
     const result = await runCommitFlow({ cwd: repoDir, model: 'hermes', io: h.io });
     expect(result.committed).toBe(false);
     expect(git(['rev-parse', 'HEAD']).trim()).toBe(shaBefore);
@@ -179,7 +153,7 @@ describe('runCommitFlow', () => {
     git(['add', '-A']);
     responder = genResponder(['feat: model draft']);
     const { runCommitFlow } = await import('../src/lib/slash/commit-flow.js');
-    const h = fakeIo(['e', 'a'], ['fix: hand-written subject']);
+    const h = fakeCommitIo(['e', 'a'], ['fix: hand-written subject']);
     const result = await runCommitFlow({ cwd: repoDir, model: 'hermes', io: h.io });
     expect(result.committed).toBe(true);
     expect(git(['log', '-1', '--format=%s']).trim()).toBe('fix: hand-written subject');
@@ -190,7 +164,7 @@ describe('runCommitFlow', () => {
     responder = genResponder(['feat: x']);
     const shaBefore = git(['rev-parse', 'HEAD']).trim();
     const { runCommitFlow } = await import('../src/lib/slash/commit-flow.js');
-    const h = fakeIo(['n']);
+    const h = fakeCommitIo(['n']);
     const result = await runCommitFlow({ cwd: repoDir, model: 'hermes', io: h.io });
     expect(result.committed).toBe(false);
     expect(git(['rev-parse', 'HEAD']).trim()).toBe(shaBefore);
@@ -201,7 +175,7 @@ describe('runCommitFlow', () => {
     writeFileSync(join(repoDir, 'hello.txt'), 'stage me\n');
     responder = genResponder(['feat: staged via offer']);
     const { runCommitFlow } = await import('../src/lib/slash/commit-flow.js');
-    const h = fakeIo(['y', 'a']);
+    const h = fakeCommitIo(['y', 'a']);
     const result = await runCommitFlow({ cwd: repoDir, model: 'hermes', io: h.io });
     expect(result.committed).toBe(true);
     expect(git(['status', '--porcelain']).trim()).toBe('');
@@ -211,7 +185,7 @@ describe('runCommitFlow', () => {
     const plain = realpathSync(mkdtempSync(join(tmpdir(), 'spycli-plain-')));
     responder = genResponder(['feat: x']);
     const { runCommitFlow } = await import('../src/lib/slash/commit-flow.js');
-    const h = fakeIo([]);
+    const h = fakeCommitIo([]);
     const result = await runCommitFlow({ cwd: plain, model: 'hermes', io: h.io });
     expect(result.committed).toBe(false);
     expect(h.notices.some((n) => n.kind === 'error' && n.text.includes('Not a git repository'))).toBe(true);
@@ -229,7 +203,7 @@ describe('runCommitFlow', () => {
     };
     const shaBefore = git(['rev-parse', 'HEAD']).trim();
     const { runCommitFlow } = await import('../src/lib/slash/commit-flow.js');
-    const h = fakeIo(['a']);
+    const h = fakeCommitIo(['a']);
     const result = await runCommitFlow({ cwd: repoDir, model: 'hermes', io: h.io });
     expect(result.committed).toBe(false);
     expect(git(['rev-parse', 'HEAD']).trim()).toBe(shaBefore);

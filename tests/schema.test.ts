@@ -82,6 +82,25 @@ describe('output-formats', () => {
     expect(out).toContain('  line2');
   });
 
+  test('yaml indents nested multiline content deeper than its key', () => {
+    // A fixed 2-space indent used to land the content level with the key
+    // under a nested key - invalid YAML. Content sits one level deeper
+    // than the key that introduces it.
+    const out = formatOutput({ outer: { note: 'line1\nline2' } }, 'yaml');
+    expect(out).toBe('outer:\n  note: |-\n    line1\n    line2');
+    const arr = formatOutput({ items: ['l1\nl2'] }, 'yaml');
+    expect(arr).toBe('items:\n  - |-\n    l1\n    l2');
+  });
+
+  test('yaml quotes a leading dash-space (and a bare dash); [ stays quoted, -x stays bare', () => {
+    expect(formatOutput({ a: '- x' }, 'yaml')).toBe('a: "- x"');
+    expect(formatOutput({ a: '-' }, 'yaml')).toBe('a: "-"');
+    // `[a]` was already quoted by the leading-character class - pinned so
+    // a later edit does not silently unquote it.
+    expect(formatOutput({ a: '[a]' }, 'yaml')).toBe('a: "[a]"');
+    expect(formatOutput({ a: '-x' }, 'yaml')).toBe('a: -x');
+  });
+
   test('text format passthrough for strings, JSON for objects', () => {
     expect(formatOutput('hello', 'text')).toBe('hello');
     expect(formatOutput({ a: 1 }, 'text')).toBe('{\n  "a": 1\n}');

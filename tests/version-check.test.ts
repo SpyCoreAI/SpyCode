@@ -86,11 +86,15 @@ describe('checkForUpdates', () => {
   test('cache busts when TTL elapses', async () => {
     nextResp = jsonResp(200, { version: '0.5.0' });
     const { checkForUpdates } = await import('../src/lib/version-check.js');
-    await checkForUpdates({ currentVersion: '0.1.0', cacheTtlMs: 1 });
+    await checkForUpdates({ currentVersion: '0.1.0', cacheTtlMs: 100 });
     const callsAfterFirst = requestCalls;
-    await new Promise((r) => setTimeout(r, 5));
+    // Was TTL 1ms + a 5ms sleep: Date.now() granularity is ~15.6ms on
+    // Windows, so the sleep could expire before the TTL and the bust never
+    // happened. 100ms TTL + 250ms sleep leaves a 150ms margin - 10x the
+    // granularity - and still runs in a fraction of a second.
+    await new Promise((r) => setTimeout(r, 250));
     nextResp = jsonResp(200, { version: '0.6.0' });
-    const result = await checkForUpdates({ currentVersion: '0.1.0', cacheTtlMs: 1 });
+    const result = await checkForUpdates({ currentVersion: '0.1.0', cacheTtlMs: 100 });
     expect(requestCalls).toBeGreaterThan(callsAfterFirst);
     expect(result?.latest).toBe('0.6.0');
   });

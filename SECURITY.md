@@ -3,6 +3,24 @@
 Report vulnerabilities to **security@spycore.ai**. Please include reproduction
 steps; we aim to acknowledge within 72 hours.
 
+## Supported versions
+
+Only the latest release is supported with security fixes (currently 0.9.9).
+Older releases receive no security updates - upgrade to the latest release.
+
+## Scope
+
+This policy covers this repository and the published `@spycore/cli` package.
+Reports about the hosted SpyCore service go to the same contact.
+
+## Disclosure policy
+
+Reports are handled under coordinated disclosure: we acknowledge within 72
+hours, work with the reporter on a fix and a release, and disclose publicly
+once a fixed release is available. Do not disclose a vulnerability publicly
+before a fix is released. There is no PGP key; reports go to
+security@spycore.ai in plain email.
+
 ## Threat model
 
 The SpyCode agent executes model-proposed actions on your machine. Model

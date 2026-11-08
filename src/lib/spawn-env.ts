@@ -17,12 +17,26 @@
  */
 import { isSecretKey } from './redact.js';
 
+/**
+ * Ambient variables that NAME a credential file rather than holding a
+ * secret: a curious child could read the file the path points at. No
+ * name pattern matches them (`KUBECONFIG` carries no secret-shaped word),
+ * so they are listed explicitly. Deliberate per-spawn configuration still
+ * wins - see the explicit layer below.
+ */
+const CREDENTIAL_FILE_VARS: ReadonlySet<string> = new Set([
+  'GOOGLE_APPLICATION_CREDENTIALS',
+  'AWS_SHARED_CREDENTIALS_FILE',
+  'KUBECONFIG',
+]);
+
 /** Build a child-process env: the current env minus secret-keyed entries, plus explicit overrides. */
 export function buildSubprocessEnv(explicit?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (value === undefined) continue;
     if (isSecretKey(key)) continue;
+    if (CREDENTIAL_FILE_VARS.has(key)) continue;
     env[key] = value;
   }
   if (explicit) {

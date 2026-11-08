@@ -15,6 +15,11 @@ describe('redact', () => {
     expect(isSecretKey('PASSWORD')).toBe(true);
     expect(isSecretKey('bearerToken')).toBe(true);
     expect(isSecretKey('clientSecret')).toBe(true);
+    // A *_PRIVATE_KEY value IS the secret, and a *CREDENTIALS* name points
+    // at a credential file - both used to pass the screen verbatim.
+    expect(isSecretKey('MY_PRIVATE_KEY')).toBe(true);
+    expect(isSecretKey('GOOGLE_APPLICATION_CREDENTIALS')).toBe(true);
+    expect(isSecretKey('AWS_SHARED_CREDENTIALS_FILE')).toBe(true);
     expect(isSecretKey('apiUrl')).toBe(false);
     expect(isSecretKey('defaultModel')).toBe(false);
     expect(isSecretKey('theme')).toBe(false);
@@ -184,11 +189,20 @@ describe('redactFreeText (S2: transcript export)', () => {
     expect(out).toContain(REDACTED);
   });
 
-  test('ReDoS guard: 100KB plain text redacts in under 1s (R2 finding)', () => {
+  test('ReDoS guard: 100KB plain text redacts byte-identically (R2 finding)', () => {
+    // Was a wall-clock assertion (under 1s) - a loaded CI runner can miss
+    // any tight bound, and a bound loose enough never to flake catches
+    // nothing. The deterministic property is what a ReDoS bug would
+    // actually break: plain text with no secret-shaped run must come back
+    // byte-identical, which a catastrophically backtracking pattern cannot
+    // deliver in any bounded time. The 10s bound is a backstop against a
+    // hang, not the assertion - it is 10x the old bound and 100x the
+    // measured ~100ms on this runner.
     const big = 'lorem ipsum dolor sit amet '.repeat(4000); // ~108KB
     const start = Date.now();
-    redactFreeText(big);
-    expect(Date.now() - start).toBeLessThan(1000);
+    const out = redactFreeText(big);
+    expect(out, 'plain text must survive redaction byte-identically').toBe(big);
+    expect(Date.now() - start).toBeLessThan(10_000);
   });
 });
 

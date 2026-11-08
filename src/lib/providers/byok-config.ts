@@ -98,6 +98,12 @@ export interface ByokConfig {
   oauthRefreshToken?: string | undefined;
   /** OAuth client ID (for token refresh). */
   oauthClientId?: string | undefined;
+  /**
+   * Name of the stored provider this config was resolved from (null for an
+   * ad-hoc run). The factory writes a ROTATED refresh token back to this
+   * entry so the next process does not retry with a revoked token.
+   */
+  sourceName?: string | null | undefined;
 }
 
 /** Throw the clear missing-key error for types that cannot run keyless. */
@@ -258,6 +264,7 @@ export function resolveProviderSelection(opts: {
         // Pass through OAuth fields.
         ...(stored.oauthRefreshToken ? { oauthRefreshToken: stored.oauthRefreshToken } : {}),
         ...(stored.oauthClientId ? { oauthClientId: stored.oauthClientId } : {}),
+        sourceName: stored.name,
       },
       sourceName: stored.name,
     };

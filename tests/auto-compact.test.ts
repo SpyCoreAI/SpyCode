@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
-import { freshConfigDir } from './helpers.js';
+import { freshConfigDir, jsonResp, makeResponder, sseResp, type MockResp } from './helpers.js';
 import {
   AUTO_COMPACT_PCT,
   AUTO_COMPACT_REARM_PCT,
@@ -27,15 +27,6 @@ import type { AgentEvent } from '../src/lib/agent/loop.js';
  *  - the loop raises `context_full` with the turn, pct and input tokens
  *    when the previous turn's usage crosses the threshold.
  */
-
-interface MockResp {
-  statusCode: number;
-  headers: Record<string, string | string[]>;
-  body: {
-    json: () => Promise<unknown>;
-    [Symbol.asyncIterator]?: () => AsyncIterator<Buffer>;
-  };
-}
 
 let responder:
   | ((url: string, init: { method: string; body?: unknown; headers?: Record<string, string> }) => MockResp)
@@ -72,22 +63,6 @@ afterEach(() => {
   }
 });
 
-function jsonResp(status: number, body: unknown): MockResp {
-  return { statusCode: status, headers: {}, body: { json: async () => body } };
-}
-
-function sseResp(events: Array<Record<string, unknown>>): MockResp {
-  const buf = Buffer.from(events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join(''));
-  return {
-    statusCode: 200,
-    headers: { 'content-type': 'text/event-stream' },
-    body: {
-      json: async () => ({}),
-      [Symbol.asyncIterator]: () => Readable.from([buf])[Symbol.asyncIterator](),
-    },
-  };
-}
-
 /** One scripted turn: optional tool block, a usage event, then done. */
 function turn(opts: { text?: string; tool?: { tool: string; args: unknown }; input: number }) {
   const events: Array<Record<string, unknown>> = [];
@@ -98,19 +73,6 @@ function turn(opts: { text?: string; tool?: { tool: string; args: unknown }; inp
   events.push({ type: 'usage', input: opts.input, output: 50 });
   events.push({ type: 'done' });
   return sseResp(events);
-}
-
-function makeResponder(turns: MockResp[]) {
-  let i = 0;
-  return (url: string, init: { method: string }) => {
-    if (init.method === 'POST' && url.endsWith('/conversations')) {
-      return jsonResp(200, { success: true, data: { id: 'cnv_autocompact' } });
-    }
-    if (init.method === 'POST' && url.includes('/api/chat/stream')) {
-      return turns[Math.min(i++, turns.length - 1)]!;
-    }
-    throw new Error(`unexpected ${init.method} ${url}`);
-  };
 }
 
 describe('auto-compact trigger (unit)', () => {
@@ -189,7 +151,7 @@ describe('runAgent auto-compact (loop integration)', () => {
     responder = makeResponder([
       turn({ tool: { tool: 'read_file', args: { path: 'data.txt' } }, input: 960_000 }),
       turn({ text: 'The file says hello.', input: 965_000 }),
-    ]);
+    ], 'cnv_autocompact');
     const { runAgent } = await import('../src/lib/agent/loop.js');
     const events: AgentEvent[] = [];
     const result = await runAgent({
@@ -209,7 +171,7 @@ describe('runAgent auto-compact (loop integration)', () => {
     responder = makeResponder([
       turn({ tool: { tool: 'read_file', args: { path: 'data.txt' } }, input: 500_000 }),
       turn({ text: 'The file says hello.', input: 505_000 }),
-    ]);
+    ], 'cnv_autocompact');
     const { runAgent } = await import('../src/lib/agent/loop.js');
     const events: AgentEvent[] = [];
     await runAgent({
@@ -226,7 +188,7 @@ describe('runAgent auto-compact (loop integration)', () => {
     responder = makeResponder([
       turn({ tool: { tool: 'read_file', args: { path: 'data.txt' } }, input: 9_000_000 }),
       turn({ text: 'The file says hello.', input: 9_100_000 }),
-    ]);
+    ], 'cnv_autocompact');
     const { runAgent } = await import('../src/lib/agent/loop.js');
     const events: AgentEvent[] = [];
     await runAgent({
@@ -244,7 +206,7 @@ describe('runAgent auto-compact (loop integration)', () => {
       turn({ tool: { tool: 'read_file', args: { path: 'data.txt' } }, input: 960_000 }),
       turn({ tool: { tool: 'read_file', args: { path: 'data.txt' } }, input: 961_000 }),
       turn({ text: 'The file says hello.', input: 962_000 }),
-    ]);
+    ], 'cnv_autocompact');
     const { runAgent } = await import('../src/lib/agent/loop.js');
     const events: AgentEvent[] = [];
     await runAgent({

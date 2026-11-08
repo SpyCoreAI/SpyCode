@@ -20,7 +20,6 @@ providers, skills, an MCP client, and an ACP server for IDE integration.
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![node](https://img.shields.io/badge/node-%3E%3D22.5-339933?logo=node.js&logoColor=white)](https://nodejs.org)
 [![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20WSL-lightgrey)](#install)
-[![docs](https://img.shields.io/badge/docs-spycore.ai%2Fspycode-6E56CF)](https://spycore.ai/spycode)
 
 </div>
 
@@ -61,8 +60,9 @@ Requirements: **Node 22.5+**. macOS and Linux are supported; Windows via WSL.
 
 Alternatively, the installer at [spycore.ai/spycode](https://spycore.ai/spycode)
 sets up the same package (a dependency-free binary distribution is planned).
-Download it, read it, then run it - never pipe a downloader straight into a
-shell; SpyCode's own command screen blocks that pattern:
+Download it, read it, then run it - the recommended path; the installer page
+also shows a one-line pipe form. SpyCode's own command screen blocks the pipe
+form:
 
 ```bash
 curl -fsSL -o spycore-install.sh https://spycore.ai/install
@@ -95,9 +95,11 @@ spycore rewind                             # undo the workspace files the last r
 
 ## Models and routing
 
-SpyCore models, picked automatically by task complexity - or pinned with
-`-m` (`agent -m` accepts Hermes, Minos, Styx and Charon; Styx Max is
-chat-only and cannot be pinned with `agent -m`):
+SpyCore models: triage picks Styx for standard work or Charon for complex
+work (classified by a cheap Hermes pass - Hermes itself is never the
+answering model), Minos only when pinned with `-m` or clamped by the plan -
+or pin a model with `-m` (`agent -m` accepts Hermes, Minos, Styx and Charon;
+Styx Max is chat-only and cannot be pinned with `agent -m`):
 
 | Model | Role |
 | --- | --- |
@@ -159,8 +161,10 @@ Set a default with `spycore config set defaultEffort high`.
   check goes through the same approval gate as any other command - it re-runs
   against a workspace the agent has since edited - so it prompts each attempt,
   or pre-approve it with `--yes` or an `allow` command rule.
-- **Budgets** - `--max-turns`, `--max-tokens`, `--max-time 120` stop a run
-  gracefully at a cap. The turn cap no longer cuts the run off mid-thought:
+- **Budgets** - `--max-tokens` and `--max-time 120` stop a run
+  gracefully at a cap; `--max-turns` does too, but only when passed
+  explicitly - the default 25 is the internal per-call iteration guard, not
+  a run cap. The turn cap no longer cuts the run off mid-thought:
   when it is hit, the model gets one final **summary-only** turn - no tool
   calls are dispatched there, the prose it writes becomes the final answer.
 - **Loop guard** - the agent watches for no-progress loops: the same tool

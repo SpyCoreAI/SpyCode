@@ -17,7 +17,10 @@ export const REDACTED = '***redacted***';
 // Matches obviously-sensitive key names. The explicit `__token__` check in
 // isSecretKey is the one that matters today; the pattern future-proofs against
 // new secret keys (api keys, passwords, …) ever being added to the store.
-const SECRET_KEY_PATTERN = /token|secret|password|apikey|api_key|bearer/i;
+// `private` and `credential` are in the pattern because a `*_PRIVATE_KEY`
+// value IS the secret (not a name for one), and a `*CREDENTIALS*` name
+// points at a credential file - both used to pass the screen verbatim.
+const SECRET_KEY_PATTERN = /token|secret|password|apikey|api_key|bearer|private|credential/i;
 
 /** True if a config key name should have its value redacted in dumped output. */
 export function isSecretKey(key: string): boolean {

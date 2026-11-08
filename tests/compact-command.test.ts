@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
-import { freshConfigDir } from './helpers.js';
+import { fakeAskIo, freshConfigDir, type NoticeRecord } from './helpers.js';
 
 /**
  * PHASE-1 1.8 - /compact: in-place conversation condense over the EXISTING
@@ -46,31 +46,6 @@ vi.mock('undici', () => ({
 
 function jsonResp(status: number, body: unknown): MockResp {
   return { statusCode: status, headers: {}, body: { json: async () => body } };
-}
-
-interface NotifyRecord {
-  kind: string;
-  text: string;
-}
-
-function fakeIo(answer: string): {
-  notices: NotifyRecord[];
-  asked: string[];
-  io: { notify: (kind: 'info' | 'success' | 'warning' | 'error', text: string) => void; ask: (q: string) => Promise<string> };
-} {
-  const notices: NotifyRecord[] = [];
-  const asked: string[] = [];
-  return {
-    notices,
-    asked,
-    io: {
-      notify: (kind, text) => void notices.push({ kind, text }),
-      ask: async (q) => {
-        asked.push(q);
-        return answer;
-      },
-    },
-  };
 }
 
 beforeEach(async () => {
@@ -165,7 +140,7 @@ describe('runCompactFlow - preview invariant + happy path', () => {
       }
       throw new Error(`unexpected ${init.method} ${url}`);
     };
-    const h = fakeIo('y');
+    const h = fakeAskIo('y');
     const { runCompactFlow, COMPACT_PREVIEW_TEXT } = await import('../src/lib/slash/compact-flow.js');
     const result = await runCompactFlow({ conversationId: 'cnv_42', io: h.io });
 
@@ -190,14 +165,14 @@ describe('runCompactFlow - preview invariant + happy path', () => {
     responder = () => {
       throw new Error('no call may happen on cancel');
     };
-    const h = fakeIo('n');
+    const h = fakeAskIo('n');
     const { runCompactFlow } = await import('../src/lib/slash/compact-flow.js');
     const result = await runCompactFlow({ conversationId: 'cnv_42', io: h.io });
     expect(result).toEqual({ compacted: false });
     expect(calls).toHaveLength(0);
     expect(h.notices.some((n) => n.text.includes('nothing changed'))).toBe(true);
     // Esc in the TUI resolves the choice to 'c' - also a cancel.
-    const h2 = fakeIo('c');
+    const h2 = fakeAskIo('c');
     const r2 = await runCompactFlow({ conversationId: 'cnv_42', io: h2.io });
     expect(r2.compacted).toBe(false);
     expect(calls).toHaveLength(0);
@@ -205,9 +180,9 @@ describe('runCompactFlow - preview invariant + happy path', () => {
 });
 
 describe('runCompactFlow - failure paths (clean errors, state unchanged)', () => {
-  const failCase = async (resp: MockResp): Promise<NotifyRecord[]> => {
+  const failCase = async (resp: MockResp): Promise<NoticeRecord[]> => {
     responder = () => resp;
-    const h = fakeIo('yes');
+    const h = fakeAskIo('yes');
     const { runCompactFlow } = await import('../src/lib/slash/compact-flow.js');
     const result = await runCompactFlow({ conversationId: 'cnv_42', io: h.io });
     expect(result).toEqual({ compacted: false });
@@ -239,7 +214,7 @@ describe('runCompactFlow - failure paths (clean errors, state unchanged)', () =>
     responder = () => {
       throw new Error('socket hang up');
     };
-    const h = fakeIo('y');
+    const h = fakeAskIo('y');
     const { runCompactFlow } = await import('../src/lib/slash/compact-flow.js');
     const result = await runCompactFlow({ conversationId: 'cnv_42', io: h.io });
     expect(result).toEqual({ compacted: false });

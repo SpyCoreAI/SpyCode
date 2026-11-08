@@ -304,11 +304,9 @@ describe('resolveResumeTarget / detectWorkspaceDrift', () => {
     const resumable = createRunRecorder({ cwd: workDir, task: 'resumable', initial: base });
     resumable.update({ conversationId: 'cnv_old', turnsCompleted: 2 });
     resumable.finalize('interrupted');
-    await new Promise((r) => setTimeout(r, 5)); // distinct epoch-ms ids
     const byok = createRunRecorder({ cwd: workDir, task: 'byok', initial: { ...base, providerKind: 'byok' } });
     byok.update({ conversationId: 'local-1' });
     byok.finalize('interrupted');
-    await new Promise((r) => setTimeout(r, 5));
     writeFileSync(join(workDir, 'o.txt'), 'O');
     saveSession({ cwd: workDir, task: 'old-format', changes: [{ path: join(workDir, 'o.txt'), op: 'create', before: null, after: 'O' }] });
 
@@ -594,7 +592,6 @@ describe('rewind × resume records', () => {
     const f = join(workDir, 'made.txt');
     writeFileSync(f, 'agent made this\n');
     saveSession({ cwd: workDir, task: 'older run with changes', changes: [{ path: f, op: 'create', before: null, after: 'agent made this\n' }] });
-    await new Promise((r) => setTimeout(r, 5));
     const rec = createRunRecorder({
       cwd: workDir,
       task: 'newer interrupted, no changes yet',
@@ -620,7 +617,6 @@ describe('rewind × resume records', () => {
     const { createRunRecorder, saveSession } = await import('../src/lib/agent/checkpoint.js');
     writeFileSync(join(workDir, 'x.txt'), 'X');
     saveSession({ cwd: workDir, task: 'legacy session', changes: [{ path: join(workDir, 'x.txt'), op: 'create', before: null, after: 'X' }] });
-    await new Promise((r) => setTimeout(r, 5));
     const rec = createRunRecorder({
       cwd: workDir,
       task: 'interrupted session',

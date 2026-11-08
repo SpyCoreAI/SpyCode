@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
-import { freshConfigDir } from './helpers.js';
+import { freshConfigDir, jsonResp, makeResponder, sseResp, type MockResp } from './helpers.js';
 import {
   deriveAlwaysAllowEntry,
   evaluateCommandRules,
@@ -39,15 +39,6 @@ import type { AgentEvent } from '../src/lib/agent/loop.js';
  */
 
 // undici mock for the loop-level pins (same harness as agent.test.ts).
-interface MockResp {
-  statusCode: number;
-  headers: Record<string, string | string[]>;
-  body: {
-    json: () => Promise<unknown>;
-    [Symbol.asyncIterator]?: () => AsyncIterator<Buffer>;
-  };
-}
-
 let responder: ((url: string, init: { method: string }) => MockResp) | null = null;
 
 vi.mock('undici', () => ({
@@ -651,37 +642,6 @@ describe('inspectCommandRules', () => {
 
 // ───────────────────────── loop-level pins ─────────────────────────
 
-function jsonResp(status: number, body: unknown): MockResp {
-  return { statusCode: status, headers: {}, body: { json: async () => body } };
-}
-
-function sseResp(events: Array<Record<string, unknown>>): MockResp {
-  const buf = Buffer.from(events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join(''));
-  return {
-    statusCode: 200,
-    headers: { 'content-type': 'text/event-stream' },
-    body: {
-      json: async () => ({}),
-      [Symbol.asyncIterator]: () => Readable.from([buf])[Symbol.asyncIterator](),
-    },
-  };
-}
-
-function makeResponder(replies: string[]): (url: string, init: { method: string }) => MockResp {
-  let i = 0;
-  return (url: string, init: { method: string }) => {
-    if (init.method === 'POST' && url.endsWith('/conversations')) {
-      return jsonResp(200, { success: true, data: { id: 'cnv_rules' } });
-    }
-    if (init.method === 'POST' && url.includes('/api/chat/stream')) {
-      const reply = replies[i] ?? 'Done.';
-      i += 1;
-      return sseResp([{ type: 'text', content: reply }, { type: 'done' }]);
-    }
-    throw new Error(`unexpected ${init.method} ${url}`);
-  };
-}
-
 const block = (tool: string, args: unknown): string =>
   '```spycore:tool\n' + JSON.stringify({ tool, args }) + '\n```';
 
@@ -692,7 +652,7 @@ describe('runAgent - rule integration', () => {
   });
 
   test('an allow match auto-runs with NO approval fn and emits a visible rule_notice', async () => {
-    responder = makeResponder([block('run_command', { command: 'touch made.txt' }), 'Done.']);
+    responder = makeResponder([block('run_command', { command: 'touch made.txt' }), 'Done.'], 'cnv_rules');
     const { runAgent } = await import('../src/lib/agent/loop.js');
     const events: AgentEvent[] = [];
     const result = await runAgent({
@@ -712,7 +672,7 @@ describe('runAgent - rule integration', () => {
   });
 
   test('deny still denies under --yes (headless auto-approve)', async () => {
-    responder = makeResponder([block('run_command', { command: 'touch nope.txt' }), 'Done.']);
+    responder = makeResponder([block('run_command', { command: 'touch nope.txt' }), 'Done.'], 'cnv_rules');
     const { runAgent } = await import('../src/lib/agent/loop.js');
     const { headlessApproval } = await import('../src/lib/agent/approval.js');
     const events: AgentEvent[] = [];
@@ -745,7 +705,7 @@ describe('runAgent - rule integration', () => {
     const bridge = createAgentHooksBridge(session);
     expect(bridge.hasAny).toBe(true);
 
-    responder = makeResponder([block('run_command', { command: 'touch blocked.txt' }), 'Done.']);
+    responder = makeResponder([block('run_command', { command: 'touch blocked.txt' }), 'Done.'], 'cnv_rules');
     const { runAgent } = await import('../src/lib/agent/loop.js');
     const events: AgentEvent[] = [];
     await runAgent({
@@ -763,7 +723,7 @@ describe('runAgent - rule integration', () => {
   });
 
   test('no commandRules option → no rule_notice events, approval required as before', async () => {
-    responder = makeResponder([block('run_command', { command: 'touch plain.txt' }), 'Done.']);
+    responder = makeResponder([block('run_command', { command: 'touch plain.txt' }), 'Done.'], 'cnv_rules');
     const { runAgent } = await import('../src/lib/agent/loop.js');
     const events: AgentEvent[] = [];
     await runAgent({

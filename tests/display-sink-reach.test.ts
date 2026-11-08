@@ -679,6 +679,119 @@ describe('§12 the sink CATEGORIES - prompt, spinner, completion line', () => {
     ).toEqual([]);
   });
 
+  test('P2 the census sees a wire value threaded through a JSX spread', { timeout: 60_000 }, async () => {
+    // Blind spot #4, spread half: `<Foo {...props} />` carries no
+    // JsxExpression, so the prop case alone never fires on it. The plant
+    // proves `ink.jsx-spread` closes that half.
+    const { censusWireSinks, JSX_SPREAD_PROBE, JSX_SPREAD_PROBE_PATH } = await import(
+      './wire-sink-census.js'
+    );
+    const probed = censusWireSinks({
+      extraFiles: { [JSX_SPREAD_PROBE_PATH]: JSX_SPREAD_PROBE },
+    });
+    const findings = probed.findings.filter((f) => f.file === JSX_SPREAD_PROBE_PATH);
+    expect(findings.length, 'the census cannot see a tainted JSX spread - its zero is worthless').toBe(
+      1,
+    );
+    expect(findings[0], 'the spread finding is missing').toBeDefined();
+    expect(findings[0]?.sink, 'the spread was reported under the wrong sink kind').toBe(
+      'ink.jsx-spread',
+    );
+  });
+
+  test('P3 the census sees a wire value threaded through a JSX prop', { timeout: 60_000 }, async () => {
+    // Blind spot #4, prop half: the header used to claim prop threading was
+    // untraced. Same-file prop threading IS traced (`ink.jsx`) - this plant
+    // pins that, so the claim is measured rather than asserted.
+    const { censusWireSinks, JSX_PROP_PROBE, JSX_PROP_PROBE_PATH } = await import(
+      './wire-sink-census.js'
+    );
+    const probed = censusWireSinks({
+      extraFiles: { [JSX_PROP_PROBE_PATH]: JSX_PROP_PROBE },
+    });
+    const findings = probed.findings.filter((f) => f.file === JSX_PROP_PROBE_PATH);
+    expect(findings.length, 'the census cannot see a tainted JSX prop - its zero is worthless').toBe(
+      1,
+    );
+    expect(findings[0], 'the prop finding is missing').toBeDefined();
+    expect(findings[0]?.sink, 'the prop was reported under the wrong sink kind').toBe('ink.jsx');
+  });
+
+  // The C1 baseline, measured 2026-11-08: every (file, callee) pair where a
+  // wire-tainted value enters a locally-defined wrapper. Reviewed in
+  // aggregate: genuine dataflow carriers (payload -> clean -> render chain,
+  // whose render site is separately covered by the sink findings) and
+  // known-benign imprecisions (a mode enum interpolated into a notice,
+  // boolean predicates such as isImageMime/isObject, a numeric comparison,
+  // and undici's imported `request`, which collides with a local `request`
+  // defined in src/lib/agent/ - the census's local-function set is global
+  // by name). Add a pair ONLY after reviewing the path it opens.
+  const PINNED_CARRIERS: ReadonlySet<string> = new Set([
+    'src/commands/auth/login.ts :: openInBrowser',
+    'src/commands/chat.ts :: handleEvent',
+    'src/commands/chat.ts :: sendMessage',
+    'src/commands/chat.ts :: setLastConversationId',
+    'src/commands/conversations/export.ts :: toMarkdown',
+    'src/commands/conversations/handoff.ts :: buildHandoffContinueMessage',
+    'src/commands/conversations/handoff.ts :: createRunRecorder',
+    'src/commands/conversations/handoff.ts :: resolveHandoffModel',
+    'src/commands/conversations/handoff.ts :: runAgent',
+    'src/commands/conversations/share.ts :: buildShareBody',
+    'src/commands/conversations/share.ts :: redactFreeText',
+    'src/commands/files/download.ts :: createExclusiveTempWriteStream',
+    'src/commands/files/download.ts :: request',
+    'src/commands/files/list.ts :: bucketByRecency',
+    'src/commands/files/show.ts :: isImageMime',
+    'src/commands/files/show.ts :: isTextMime',
+    'src/commands/files/show.ts :: request',
+    'src/commands/skills/index.ts :: planSkillSync',
+    'src/commands/skills/index.ts :: writeSyncedSkill',
+    'src/commands/usage.ts :: renderBucket',
+    'src/lib/agent/builtin-tools.ts :: registerTool',
+    'src/lib/agent/builtin-tools.ts :: wrapUntrustedWebContent',
+    'src/lib/agent/lsp/client.ts :: isObject',
+    'src/lib/agent/mcp.ts :: renderContent',
+    'src/lib/git-generate.ts :: collectTurn',
+    'src/lib/slash/registry.ts :: conversationToMarkdown',
+    'src/lib/version-check.ts :: compareVersions',
+    'src/lib/version-check.ts :: writeCache',
+    'src/ui/chat/ChatApp.tsx :: pushNotice',
+    'src/ui/chat/stream.ts :: clean',
+  ]);
+
+  test('C1 the carrier ratchet - a NEW unclassified wrapper fails loudly', { timeout: 60_000 }, async () => {
+    // Blind spot #1's compensating control. Taint stops at an unclassified
+    // call, so the census lists every site where a wire value enters a
+    // locally-defined wrapper instead of pretending to see past it. The
+    // plant proves the list is real; the pin below fails on ADDITIONS only
+    // (removals pass) - a sink path routed through a fresh wrapper can no
+    // longer arrive silently.
+    const { censusWireSinks, CARRIER_PROBE, CARRIER_PROBE_PATH } = await import(
+      './wire-sink-census.js'
+    );
+    const probed = censusWireSinks({
+      extraFiles: { [CARRIER_PROBE_PATH]: CARRIER_PROBE },
+    });
+    expect(
+      probed.carriers.some((c) => c.file === CARRIER_PROBE_PATH && c.callee === 'someHelper'),
+      'the carrier ratchet cannot see a tainted value handed to a wrapper',
+    ).toBe(true);
+    expect(
+      probed.findings.filter((f) => f.file === CARRIER_PROBE_PATH),
+      'the carrier probe leaked a sink finding - the value stops at the wrapper',
+    ).toEqual([]);
+
+    const real = censusWireSinks();
+    const pairs = new Set(real.carriers.map((c) => `${c.file} :: ${c.callee}`));
+    const unknown = [...pairs].filter((p) => !PINNED_CARRIERS.has(p));
+    expect(
+      unknown,
+      'a NEW carrier appeared - a wire value now enters an unclassified wrapper. ' +
+        'Review the path before adding it to the pin: a wrapper that renders, ' +
+        'logs, or forwards the value is a sink the census cannot see.',
+    ).toEqual([]);
+  });
+
   test('B16 the `display` contract, measured in BOTH positions - and its ONE cost', async () => {
     // THE CONTRACT, PINNED RATHER THAN DESCRIBED. Literal chunks are
     // CLI-authored and pass through VERBATIM; every interpolation is sanitized.
@@ -1051,6 +1164,44 @@ describe('§4 repository-authored text reaching a notice sink', () => {
     const joined = res.notices.join('\n');
     expectPayloadReached(joined, 'Skipped', 'S10 user-command notice');
     expectNoTerminalControl(joined, 'S10 user-command notice');
+  });
+
+  test('S10w the S10 notice path is pinned WITHOUT a Windows-illegal filename', async () => {
+    // S10 itself is skipped on Windows: a control character cannot exist in
+    // a Windows filename, so the probe file cannot be created there and the
+    // property is vacuous. This pin runs everywhere and holds the same path
+    // by its Windows-legal half: a name that fails NAME_RE for a reason
+    // Windows ALLOWS (a space), which still reaches the same notice.
+    const { mkdtempSync, mkdirSync, writeFileSync, readFileSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const ws = mkdtempSync(join(tmpdir(), 'spy-sink-'));
+    mkdirSync(join(ws, '.spycore', 'commands'), { recursive: true });
+    writeFileSync(join(ws, '.spycore', 'commands', 'bad name.md'), 'body');
+    const { trustWorkspace } = await import('../src/lib/config.js');
+    trustWorkspace(ws);
+    const { loadUserCommands } = await import('../src/lib/slash/user-commands.js');
+    const res = loadUserCommands(ws);
+    const joined = res.notices.join('\n');
+    expectPayloadReached(joined, 'Skipped', 'S10w user-command notice');
+    expectNoTerminalControl(joined, 'S10w user-command notice');
+
+    // The notice is only safe because the echoed name is sanitized AT THE
+    // NOTICE SITE (user-commands.ts:134). The benign name above would pass
+    // even if that call were dropped - so the sanitizer call itself is
+    // pinned structurally, and the mechanism is proven against the hostile
+    // corpus S10 uses, which this platform cannot put in a filename.
+    const pkgRoot = fileURLToPath(new URL('..', import.meta.url));
+    const loader = readFileSync(join(pkgRoot, 'src/lib/slash/user-commands.ts'), 'utf8');
+    expect(loader, 'the invalid-name notice no longer sanitizes the echoed filename').toMatch(
+      /sanitizeForDisplay\(entry\.name\)/,
+    );
+    const { sanitizeForDisplay } = await import('../src/lib/sanitize-display.js');
+    const FS_SAFE = `${OSC_TITLE}${CSI_CURSOR}${C1_CSI}${CR_OVERWRITE}`;
+    expectNoTerminalControl(
+      sanitizeForDisplay(`bad ${FS_SAFE} name`),
+      'S10w sanitizer on the S10 corpus',
+    );
   });
 
   test('S11 the sanitizer is IDEMPOTENT - sink-side application cannot double-mangle', async () => {

@@ -172,11 +172,12 @@ describe('cli integration - completion', () => {
 });
 
 describe('cli integration - config', () => {
-  test('config get on a fresh dir returns nothing for a missing key', () => {
+  test('config get on a fresh dir returns the default apiUrl', () => {
     const r = run(['config', 'get', 'apiUrl']);
     expect(r.exitCode).toBe(0);
-    // Either prints the default or empty; just ensure no crash.
-    expect(r.stdout.length).toBeGreaterThanOrEqual(0);
+    // Was a tautology (`stdout.length >= 0`, true of every output). The
+    // measured behaviour on a fresh dir is the default, printed verbatim.
+    expect(r.stdout).toContain('apiUrl = https://api.spycore.ai/api');
   });
 
   test('config set then get round-trips', () => {
@@ -218,6 +219,10 @@ describe('cli integration - agent --dry-run', () => {
     expect(r.exitCode).toBe(0);
     const outLines = r.stdout.split('\n');
     const countIdx = outLines.findIndex((l) => l.includes('offered'));
+    // Was an index bug: when 'offered' is absent findIndex returns -1 and
+    // outLines[-1 + 1] reads outLines[0], so the assertions below ran
+    // against the WRONG line and passed for the wrong reason.
+    expect(countIdx, 'the dry-run output has no "offered" tools line').toBeGreaterThanOrEqual(0);
     const toolsLine = outLines[countIdx + 1] ?? '';
     expect(toolsLine).toContain('read_file');
     // The mutating tools must not be in the offered list (the timeout line

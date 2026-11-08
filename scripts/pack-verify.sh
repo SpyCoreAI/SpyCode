@@ -65,15 +65,17 @@
 #    4. AN EMPTY MEMBER LIST COUNTED AS ONE. `printf '%s\n' "" | wc -l` is 1,
 #      so a tarball with no members reported `files=1` in the verdict line.
 #
-#  AND ONE MEASURED DEFECT IS **NOT** FIXED HERE, WHICH IS SAID RATHER THAN
-# IMPLIED. `with_deadline`'s fallback branch - the branch macOS takes, and macOS
-# is the platform the `packed-artifact` CI job runs on - kills only the DIRECT
-# child, so a payload that starts a grandchild ORPHANS it. Measured through the
-# repository's own group-killing probe harness with both controls firing:
-# control-yes=`yes`, no-grandchild=`no`, grandchild=`yes`. The fix is not one
-# line: F-2c-31 measured that `setsid` DOES NOT EXIST ON DARWIN, so a shell
-# child shares the caller's process group and `kill -- -$PGID` kills the caller.
-# Destination which already carries this file in its probe population.
+#  AND ONE MEASURED DEFECT IS FIXED HERE, IN THE FALLBACK.
+# `with_deadline`'s fallback branch - the branch macOS takes, and macOS is the
+# platform the `packed-artifact` CI job runs on - used to kill only the DIRECT
+# child, so a payload that starts a grandchild ORPHANED it. Measured through
+# the repository's own group-killing probe harness with both controls firing:
+# control-yes=`yes`, no-grandchild=`no`, grandchild=`yes`. The fix is a node
+# supervisor (this script already requires node): the child runs detached in
+# its own process group and the supervisor SIGKILLs the whole group on
+# deadline. `setsid` does not exist on Darwin and `set -m` job control is
+# unavailable without a tty, so neither shell route could do it. Proven by
+# the W-cases in the self-test below.
 #
 #  WHAT THIS SCRIPT CANNOT SEE, stated here rather than discovered later:
 #   - It installs from a LOCAL tarball, so it proves nothing about the registry
@@ -141,16 +143,46 @@ filemode() {
   else stat -f '%Lp' "$1" 2>/dev/null || echo missing; fi
 }
 
+# SHA-256 of stdin, on any platform this script runs on. `shasum` is
+# macOS/BSD; GNU/Linux carries `sha256sum`; a bare Windows shell has neither.
+# The drift check below hashes build/ before and after packing - on a system
+# with no hasher it silently compared two EMPTY strings and passed, because
+# two empty strings are equal. So this helper NEVER emits an empty hash: with
+# no hasher at all it fails hard with a clear message, and the call sites
+# treat that failure as a pack-verify failure, not as a hash of "".
+# The node branch is Buffer-based and binary-safe: chunks are concatenated as
+# Buffers, so no encoding round-trip can mangle a byte.
+hash_stdin() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | cut -d' ' -f1
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | cut -d' ' -f1
+  elif command -v node >/dev/null 2>&1; then
+    node -e 'let b=[];process.stdin.on("data",c=>b.push(c)).on("end",()=>{process.stdout.write(require("crypto").createHash("sha256").update(Buffer.concat(b)).digest("hex"))})'
+  else
+    printf '%s\n' 'pack-verify: no SHA-256 tool found (shasum, sha256sum, or node) - cannot hash build/' >&2
+    return 1
+  fi
+}
+
 #  PORTABLE PER-COMMAND DEADLINE. This script runs on the HOST, and macOS
 # ships no `timeout` and no `gtimeout` - the source-build harness runs its
 # `timeout` calls INSIDE a Debian container, where the binary exists. Assuming
-# it here made
-# every smoke report FAIL for a missing binary rather than for its property,
-# which is a control that cannot distinguish "blocked" from "never ran".
-# Same pure-sh watchdog shape the source-build harness uses on the host side.
+# it here made every smoke report FAIL for a missing binary rather than for
+# its property, which is a control that cannot distinguish "blocked" from
+# "never ran".
 #
-#  THE FALLBACK BRANCH ORPHANS A GRANDCHILD - measured, see the header. Not
-# fixed here; .
+#  The fallback (the branch macOS takes) is a node supervisor - this script
+# already requires node - because no shell route reaps the tree: the old
+# pure-sh watchdog killed only the DIRECT child and orphaned grandchildren,
+# `setsid` does not exist on Darwin, and `set -m` job control reports "set:
+# can't access tty; job control turned off" without a tty. The child runs
+# detached in its own process group; on deadline the supervisor SIGKILLs the
+# whole group. Exit 124 on timeout (the `timeout` convention); a child's exit
+# code is propagated, a signal death reports 128+signum as the shell would.
+# (`node -e` puts the first argument at argv[1] - there is no script-path
+# element as there is for a file - so the supervisor reads secs/cmd/args at
+# 1/2/3+, not 2/3/4+.)
 TIMEOUT_BIN=""
 if command -v timeout >/dev/null 2>&1; then TIMEOUT_BIN="timeout"
 elif command -v gtimeout >/dev/null 2>&1; then TIMEOUT_BIN="gtimeout"; fi
@@ -158,14 +190,7 @@ elif command -v gtimeout >/dev/null 2>&1; then TIMEOUT_BIN="gtimeout"; fi
 with_deadline() { # $1 = seconds, rest = command
   _secs="$1"; shift
   if [ -n "$TIMEOUT_BIN" ]; then "$TIMEOUT_BIN" "$_secs" "$@"; return $?; fi
-  "$@" &
-  _cmd=$!
-  ( sleep "$_secs"; kill -9 "$_cmd" 2>/dev/null ) >/dev/null 2>&1 &
-  _killer=$!
-  _st=0
-  wait "$_cmd" || _st=$?
-  kill "$_killer" 2>/dev/null || true
-  return "$_st"
+  node -e 'const { spawn } = require("child_process"); const secs = Number(process.argv[1]); const cmd = process.argv[2]; const args = process.argv.slice(3); const child = spawn(cmd, args, { detached: true, stdio: "inherit" }); let timedOut = false; const timer = setTimeout(() => { timedOut = true; try { process.kill(-child.pid, "SIGKILL"); } catch (e) { try { child.kill("SIGKILL"); } catch (e2) {} } }, secs * 1000); child.on("error", (err) => { clearTimeout(timer); process.stderr.write("with_deadline: " + err.message + "\n"); process.exit(127); }); child.on("exit", (code, signal) => { clearTimeout(timer); if (timedOut) process.exit(124); if (signal) { const SIG = { SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGKILL: 9, SIGTERM: 15 }; process.exit(128 + (SIG[signal] || 15)); } process.exit(code === null ? 1 : code); });' -- "$_secs" "$@"
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -457,6 +482,74 @@ build/z.js:9:ccc')" \
   st 'D14  the public list does NOT match its own spelling in redact.ts (no false positive on the shipped code)' \
     "$(grep -rEnIi -f "$T/pub.txt" "$T/pub-miss.txt" >/dev/null 2>&1 && echo hit || echo miss)" 'miss'
 
+  # ── HASH-forms: the stdin hasher (hash_stdin) ───────────────────────────
+  #  The drift check compares a before/after hash of build/. Its failure mode
+  # was silent: with no hasher, both hashes were EMPTY and equal. The vectors
+  # below pin the hash itself; the fallback cases pin that each branch is
+  # actually reachable; H5 pins that no branch at all FAILS rather than
+  # returning an empty hash.
+  st 'H1 sha256 of "abc" is the known vector' \
+    "$(printf 'abc' | hash_stdin)" 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'
+  st 'H2 sha256 of the empty input is the known vector' \
+    "$(printf '' | hash_stdin)" 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
+  #  The node fallback, forced by a PATH holding ONLY node and cut: shasum
+  # and sha256sum are unreachable there, so the vector can only come from
+  # the node branch.
+  mkdir -p "$T/hashbin"
+  ln -sf "$(command -v node)" "$T/hashbin/node"
+  ln -sf "$(command -v cut)" "$T/hashbin/cut"
+  st 'H3 the node fallback produces the same vector with no hasher on PATH' \
+    "$(printf 'abc' | PATH="$T/hashbin" hash_stdin)" 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'
+  #  The sha256sum fallback, forced the same way - skipped honestly on
+  # platforms (macOS) that do not ship sha256sum at all.
+  if command -v sha256sum >/dev/null 2>&1; then
+    mkdir -p "$T/hashbin2"
+    ln -sf "$(command -v sha256sum)" "$T/hashbin2/sha256sum"
+    ln -sf "$(command -v cut)" "$T/hashbin2/cut"
+    st 'H4 the sha256sum fallback produces the same vector with no shasum/node on PATH' \
+      "$(printf 'abc' | PATH="$T/hashbin2" hash_stdin)" 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'
+  else
+    st 'H4 sha256sum fallback (absent on this platform - skipped)' 'skipped' 'skipped'
+  fi
+  mkdir -p "$T/emptybin"
+  if PATH="$T/emptybin" hash_stdin </dev/null >/dev/null 2>&1; then _r=ok; else _r=refused; fi
+  st 'H5 no hasher at all is REFUSED (fail closed, never an empty hash)' "$_r" 'refused'
+
+  # ── W-forms: the deadline fallback reaps the whole tree ─────────────────
+  #  These force the FALLBACK branch (TIMEOUT_BIN="") - on Linux the GNU
+  # branch would otherwise answer, and the cases would prove nothing about
+  # the supervisor. W2 is the measured defect: the old pure-sh watchdog
+  # killed only the direct child, so the grandchild wrote its marker after
+  # the deadline. The marker is written at t=3s, past the 1s deadline; the
+  # wait below runs to t=5s, so a surviving grandchild is observed, not
+  # assumed absent.
+  _saved_timeout_bin="$TIMEOUT_BIN"
+  TIMEOUT_BIN=""
+  # NOTE: the `_rc=0; with_deadline ... || _rc=$?` shape is load-bearing.
+  # This script runs under `set -e`: a bare `with_deadline` returning
+  # non-zero inside `$(...)` kills the subshell before `echo $?` runs, so
+  # the case records an EMPTY actual instead of the exit code. The `||`
+  # branch is the context in which set -e is suppressed.
+  _rc=0
+  with_deadline 1 sleep 30 || _rc=$?
+  st 'W1 a direct child past its deadline exits 124' "$_rc" '124'
+  printf '%s\n' '#!/bin/sh' '(sleep 3; touch "$1") & sleep 30' >"$T/w2-payload.sh"
+  _rc=0
+  with_deadline 1 sh "$T/w2-payload.sh" "$T/w2-marker" || _rc=$?
+  sleep 4
+  if [ -f "$T/w2-marker" ]; then _m=present; else _m=absent; fi
+  _actual="rc=$_rc
+$_m"
+  st 'W2 a grandchild is reaped: its marker is never written' "$_actual" 'rc=124
+absent'
+  _rc=0
+  with_deadline 5 true || _rc=$?
+  st 'W3 a quick command exits 0 under the deadline' "$_rc" '0'
+  _rc=0
+  with_deadline 5 sh -c 'exit 7' || _rc=$?
+  st 'W4 a non-zero exit propagates through the deadline' "$_rc" '7'
+  TIMEOUT_BIN="$_saved_timeout_bin"
+
   # ── C-forms: the case counter itself ─────────────────────────────────────
   #  The counter is the mechanism that makes every case above falsifiable, so
   # it carries its own controls - otherwise the floor could be met by a counter
@@ -502,7 +595,10 @@ say "[pack-verify] package @spycore/cli version=$VERSION node=$(node -v)"
 # stale. Measured before/after so the script REPORTS when it saved us.
 BEFORE_HASH="(no pre-existing build)"
 if [ -d "$PKG_ROOT/build" ]; then
-  BEFORE_HASH="$(find "$PKG_ROOT/build" -type f -exec cat {} + | shasum -a 256 | cut -d' ' -f1)"
+  BEFORE_HASH="$(find "$PKG_ROOT/build" -type f -exec cat {} + | hash_stdin)" || {
+    say "PACK-VERIFY FAIL (stage: no SHA-256 tool available to hash build/)"
+    exit 1
+  }
 fi
 
 say "[pack-verify] stage: npm pack (runs prepack -> build)…"
@@ -513,7 +609,10 @@ TARBALL="$(ls "$WORK"/*.tgz 2>/dev/null | head -1)"
 [ -n "$TARBALL" ] || { say "PACK-VERIFY FAIL (stage: pack produced no tarball)"; exit 1; }
 say "[pack-verify] tarball: $(basename "$TARBALL") ($(wc -c <"$TARBALL" | tr -d ' ') bytes)"
 
-AFTER_HASH="$(find "$PKG_ROOT/build" -type f -exec cat {} + | shasum -a 256 | cut -d' ' -f1)"
+AFTER_HASH="$(find "$PKG_ROOT/build" -type f -exec cat {} + | hash_stdin)" || {
+  say "PACK-VERIFY FAIL (stage: no SHA-256 tool available to hash build/)"
+  exit 1
+}
 if [ "$BEFORE_HASH" = "$AFTER_HASH" ]; then
   ok "build/ was already current before packing"
 else

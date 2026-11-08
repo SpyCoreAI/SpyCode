@@ -251,13 +251,17 @@ export async function refreshAccessToken(
 
   const data = (await resp.json()) as {
     access_token: string;
+    /** Present when the provider rotates the refresh token: keep it, or the next refresh fails. */
+    refresh_token?: string;
     expires_in: number;
     token_type: string;
   };
 
   return {
     accessToken: data.access_token,
-    refreshToken, // refresh token doesn't change
+    // A rotated refresh token replaces the old one (Google revokes the old
+    // token on rotation); without a new one the old token is still valid.
+    refreshToken: data.refresh_token ?? refreshToken,
     expiresAt: Date.now() + data.expires_in * 1000,
     tokenType: data.token_type,
   };

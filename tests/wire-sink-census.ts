@@ -33,14 +33,25 @@ import ts from 'typescript';
  * classify, so `print(`x ${someHelper(file.name)}`)` reads as clean. This
  * is a real FALSE NEGATIVE, demonstrated by plant B5. It is the deliberate
  * trade: propagating through every call would flag most of the package and
- * a gate nobody can keep green is not a gate.
+ * a gate nobody can keep green is not a gate. COMPENSATING CONTROL: every
+ * site where taint enters a locally-defined wrapper is collected as a
+ * `carrier` and the set of (file, callee) pairs is PINNED in
+ * display-sink-reach.test.ts (C1). A new carrier fails loudly; removals
+ * pass. The pin is the loud failure the blind spot used to lack - a sink
+ * path routed through a fresh wrapper can no longer arrive silently.
  * 2. **A wire origin not in the seed list.** `git`/`gh` subprocess output and
  * repository file contents are untrusted but are not "over the wire"; they
  * are covered by the execution pins (S10), not here.
  * 3. **SENSE.** This is a dataflow scan, not a judgement: it cannot tell that
  * `relativeTime()` is safe - that is READ and encoded below, not inferred.
- * 4. **Ink prop threading.** A wire value passed through JSX props into a
- * component defined elsewhere is not traced.
+ * 4. **Ink prop threading.** Same-file prop threading IS traced: a wire value
+ * interpolated into a JSX expression is reported as `ink.jsx`, and a
+ * tainted object spread into a component as `ink.jsx-spread` - both proven
+ * by plants P2/P3. What remains genuinely untraced is taint that reaches
+ * JSX only through React state (a `pushNotice`/`setState` hop) or through
+ * a variable assigned in another module; the carrier ratchet (1) is the
+ * control that catches the second shape when it crosses an unclassified
+ * call.
  *
  * A zero from this census means "zero under the above", never "zero".
  */
@@ -99,8 +110,22 @@ export interface SinkFinding {
   readonly root: string;
   readonly snippet: string;
 }
+/**
+ * A site where a wire-tainted value enters an UNCLASSIFIED call - the
+ * census's blind spot #1. Taint stops there (the callee is neither a
+ * known-preserving transform, a terminator, a sink, nor the sanitizer),
+ * so nothing downstream is traced. The set is PINNED in
+ * display-sink-reach.test.ts: a NEW carrier fails loudly, so a sink path
+ * routed through a fresh wrapper cannot arrive silently.
+ */
+export interface CarrierFinding {
+  readonly file: string;
+  readonly callee: string;
+  readonly root: string;
+}
 export interface CensusResult {
   readonly findings: readonly SinkFinding[];
+  readonly carriers: readonly CarrierFinding[];
   readonly filesScanned: number;
   readonly aliases: ReadonlyMap<string, string>;
 }
@@ -125,7 +150,8 @@ function parseAll(extraFiles: Readonly<Record<string, string>>): Parsed[] {
       f.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS),
   }));
   for (const [rel, text] of Object.entries(extraFiles)) {
-    real.push({ rel, sf: ts.createSourceFile(rel, text, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS) });
+    real.push({ rel, sf: ts.createSourceFile(rel, text, ts.ScriptTarget.ES2022, true,
+      rel.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS) });
   }
   return real;
 }
@@ -203,6 +229,22 @@ function discoverSinkAliases(parsed: readonly Parsed[]): Map<string, string> {
   return aliases;
 }
 
+/** Locally-defined named functions (declarations + arrow/function vars) - the `someHelper` shape. */
+function discoverLocalFunctions(parsed: readonly Parsed[]): Set<string> {
+  const names = new Set<string>();
+  for (const { sf } of parsed) {
+    const visit = (n: ts.Node): void => {
+      if (ts.isFunctionDeclaration(n) && n.name) names.add(n.name.text);
+      if (ts.isVariableDeclaration(n) && n.initializer && ts.isIdentifier(n.name) &&
+          (ts.isArrowFunction(n.initializer) || ts.isFunctionExpression(n.initializer)))
+        names.add(n.name.text);
+      ts.forEachChild(n, visit);
+    };
+    visit(sf);
+  }
+  return names;
+}
+
 /**
  * Count every site where a wire-origin value reaches a rendering surface
  * without crossing the sanitizer.
@@ -215,7 +257,9 @@ export function censusWireSinks(
 ): CensusResult {
   const parsed = parseAll(opts.extraFiles ?? {});
   const aliases = discoverSinkAliases(parsed);
+  const localFunctions = discoverLocalFunctions(parsed);
   const findings: SinkFinding[] = [];
+  const carriers: CarrierFinding[] = [];
 
   for (const { rel, sf } of parsed) {
     const tainted = new Set<string>();
@@ -297,6 +341,75 @@ export function censusWireSinks(
     // `let file: FileDetail;` then `file = await api.get(...)` needs >1 pass.
     for (let i = 0; i < 8 && seedPass(); i++) { /* fixpoint */ }
 
+    // ── BLIND SPOT #1, RATCHETED. Taint stops at an unclassified call, so
+    // a value handed to an unknown wrapper is invisible downstream. The
+    // census cannot close that without flagging most of the package (the
+    // deliberate trade, stated in the header) - but it CAN list every site
+    // where taint enters one, so a NEW carrier fails the pin in
+    // display-sink-reach.test.ts instead of arriving silently.
+    //
+    // A carrier is a LOCALLY-DEFINED function called with a tainted
+    // argument - the `someHelper(file.name)` shape. Method calls, stdlib
+    // calls (Number, Array.isArray, …) and callbacks are excluded: a
+    // callback's closed-over variables are not data passed to the callee,
+    // and a numeric/boolean coercion cannot carry terminal control.
+    const lenientTaint = (node: ts.Node): string | null => {
+      let found: string | null = null;
+      const visit = (n: ts.Node): void => {
+        if (found !== null) return;
+        // A nested function boundary: identifiers inside a callback are
+        // closed over, not passed to the call under inspection.
+        if (ts.isArrowFunction(n) || ts.isFunctionExpression(n)) return;
+        // The sanitizer and the `display` tag are barriers, as in exprTaint.
+        if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === SANITIZER) return;
+        if (ts.isTaggedTemplateExpression(n) && ts.isIdentifier(n.tag) && n.tag.text === SANITIZING_TAG) return;
+        if (ts.isIdentifier(n) && tainted.has(n.text)) { found = n.text; return; }
+        if (ts.isPropertyAccessExpression(n)) {
+          if (NUMERIC_PROPS.has(n.name.text)) return;
+          visit(n.expression);
+          return;
+        }
+        if (ts.isConditionalExpression(n)) { visit(n.whenTrue); visit(n.whenFalse); return; }
+        // Unlike exprTaint, descend THROUGH calls: the question here is
+        // only whether a tainted value reaches the call at all.
+        ts.forEachChild(n, visit);
+      };
+      visit(node);
+      return found;
+    };
+    const isClassifiedCall = (n: ts.CallExpression): boolean => {
+      const c = n.expression;
+      const name = ts.isIdentifier(c) ? c.text : ts.isPropertyAccessExpression(c) ? c.name.text : '';
+      return (
+        name === SANITIZER ||
+        name === 'ora' ||
+        PRESERVING_CALLS.has(name) ||
+        TERMINATING_CALLS.has(name) ||
+        SINK_FUNCS.has(name) ||
+        PROMPT_FUNCS.has(name) ||
+        MACHINE_FUNCS.has(name) ||
+        WIRE_FUNCS.has(name) ||
+        aliases.has(name) ||
+        isWireOrigin(n)
+      );
+    };
+    const findCarriers = (n: ts.Node): void => {
+      if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && !isClassifiedCall(n)) {
+        const name = n.expression.text;
+        if (localFunctions.has(name)) {
+          for (const arg of n.arguments) {
+            const root = lenientTaint(arg);
+            if (root !== null) {
+              carriers.push({ file: rel, callee: name, root });
+              break;
+            }
+          }
+        }
+      }
+      ts.forEachChild(n, findCarriers);
+    };
+    findCarriers(sf);
+
     const report = (node: ts.Node, kind: string, arg: ts.Node): void => {
       const root = exprTaint(arg);
       if (root === null) return;
@@ -332,12 +445,16 @@ export function censusWireSinks(
           /spinner/i.test(n.left.expression.getText(sf)))
         report(n, 'spinner.text=', n.right);
       if (ts.isJsxExpression(n) && n.expression) report(n, 'ink.jsx', n.expression);
+      // Blind spot #4, spread half: `<Foo {...props} />` carries no
+      // JsxExpression, so the prop case above never fires on it. A
+      // tainted spread object is a prop-threading sink too.
+      if (ts.isJsxSpreadAttribute(n)) report(n, 'ink.jsx-spread', n.expression);
       ts.forEachChild(n, findSinks);
     };
     findSinks(sf);
   }
 
-  return { findings, filesScanned: parsed.length, aliases };
+  return { findings, carriers, filesScanned: parsed.length, aliases };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -537,3 +654,50 @@ export async function probe(): Promise<void> {
 }
 `;
 export const KNOWN_DEFECT_PROBE_PATH = 'src/commands/files/__census_probe.ts';
+
+/**
+ * Blind spot #4, spread half: a tainted object threaded into a component
+ * via `<Foo {...props} />`. The census must report `ink.jsx-spread`.
+ */
+export const JSX_SPREAD_PROBE = `
+import { api } from '../../lib/api.js';
+interface FileDetail { id: string; filename: string }
+export async function probe(): Promise<void> {
+  const file = await api.get<FileDetail>('/api/files/probe');
+  const props = { label: file.filename };
+  const el = <Foo {...props} />;
+}
+`;
+export const JSX_SPREAD_PROBE_PATH = 'probe/jsx-spread-probe.tsx';
+
+/**
+ * Blind spot #4, prop half: a tainted value threaded into a component via
+ * a named prop. Same-file prop threading IS traced (`ink.jsx`) - the header
+ * used to overstate this gap; this probe pins that the census sees it.
+ */
+export const JSX_PROP_PROBE = `
+import { api } from '../../lib/api.js';
+interface FileDetail { id: string; filename: string }
+export async function probe(): Promise<void> {
+  const file = await api.get<FileDetail>('/api/files/probe');
+  const el = <Foo label={file.filename} />;
+}
+`;
+export const JSX_PROP_PROBE_PATH = 'probe/jsx-prop-probe.tsx';
+
+/**
+ * Blind spot #1: a tainted value handed to a locally-defined wrapper.
+ * `someHelper` is defined in the probe itself so the census's local-function
+ * rule sees it; the value stops there, so there is no sink finding - only
+ * the carrier record the ratchet pins.
+ */
+export const CARRIER_PROBE = `
+import { api } from '../../lib/api.js';
+interface FileDetail { id: string; filename: string }
+export function someHelper(s: string): string { return s; }
+export async function probe(): Promise<void> {
+  const file = await api.get<FileDetail>('/api/files/probe');
+  const label = someHelper(file.filename);
+}
+`;
+export const CARRIER_PROBE_PATH = 'probe/carrier-probe.ts';

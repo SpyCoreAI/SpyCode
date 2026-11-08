@@ -431,10 +431,20 @@ describe('dispatchTool CLI-wide timeout', () => {
       return { ok: true, summary: 'slow', content: 'slow' };
     },
   };
+  const slowerTool: ToolDefinition = {
+    name: 'slower',
+    description: 'a tool that takes 2500ms - past one watchdog tick',
+    parameters: { type: 'object', properties: {} },
+    async execute() {
+      await new Promise((r) => setTimeout(r, 2500));
+      return { ok: true, summary: 'slower', content: 'slower' };
+    },
+  };
   const tools = new Map<string, ToolDefinition>([
     ['hang', hangTool],
     ['quick', quickTool],
     ['slow', slowTool],
+    ['slower', slowerTool],
   ]);
   const tctx = (over: Partial<ToolContext> = {}): ToolContext => ({
     cwd: workDir,
@@ -485,6 +495,26 @@ describe('dispatchTool CLI-wide timeout', () => {
     const r = await dispatchTool('slow', {}, tctx({ dispatchTimeoutMs: 0 }));
     expect(r.ok).toBe(true);
     expect(r.content).toBe('slow');
+  });
+
+  test('a slow-but-finite tool COMPLETES under a timeout larger than its runtime', async () => {
+    const r = await dispatchTool('slow', {}, tctx({ dispatchTimeoutMs: 2000 }));
+    expect(r.ok).toBe(true);
+    expect(r.content).toBe('slow');
+  });
+
+  test('a slow-but-finite tool is CUT OFF under a timeout smaller than its runtime', async () => {
+    // The watchdog ticks every 1000ms, so the cutoff is pinned against a
+    // tool slower than one tick (2500ms) and a 1000ms budget - not against
+    // a sub-second budget, which the tick granularity would swallow.
+    const start = Date.now();
+    const r = await dispatchTool('slower', {}, tctx({ dispatchTimeoutMs: 1000 }));
+    const elapsed = Date.now() - start;
+    expect(r.ok).toBe(false);
+    expect(r.content).toMatch(/timed out after/);
+    // The dispatch gave up at the watchdog tick (~1s), NOT at the tool's
+    // own 2500ms finish - the cutoff fired, the tool did not complete.
+    expect(elapsed).toBeLessThan(2000);
   });
 });
 

@@ -81,6 +81,22 @@ describe('checkpoint journal', () => {
     expect(listSessions(workDir)).toHaveLength(0);
   });
 
+  test('back-to-back sessions order newest-first with NO sleep (monotonic id sequence)', () => {
+    // Date.now() granularity is ~15.6ms on Windows, so sessions created in
+    // the same millisecond used to tie on the ms prefix and "newest" fell
+    // back to readdir order. The id carries a per-process sequence, so
+    // creation order is total even with zero delay between saves.
+    writeFileSync(fp('x.txt'), 'X');
+    const ids = [seed('first', [{ path: fp('x.txt'), op: 'create', before: null, after: 'X' }])];
+    writeFileSync(fp('y.txt'), 'Y');
+    ids.push(seed('second', [{ path: fp('y.txt'), op: 'create', before: null, after: 'Y' }]));
+    writeFileSync(fp('z.txt'), 'Z');
+    ids.push(seed('third', [{ path: fp('z.txt'), op: 'create', before: null, after: 'Z' }]));
+    expect(listSessions(workDir).map((s) => s.id)).toEqual([ids[2], ids[1], ids[0]]);
+    expect(latestSession(workDir)?.id).toBe(ids[2]);
+    expect(latestSession(workDir)?.task).toBe('third');
+  });
+
   // ── create ──
   test("rewind of a 'create' deletes the file when unchanged", () => {
     writeFileSync(fp('new.txt'), 'created');

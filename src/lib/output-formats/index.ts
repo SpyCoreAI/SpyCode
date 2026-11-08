@@ -82,7 +82,7 @@ function toYaml(data: unknown, indent = 0): string {
   if (data === null || data === undefined) return 'null';
   if (typeof data === 'boolean') return data ? 'true' : 'false';
   if (typeof data === 'number') return Number.isFinite(data) ? String(data) : 'null';
-  if (typeof data === 'string') return yamlScalar(data);
+  if (typeof data === 'string') return yamlScalar(data, indent);
 
   if (Array.isArray(data)) {
     if (data.length === 0) return '[]';
@@ -128,15 +128,25 @@ function yamlKey(k: string): string {
   return JSON.stringify(k);
 }
 
-function yamlScalar(s: string): string {
-  // Multiline → block literal, preserves newlines.
+function yamlScalar(s: string, indent: number): string {
+  // Multiline → block literal, preserves newlines. The content must be
+  // indented MORE than the key (or dash) that introduces it: a fixed
+  // 2-space indent is valid at the top level but INVALID under a nested
+  // key, where the content lands level with the key itself. The value
+  // arrives one level deeper than its key already, so its own indent IS
+  // the content indent (floor of one level for a bare top-level scalar).
   if (s.includes('\n')) {
-    return '|-\n' + s.split('\n').map((line) => `  ${line}`).join('\n');
+    const contentPad = '  '.repeat(Math.max(indent, 1));
+    return '|-\n' + s.split('\n').map((line) => `${contentPad}${line}`).join('\n');
   }
   // Strings that look like other types or contain special chars get quoted.
+  // A leading `- ` (or a bare `-`) would re-parse as a sequence entry, so it
+  // is quoted; `[`/`]`/`{`/`}` at the start are already caught by the class
+  // below (a `[a]` value was already emitted quoted - pinned by the test).
   if (
     /^(true|false|null|yes|no|on|off|~)$/i.test(s) ||
     /^-?\d/.test(s) ||
+    /^-([ \t]|$)/.test(s) ||
     /^[!&*?{}\[\]|>%@`,]|^[ \t]|[ \t]$/.test(s) ||
     s.includes(': ') ||
     s.includes('#') ||

@@ -40,6 +40,26 @@ describe('H-16 buildSubprocessEnv', () => {
     expect('PATH' in env).toBe(false);
   });
 
+  test('strips private-key values and credential-file paths from the ambient env', () => {
+    vi.stubEnv('MY_PRIVATE_KEY', '-----BEGIN PRIVATE KEY-----');
+    vi.stubEnv('GOOGLE_APPLICATION_CREDENTIALS', '/home/user/sa.json');
+    vi.stubEnv('AWS_SHARED_CREDENTIALS_FILE', '/home/user/.aws/credentials');
+    vi.stubEnv('KUBECONFIG', '/home/user/.kube/config');
+    vi.stubEnv('PATH', '/usr/bin:/bin');
+    const env = buildSubprocessEnv();
+    expect(env['MY_PRIVATE_KEY']).toBeUndefined();
+    expect(env['GOOGLE_APPLICATION_CREDENTIALS']).toBeUndefined();
+    expect(env['AWS_SHARED_CREDENTIALS_FILE']).toBeUndefined();
+    expect(env['KUBECONFIG']).toBeUndefined();
+    expect(env['PATH']).toBe('/usr/bin:/bin');
+  });
+
+  test('an explicit per-spawn credential-file path still wins (deliberate config)', () => {
+    vi.stubEnv('KUBECONFIG', '/home/user/.kube/config');
+    const env = buildSubprocessEnv({ KUBECONFIG: '/srv/shared/kubeconfig' });
+    expect(env['KUBECONFIG']).toBe('/srv/shared/kubeconfig');
+  });
+
   test('never mutates process.env', () => {
     vi.stubEnv('SPYCORE_TOKEN', 'tok-123');
     buildSubprocessEnv({ SPYCORE_TOKEN: 'other' });

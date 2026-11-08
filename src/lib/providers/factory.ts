@@ -5,8 +5,28 @@
  * module itself is tiny and safe to import statically.
  */
 import { EXIT_USER_ERROR, SpycoreCliError } from '../errors.js';
+import { getStoredProviders, setStoredProviders } from '../config.js';
 import type { ByokConfig } from './byok-config.js';
 import type { Provider } from './types.js';
+
+/**
+ * Write a rotated refresh token back to its stored provider entry, so the
+ * next process does not retry with the revoked token. Best-effort: the
+ * in-process token is already updated, and a store write must not fail a
+ * run that already holds a fresh access token.
+ */
+function persistRotatedRefreshToken(sourceName: string, refreshToken: string): void {
+  try {
+    const stored = getStoredProviders();
+    const entry = stored.find((p) => p.name === sourceName);
+    if (!entry || entry.oauthRefreshToken === refreshToken) return;
+    setStoredProviders(
+      stored.map((p) => (p.name === sourceName ? { ...p, oauthRefreshToken: refreshToken } : p)),
+    );
+  } catch {
+    /* best-effort - see above */
+  }
+}
 
 export async function createByokProvider(config: ByokConfig): Promise<Provider> {
   switch (config.type) {
@@ -32,13 +52,22 @@ export async function createByokProvider(config: ByokConfig): Promise<Provider> 
         // neither, googleOAuthConfig throws the setup hint. Use a dummy
         // port - we only need the token URL and client ID for refresh.
         const oauthConfig = googleOAuthConfig(0, config.oauthClientId);
-        const refreshToken = config.oauthRefreshToken;
         // Refresh on demand, not just once at construction: access tokens
         // expire after ~1h, so a provider built here used to die mid-run
         // with 401. The initial refresh still runs now (a bad refresh
         // token fails fast, as before); the provider replays it on 401.
+        // The CURRENT refresh token, not the one construction started with:
+        // a provider that rotates it revokes the old one, so every refresh
+        // must send the newest token or the next refresh fails. A rotation
+        // is also persisted to the stored entry (when this provider came
+        // from one) so the next process does not retry with a revoked token.
+        let currentRefreshToken = config.oauthRefreshToken;
         const refresh = async (): Promise<string> => {
-          const tokens = await refreshAccessToken(oauthConfig, refreshToken);
+          const tokens = await refreshAccessToken(oauthConfig, currentRefreshToken);
+          if (tokens.refreshToken !== currentRefreshToken) {
+            currentRefreshToken = tokens.refreshToken;
+            if (config.sourceName) persistRotatedRefreshToken(config.sourceName, tokens.refreshToken);
+          }
           return tokens.accessToken;
         };
         try {

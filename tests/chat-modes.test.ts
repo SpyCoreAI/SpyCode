@@ -2,11 +2,8 @@ import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { freshConfigDir } from './helpers.js';
+import { fakeChatIo, freshConfigDir } from './helpers.js';
 import type { Provider, ProviderEvent, StreamChatParams } from '../src/lib/providers/types.js';
-import type { ApprovalRequest } from '../src/lib/agent/approval.js';
-import type { AgentEvent } from '../src/lib/agent/loop.js';
-import type { ChatAgentIo } from '../src/lib/chat-agent-run.js';
 
 /**
  * PLAN / ASK / AGENT modes - PHASE-1 1.7.
@@ -63,39 +60,6 @@ afterEach(async () => {
     /* ignore */
   }
 });
-
-interface IoHarness {
-  notices: Array<{ kind: string; text: string }>;
-  events: AgentEvent[];
-  plans: string[];
-  approvals: ApprovalRequest[];
-  io: ChatAgentIo;
-}
-
-function fakeIo(overrides: Partial<ChatAgentIo> = {}): IoHarness {
-  const notices: Array<{ kind: string; text: string }> = [];
-  const events: AgentEvent[] = [];
-  const plans: string[] = [];
-  const approvals: ApprovalRequest[] = [];
-  return {
-    notices,
-    events,
-    plans,
-    approvals,
-    io: {
-      notify: (kind, text) => void notices.push({ kind, text }),
-      renderEvent: (e) => void events.push(e),
-      presentPlan: (p) => void plans.push(p),
-      ask: async () => 'c',
-      readText: async () => '',
-      requestApproval: async (req) => {
-        approvals.push(req);
-        return 'reject';
-      },
-      ...overrides,
-    },
-  };
-}
 
 // ───────────────────── structural per-mode tool policy ─────────────────────
 
@@ -165,7 +129,7 @@ describe('structural policy - plan/ask registries', () => {
       block('write_file', { path: 'sneaky.txt', content: 'x' }),
       'PLAN: 1. Write sneaky.txt',
     ]);
-    const h = fakeIo({ ask: async () => 'c' }); // discard the plan
+    const h = fakeChatIo({}, { ask: async () => 'c' }); // discard the plan
     const { runChatAgentTurn } = await import('../src/lib/chat-agent-run.js');
     const result = await runChatAgentTurn({
       cwd,
@@ -195,7 +159,7 @@ describe('structural policy - plan/ask registries', () => {
 
   test('ask never reaches an agent loop: the run core runtime-rejects it', async () => {
     const provider = new StubProvider(['should never be called']);
-    const h = fakeIo();
+    const h = fakeChatIo();
     const { runChatAgentTurn } = await import('../src/lib/chat-agent-run.js');
     const result = await runChatAgentTurn({
       cwd,
@@ -220,7 +184,7 @@ describe('plan → agent handoff (the existing runAgent path)', () => {
       block('write_file', { path: 'hello.txt', content: 'hi\n' }),
       'Done.',
     ]);
-    const h = fakeIo({
+    const h = fakeChatIo({}, {
       ask: async () => 'a', // approve the plan
       requestApproval: async (req) => {
         h.approvals.push(req);
@@ -257,7 +221,7 @@ describe('plan → agent handoff (the existing runAgent path)', () => {
       block('write_file', { path: 'hello.txt', content: 'hi\n' }),
       'Done.',
     ]);
-    const h = fakeIo({
+    const h = fakeChatIo({}, {
       ask: async () => 'a',
       requestApproval: async (req) => {
         h.approvals.push(req);
@@ -290,7 +254,7 @@ describe('plan → agent handoff (the existing runAgent path)', () => {
       `${block('write_file', { path: 'a.txt', content: 'a' })}\n${block('write_file', { path: 'b.txt', content: 'b' })}`,
       'Done.',
     ]);
-    const h = fakeIo({
+    const h = fakeChatIo({}, {
       requestApproval: async (req) => {
         h.approvals.push(req);
         return 'accept_all';
@@ -317,7 +281,7 @@ describe('plan → agent handoff (the existing runAgent path)', () => {
       'Done.',
     ]);
     const answers = ['r', 'a'];
-    const h = fakeIo({
+    const h = fakeChatIo({}, {
       ask: async () => answers.shift() ?? 'c',
       readText: async () => 'make it shorter',
       requestApproval: async () => 'accept',
@@ -355,7 +319,7 @@ describe('hooks fire identically in plan/agent modes', () => {
     const { loadHookSession } = await import('../src/lib/hooks.js');
     const hooks = await loadHookSession(cwd);
     const provider = new StubProvider(['never']);
-    const h = fakeIo();
+    const h = fakeChatIo();
     const { runChatAgentTurn } = await import('../src/lib/chat-agent-run.js');
     const result = await runChatAgentTurn({
       cwd,
@@ -386,7 +350,7 @@ describe('hooks fire identically in plan/agent modes', () => {
       block('read_file', { path: 'readable.txt' }),
       'PLAN: 1. x',
     ]);
-    const h = fakeIo({ ask: async () => 'c' });
+    const h = fakeChatIo({}, { ask: async () => 'c' });
     const { runChatAgentTurn } = await import('../src/lib/chat-agent-run.js');
     await runChatAgentTurn({
       cwd,

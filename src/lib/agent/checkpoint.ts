@@ -187,6 +187,38 @@ function numericPrefix(id: string): number {
   return Number.isFinite(n) ? n : 0;
 }
 
+/**
+ * Session ids carry a per-process monotonic sequence between the epoch-ms
+ * prefix and the random suffix: `${Date.now()}-${seq}-${random}`.
+ *
+ * `Date.now()` has ~15.6ms granularity on Windows, so two sessions created
+ * back-to-back share a millisecond and a sort on the ms prefix alone has no
+ * tie-break - "newest" fell back to readdir order, which is
+ * filesystem-arbitrary. The sequence makes creation order total within a
+ * process; the comparator below makes it deterministic across processes
+ * too (old-format `${ms}-${random}` ids have no sequence segment and sort
+ * by ms, then by full id).
+ */
+let sessionSeq = 0;
+function nextSessionId(): string {
+  sessionSeq += 1;
+  return `${Date.now()}-${String(sessionSeq).padStart(6, '0')}-${randomBytes(4).toString('hex')}`;
+}
+
+function sessionSeqOf(id: string): number {
+  const n = Number.parseInt(id.split('-')[1] ?? '0', 10);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/** Newest first: epoch-ms prefix, then the monotonic sequence, then the full id. */
+function compareSessionIdsNewestFirst(a: string, b: string): number {
+  const byMs = numericPrefix(b) - numericPrefix(a);
+  if (byMs !== 0) return byMs;
+  const bySeq = sessionSeqOf(b) - sessionSeqOf(a);
+  if (bySeq !== 0) return bySeq;
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 /** Read the current on-disk sha of a path, or null when unreadable/missing. */
 export function currentFileSha(path: string): string | null {
   return currentSha(path);
@@ -209,7 +241,7 @@ export function saveSession(input: { cwd: string; task: string; changes: Recorde
   try {
     const dir = cwdDir(input.cwd);
     mkdirSync(dir, { recursive: true, mode: JOURNAL_DIR_MODE });
-    const id = `${Date.now()}-${randomBytes(4).toString('hex')}`;
+    const id = nextSessionId();
     const session: CheckpointSession = {
       id,
       cwd: input.cwd,
@@ -371,7 +403,7 @@ function makeRecorder(
 
 /** Start a fresh incrementally-persisted run journal. */
 export function createRunRecorder(input: { cwd: string; task: string; initial: ResumeInitial }): RunRecorder {
-  const id = `${Date.now()}-${randomBytes(4).toString('hex')}`;
+  const id = nextSessionId();
   const resume: ResumeState = {
     version: 1,
     status: 'running',
@@ -411,7 +443,7 @@ function pruneSessions(dir: string): void {
   try {
     const active = readdirSync(dir).filter((f) => f.endsWith('.json'));
     if (active.length <= MAX_SESSIONS_PER_CWD) return;
-    const sorted = active.sort((a, b) => numericPrefix(b) - numericPrefix(a));
+    const sorted = active.sort(compareSessionIdsNewestFirst);
     for (const f of sorted.slice(MAX_SESSIONS_PER_CWD)) {
       try {
         unlinkSync(join(dir, f));
@@ -449,7 +481,7 @@ export function listSessions(cwd: string): CheckpointSession[] {
   return active
     .map((f) => parseSession(join(dir, f)))
     .filter((s): s is CheckpointSession => s !== null)
-    .sort((a, b) => numericPrefix(b.id) - numericPrefix(a.id));
+    .sort((a, b) => compareSessionIdsNewestFirst(a.id, b.id));
 }
 
 export function latestSession(cwd: string): CheckpointSession | null {
@@ -512,7 +544,7 @@ export function branchSession(cwd: string, sourceId: string): string | null {
       src = join(dir, `${sourceId}.json.done`);
       if (!existsSync(src)) return null;
     }
-    const newId = `${Date.now()}-${randomBytes(4).toString('hex')}`;
+    const newId = nextSessionId();
     const dest = join(dir, `${newId}.json`);
     const content = readFileSync(src, 'utf-8');
     const session = JSON.parse(content) as CheckpointSession;

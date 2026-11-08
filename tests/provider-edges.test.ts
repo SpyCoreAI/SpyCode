@@ -128,12 +128,40 @@ describe('provider add edges', () => {
     expect(getStoredProviders()).toHaveLength(1);
   });
 
-  test('a stalled health-check stream times out after 30s', async () => {
-    responder = () => new Promise<never>(() => {});
-    const r = await runProvider(['add', 'x', '--model', 'm', '--api-key', 'k']);
-    expect(r.error).toBeUndefined();
-    expect(r.stdout + r.stderr).toContain('Health check timed out after 30s.');
-  }, 60_000);
+  test('a stalled health-check stream times out (default 30s, exercised at 1s)', async () => {
+    // The 30s default is pinned by the healthCheckTimeoutMs unit test
+    // below; here the timeout PATH is exercised via the hook at 1s, so
+    // the test takes ~1s instead of the full 30s.
+    const prev = process.env.SPYCORE_HEALTH_CHECK_TIMEOUT_MS;
+    process.env.SPYCORE_HEALTH_CHECK_TIMEOUT_MS = '1000';
+    try {
+      responder = () => new Promise<never>(() => {});
+      const r = await runProvider(['add', 'x', '--model', 'm', '--api-key', 'k']);
+      expect(r.error).toBeUndefined();
+      expect(r.stdout + r.stderr).toContain('Health check timed out after 1s.');
+    } finally {
+      if (prev === undefined) delete process.env.SPYCORE_HEALTH_CHECK_TIMEOUT_MS;
+      else process.env.SPYCORE_HEALTH_CHECK_TIMEOUT_MS = prev;
+    }
+  }, 10_000);
+
+  test('healthCheckTimeoutMs defaults to 30s and ignores bad overrides', async () => {
+    const { healthCheckTimeoutMs } = await import('../src/commands/provider/index.js');
+    const prev = process.env.SPYCORE_HEALTH_CHECK_TIMEOUT_MS;
+    try {
+      delete process.env.SPYCORE_HEALTH_CHECK_TIMEOUT_MS;
+      expect(healthCheckTimeoutMs()).toBe(30_000);
+      process.env.SPYCORE_HEALTH_CHECK_TIMEOUT_MS = '1000';
+      expect(healthCheckTimeoutMs()).toBe(1000);
+      process.env.SPYCORE_HEALTH_CHECK_TIMEOUT_MS = 'not-a-number';
+      expect(healthCheckTimeoutMs()).toBe(30_000);
+      process.env.SPYCORE_HEALTH_CHECK_TIMEOUT_MS = '0';
+      expect(healthCheckTimeoutMs()).toBe(30_000);
+    } finally {
+      if (prev === undefined) delete process.env.SPYCORE_HEALTH_CHECK_TIMEOUT_MS;
+      else process.env.SPYCORE_HEALTH_CHECK_TIMEOUT_MS = prev;
+    }
+  });
 });
 
 describe('provider list edges', () => {

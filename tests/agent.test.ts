@@ -3,18 +3,9 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
-import { freshConfigDir } from './helpers.js';
+import { freshConfigDir, jsonResp, makeResponder, modelTurns, sseResp, type MockResp } from './helpers.js';
 import type { AgentEvent } from '../src/lib/agent/loop.js';
 import { headlessApproval, type RequestApproval } from '../src/lib/agent/approval.js';
-
-interface MockResp {
-  statusCode: number;
-  headers: Record<string, string | string[]>;
-  body: {
-    json: () => Promise<unknown>;
-    [Symbol.asyncIterator]?: () => AsyncIterator<Buffer>;
-  };
-}
 
 let responder:
   | ((url: string, init: { method: string; body?: unknown; headers?: Record<string, string> }) => MockResp)
@@ -51,52 +42,12 @@ afterEach(() => {
   }
 });
 
-function jsonResp(status: number, body: unknown): MockResp {
-  return { statusCode: status, headers: {}, body: { json: async () => body } };
-}
-
-function sseResp(events: Array<Record<string, unknown>>): MockResp {
-  const buf = Buffer.from(events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join(''));
-  return {
-    statusCode: 200,
-    headers: { 'content-type': 'text/event-stream' },
-    body: {
-      json: async () => ({}),
-      [Symbol.asyncIterator]: () => Readable.from([buf])[Symbol.asyncIterator](),
-    },
-  };
-}
-
-/** Each scripted reply becomes one /api/chat/stream turn (text + done). */
-function modelTurns(replies: string[]) {
-  let i = 0;
-  return () => {
-    const reply = replies[i] ?? 'Done.';
-    i += 1;
-    return sseResp([{ type: 'text', content: reply }, { type: 'done' }]);
-  };
-}
-
-/** Build the standard responder: conversation create + scripted chat turns. */
-function makeResponder(turns: () => MockResp, onChat?: () => void) {
-  return (url: string, init: { method: string }) => {
-    if (init.method === 'POST' && url.endsWith('/conversations')) {
-      return jsonResp(200, { success: true, data: { id: 'cnv_agent' } });
-    }
-    if (init.method === 'POST' && url.includes('/api/chat/stream')) {
-      onChat?.();
-      return turns();
-    }
-    throw new Error(`unexpected ${init.method} ${url}`);
-  };
-}
-
 const block = (tool: string, args: unknown): string =>
   '```spycore:tool\n' + JSON.stringify({ tool, args }) + '\n```';
 
 describe('runAgent (prompt-loop)', () => {
   test('a reply with no tool block is the final answer', async () => {
-    responder = makeResponder(modelTurns(['This project is a TypeScript CLI.']));
+    responder = makeResponder(modelTurns(['This project is a TypeScript CLI.']), 'cnv_agent');
     const { runAgent } = await import('../src/lib/agent/loop.js');
     const events: AgentEvent[] = [];
     const result = await runAgent({ task: 'what is this', cwd: workDir, onEvent: (e) => events.push(e) });
@@ -112,6 +63,7 @@ describe('runAgent (prompt-loop)', () => {
     let chatCalls = 0;
     responder = makeResponder(
       modelTurns([block('read_file', { path: 'data.txt' }), 'The file says hello.']),
+      'cnv_agent',
       () => {
         chatCalls += 1;
       },
@@ -133,6 +85,7 @@ describe('runAgent (prompt-loop)', () => {
     writeFileSync(join(workDir, 'data.txt'), 'hello');
     responder = makeResponder(
       modelTurns([`${block('list_dir', { path: '.' })}\n${block('read_file', { path: 'data.txt' })}`, 'Done.']),
+      'cnv_agent',
     );
     const { runAgent } = await import('../src/lib/agent/loop.js');
     const events: AgentEvent[] = [];
@@ -145,7 +98,7 @@ describe('runAgent (prompt-loop)', () => {
   });
 
   test('recovers from a malformed tool block', async () => {
-    responder = makeResponder(modelTurns(['```spycore:tool\n{bad json}\n```', 'Recovered - final answer.']));
+    responder = makeResponder(modelTurns(['```spycore:tool\n{bad json}\n```', 'Recovered - final answer.']), 'cnv_agent');
     const { runAgent } = await import('../src/lib/agent/loop.js');
     const events: AgentEvent[] = [];
     const result = await runAgent({ task: 'oops', cwd: workDir, onEvent: (e) => events.push(e) });
@@ -155,7 +108,7 @@ describe('runAgent (prompt-loop)', () => {
   });
 
   test('an unknown tool comes back as a structured error result (no crash)', async () => {
-    responder = makeResponder(modelTurns([block('shellExec', { cmd: 'rm -rf /' }), 'Okay, finishing.']));
+    responder = makeResponder(modelTurns([block('shellExec', { cmd: 'rm -rf /' }), 'Okay, finishing.']), 'cnv_agent');
     const { runAgent } = await import('../src/lib/agent/loop.js');
     const events: AgentEvent[] = [];
     const result = await runAgent({ task: 'unsafe', cwd: workDir, onEvent: (e) => events.push(e) });
@@ -165,7 +118,7 @@ describe('runAgent (prompt-loop)', () => {
   });
 
   test('path traversal is rejected inside the loop', async () => {
-    responder = makeResponder(modelTurns([block('read_file', { path: '../../etc/passwd' }), 'Could not read it.']));
+    responder = makeResponder(modelTurns([block('read_file', { path: '../../etc/passwd' }), 'Could not read it.']), 'cnv_agent');
     const { runAgent } = await import('../src/lib/agent/loop.js');
     const events: AgentEvent[] = [];
     await runAgent({ task: 'escape', cwd: workDir, onEvent: (e) => events.push(e) });
@@ -174,7 +127,7 @@ describe('runAgent (prompt-loop)', () => {
   });
 
   test('stops at maxTurns when the model never finishes', async () => {
-    responder = makeResponder(modelTurns(Array.from({ length: 30 }, () => block('list_dir', { path: '.' }))));
+    responder = makeResponder(modelTurns(Array.from({ length: 30 }, () => block('list_dir', { path: '.' }))), 'cnv_agent');
     const { runAgent } = await import('../src/lib/agent/loop.js');
     const result = await runAgent({ task: 'forever', cwd: workDir, maxTurns: 3 });
     expect(result.reachedMaxTurns).toBe(true);
@@ -184,7 +137,7 @@ describe('runAgent (prompt-loop)', () => {
   });
 
   test('aborts cleanly when the signal is already aborted', async () => {
-    responder = makeResponder(modelTurns(['unused']));
+    responder = makeResponder(modelTurns(['unused']), 'cnv_agent');
     const controller = new AbortController();
     controller.abort();
     const { runAgent } = await import('../src/lib/agent/loop.js');
@@ -199,7 +152,7 @@ describe('runAgent (write/edit + approval)', () => {
   const REJECT: RequestApproval = () => Promise.resolve({ approved: false, reason: 'rejected by user' });
 
   test('applies write_file when approval is granted', async () => {
-    responder = makeResponder(modelTurns([block('write_file', { path: 'out.txt', content: 'hi\n' }), 'done']));
+    responder = makeResponder(modelTurns([block('write_file', { path: 'out.txt', content: 'hi\n' }), 'done']), 'cnv_agent');
     const { runAgent } = await import('../src/lib/agent/loop.js');
     const events: AgentEvent[] = [];
     const result = await runAgent({ task: 'write', cwd: workDir, requestApproval: ACCEPT, onEvent: (e) => events.push(e) });
@@ -209,7 +162,7 @@ describe('runAgent (write/edit + approval)', () => {
   });
 
   test('skips write_file when approval is rejected, and feeds that back', async () => {
-    responder = makeResponder(modelTurns([block('write_file', { path: 'no.txt', content: 'x' }), 'ok, stopping']));
+    responder = makeResponder(modelTurns([block('write_file', { path: 'no.txt', content: 'x' }), 'ok, stopping']), 'cnv_agent');
     const { runAgent } = await import('../src/lib/agent/loop.js');
     const events: AgentEvent[] = [];
     const result = await runAgent({ task: 'write', cwd: workDir, requestApproval: REJECT, onEvent: (e) => events.push(e) });
@@ -220,7 +173,7 @@ describe('runAgent (write/edit + approval)', () => {
 
   test('applies an exact-once edit_file', async () => {
     writeFileSync(join(workDir, 'e.txt'), 'foo\nbar\nbaz\n');
-    responder = makeResponder(modelTurns([block('edit_file', { path: 'e.txt', old_str: 'bar', new_str: 'BAR' }), 'done']));
+    responder = makeResponder(modelTurns([block('edit_file', { path: 'e.txt', old_str: 'bar', new_str: 'BAR' }), 'done']), 'cnv_agent');
     const { runAgent } = await import('../src/lib/agent/loop.js');
     await runAgent({ task: 'edit', cwd: workDir, requestApproval: ACCEPT });
     expect(readFileSync(join(workDir, 'e.txt'), 'utf8')).toBe('foo\nBAR\nbaz\n');
@@ -228,7 +181,7 @@ describe('runAgent (write/edit + approval)', () => {
 
   test('edit_file with multiple matches errors back without writing or prompting', async () => {
     writeFileSync(join(workDir, 'm.txt'), 'x\nx\n');
-    responder = makeResponder(modelTurns([block('edit_file', { path: 'm.txt', old_str: 'x', new_str: 'y' }), 'understood']));
+    responder = makeResponder(modelTurns([block('edit_file', { path: 'm.txt', old_str: 'x', new_str: 'y' }), 'understood']), 'cnv_agent');
     let prompted = false;
     const spy: RequestApproval = () => {
       prompted = true;
@@ -244,18 +197,18 @@ describe('runAgent (write/edit + approval)', () => {
 
   test('headless --yes auto-approves; default headless auto-rejects', async () => {
     const { runAgent } = await import('../src/lib/agent/loop.js');
-    responder = makeResponder(modelTurns([block('write_file', { path: 'y.txt', content: 'yes\n' }), 'done']));
+    responder = makeResponder(modelTurns([block('write_file', { path: 'y.txt', content: 'yes\n' }), 'done']), 'cnv_agent');
     await runAgent({ task: 'w', cwd: workDir, requestApproval: headlessApproval(true) });
     expect(readFileSync(join(workDir, 'y.txt'), 'utf8')).toBe('yes\n');
 
-    responder = makeResponder(modelTurns([block('write_file', { path: 'n.txt', content: 'no' }), 'done']));
+    responder = makeResponder(modelTurns([block('write_file', { path: 'n.txt', content: 'no' }), 'done']), 'cnv_agent');
     await runAgent({ task: 'w', cwd: workDir, requestApproval: headlessApproval(false) });
     expect(existsSync(join(workDir, 'n.txt'))).toBe(false);
   });
 
   test('secret-protected write is blocked even with --yes', async () => {
     writeFileSync(join(workDir, '.env'), 'SECRET\n');
-    responder = makeResponder(modelTurns([block('write_file', { path: '.env', content: 'HACKED' }), 'done']));
+    responder = makeResponder(modelTurns([block('write_file', { path: '.env', content: 'HACKED' }), 'done']), 'cnv_agent');
     const { runAgent } = await import('../src/lib/agent/loop.js');
     const events: AgentEvent[] = [];
     await runAgent({ task: 'w', cwd: workDir, requestApproval: headlessApproval(true), onEvent: (e) => events.push(e) });
@@ -269,7 +222,7 @@ describe('runAgent (run_command + approval)', () => {
   const REJECT: RequestApproval = () => Promise.resolve({ approved: false, reason: 'rejected by user' });
 
   test('runs a command when approved and feeds output back', async () => {
-    responder = makeResponder(modelTurns([block('run_command', { command: 'echo hi > ran.txt' }), 'done']));
+    responder = makeResponder(modelTurns([block('run_command', { command: 'echo hi > ran.txt' }), 'done']), 'cnv_agent');
     const { runAgent } = await import('../src/lib/agent/loop.js');
     const events: AgentEvent[] = [];
     const result = await runAgent({ task: 'run', cwd: workDir, requestApproval: ACCEPT, onEvent: (e) => events.push(e) });
@@ -279,7 +232,7 @@ describe('runAgent (run_command + approval)', () => {
   });
 
   test('skips a command when rejected', async () => {
-    responder = makeResponder(modelTurns([block('run_command', { command: 'echo nope > nope.txt' }), 'ok']));
+    responder = makeResponder(modelTurns([block('run_command', { command: 'echo nope > nope.txt' }), 'ok']), 'cnv_agent');
     const { runAgent } = await import('../src/lib/agent/loop.js');
     const events: AgentEvent[] = [];
     await runAgent({ task: 'run', cwd: workDir, requestApproval: REJECT, onEvent: (e) => events.push(e) });
@@ -293,7 +246,7 @@ describe('runAgent (run_command + approval)', () => {
       prompted = true;
       return Promise.resolve({ approved: true });
     };
-    responder = makeResponder(modelTurns([block('run_command', { command: 'rm -rf /' }), 'understood']));
+    responder = makeResponder(modelTurns([block('run_command', { command: 'rm -rf /' }), 'understood']), 'cnv_agent');
     const { runAgent } = await import('../src/lib/agent/loop.js');
     const events: AgentEvent[] = [];
     await runAgent({ task: 'run', cwd: workDir, requestApproval: spy, onEvent: (e) => events.push(e) });
@@ -302,7 +255,7 @@ describe('runAgent (run_command + approval)', () => {
   });
 
   test('headless --yes auto-approves a command', async () => {
-    responder = makeResponder(modelTurns([block('run_command', { command: 'echo yes > y.txt' }), 'done']));
+    responder = makeResponder(modelTurns([block('run_command', { command: 'echo yes > y.txt' }), 'done']), 'cnv_agent');
     const { runAgent } = await import('../src/lib/agent/loop.js');
     await runAgent({ task: 'run', cwd: workDir, requestApproval: headlessApproval(true) });
     expect(existsSync(join(workDir, 'y.txt'))).toBe(true);

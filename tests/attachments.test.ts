@@ -382,6 +382,21 @@ describe('image attachments over the web contract', () => {
     expect(stderr()).toMatch(/\+ attached .*shot\.png \(image, /);
   });
 
+  test('upload URL normalizes a base without /api (no 404 on a bare host)', async () => {
+    responder = chatResponder();
+    const { uploadImageAttachment } = await import('../src/lib/attachments.js');
+    const png = writePng('norm.png');
+    const att = { absPath: png, displayPath: 'norm.png', kind: 'image' as const, sizeBytes: 72, mime: 'image/png' };
+    await uploadImageAttachment(att, { apiUrlOverride: 'https://api.spycore.ai' });
+    await uploadImageAttachment(att, { apiUrlOverride: 'https://api.spycore.ai/' });
+    const uploads = calls.filter((c) => c.method === 'POST');
+    expect(uploads).toHaveLength(2);
+    expect(uploads.map((c) => c.url)).toEqual([
+      'https://api.spycore.ai/api/files/upload',
+      'https://api.spycore.ai/api/files/upload',
+    ]);
+  });
+
   test('two images upload in order and both IDs ride the stream body', async () => {
     responder = chatResponder();
     const a = writePng('a.png');
