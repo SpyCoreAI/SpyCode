@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
-import { buildCmdCommandLine, ghAuthed, ghAvailable, ghPrCreate, resolveGhCommand } from '../src/lib/gh.js';
+import { buildCmdCommandLine, buildGhSpawn, ghAuthed, ghAvailable, ghPrCreate, resolveGhCommand } from '../src/lib/gh.js';
 
 /**
  * H13 - the real `src/lib/gh.ts` runs here, against a fake `gh` binary on
@@ -214,5 +214,81 @@ describe('buildCmdCommandLine (cmd.exe quoting)', () => {
     // backslashes before the quote, which MSVC reads as two literal
     // backslashes plus a literal quote.
     expect(buildCmdCommandLine(['a\\\\"b'])).toBe(`"a${'\\'.repeat(5)}"b"`);
+  });
+});
+
+describe('buildGhSpawn (injected win32, runs on Linux)', () => {
+  // The `/c` argument as cmd.exe /s sees it: strip the first character
+  // if it is a quote, and remove the last quote character on the line
+  // (Microsoft cmd docs: /s "strip[s] the first and last quotes around
+  // the <string> but leaves the rest of the command unchanged"). Only
+  // the quote-stripping half is modelled here - not cmd.exe itself.
+  function applyCmdSlashS(cArg: string): string {
+    let s = cArg;
+    if (s.startsWith('"')) s = s.slice(1);
+    const last = s.lastIndexOf('"');
+    if (last >= 0) s = s.slice(0, last) + s.slice(last + 1);
+    return s;
+  }
+
+  // What Node's default argv quoting does to one argument: wrap in
+  // quotes, escaping each inner `"` as `\"`. Used only to pin the
+  // pre-3f failure shape - the quoting that produced the 42501464919
+  // error.
+  function nodeWin32QuoteArg(arg: string): string {
+    return `"${arg.replace(/(\\*)"/g, (_m, slashes: string) => `${slashes}${slashes}\\"`)}"`;
+  }
+
+  test('a .cmd on win32 goes through cmd.exe, double-wrapped and verbatim', () => {
+    const t = buildGhSpawn('C:\\Temp\\gh.CMD', ['--version'], 'win32');
+    expect(t.file).toBe('cmd.exe');
+    expect(t.argv).toEqual(['/d', '/s', '/c', '""C:\\Temp\\gh.CMD" "--version""']);
+    expect(t.windowsVerbatimArguments).toBe(true);
+  });
+
+  test('the double wrap survives cmd.exe /s: the strip yields the built command line', () => {
+    const tokens = [
+      'C:\\Temp\\gh.CMD',
+      'pr',
+      'create',
+      '--title',
+      'Test PR',
+      '--body-file',
+      'C:\\Temp\\body.md',
+    ];
+    const t = buildGhSpawn(tokens[0] as string, tokens.slice(1), 'win32');
+    expect(applyCmdSlashS(t.argv[3] as string)).toBe(buildCmdCommandLine(tokens));
+  });
+
+  test('the pre-3f single-wrapped form is what cmd.exe rejected', () => {
+    // 3e passed buildCmdCommandLine(...) as a plain argv element; Node
+    // quoted it, and /s stripped only the outer pair. The command name
+    // cmd.exe then tried is exactly the one in the CI error:
+    // '\"C:\...\gh.CMD\"' is not recognized as an internal or external command
+    const inner = buildCmdCommandLine(['C:\\Temp\\gh.CMD', '--version']);
+    const stripped = applyCmdSlashS(nodeWin32QuoteArg(inner));
+    expect(stripped.split(' ')[0]).toBe('\\"C:\\Temp\\gh.CMD\\"');
+    expect(stripped).not.toContain('"C:\\Temp\\gh.CMD"');
+  });
+
+  test('a .exe on win32 spawns directly, verbatim off', () => {
+    expect(buildGhSpawn('C:\\Temp\\gh.EXE', ['--version'], 'win32')).toEqual({
+      file: 'C:\\Temp\\gh.EXE',
+      argv: ['--version'],
+      windowsVerbatimArguments: false,
+    });
+  });
+
+  test('posix spawns the bare name directly', () => {
+    expect(buildGhSpawn('gh', ['--version'], 'linux')).toEqual({
+      file: 'gh',
+      argv: ['--version'],
+      windowsVerbatimArguments: false,
+    });
+    expect(buildGhSpawn('gh', ['--version'], 'darwin')).toEqual({
+      file: 'gh',
+      argv: ['--version'],
+      windowsVerbatimArguments: false,
+    });
   });
 });

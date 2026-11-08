@@ -21,3 +21,15 @@ export interface PnpmResolveOverrides {
 export function resolvePnpmCommand(overrides?: PnpmResolveOverrides): string | null;
 
 export function buildCmdCommandLine(tokens: string[]): string;
+
+export interface PnpmSpawnTarget {
+  file: string;
+  argv: string[];
+  windowsVerbatimArguments: boolean;
+}
+
+export function buildPnpmSpawn(
+  pnpm: string,
+  args: string[],
+  platform?: NodeJS.Platform,
+): PnpmSpawnTarget;

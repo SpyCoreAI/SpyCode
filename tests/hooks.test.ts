@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -436,13 +437,22 @@ describe('failure isolation - the session survives every hook failure mode', () 
   /**
    * The cap must reach the HOOK, not merely the shell that started it.
    *
-   * The command ends in `; true` so the shell is forced to FORK on every
-   * platform. Without that the macOS `/bin/sh` (bash) execs, the shell process
-   * IS the hook, and a single-process kill passes - leaving the real defect, a
-   * surviving grandchild, entirely unexercised. That is exactly how this
-   * shipped: green on the developer's shell, and on Linux `/bin/sh` (dash),
-   * which does not exec, the cap was not enforced at all and the session hung
-   * on a `'close'` that never came.
+   * The hook command is a wrapper script whose body ends in `; true`, so
+   * the shell is forced to FORK on every platform. Without that the macOS
+   * `/bin/sh` (bash) execs, the shell process IS the hook, and a
+   * single-process kill passes - leaving the real defect, a surviving
+   * grandchild, entirely unexercised. That is exactly how this shipped:
+   * green on the developer's shell, and on Linux `/bin/sh` (dash),
+   * which does not exec, the cap was not enforced at all and the session
+   * hung on a `'close'` that never came.
+   *
+   * The `; true` lives INSIDE the wrapper file, not concatenated onto
+   * the command string: `${nodeCmd(sleeper)} ; true` is what CodeQL
+   * flags (alert #35, js/bad-code-sanitization). The command itself is
+   * a single quoted path, so nothing is appended to a computed command.
+   * The fork-forcing behaviour is unchanged - the shell running the
+   * wrapper must stay alive to run `true` after node, so node runs as
+   * its child either way.
    *
    * POSIX only: Windows has no process group to signal, so `killTree` falls
    * back to the single-process kill and a grandchild does survive there. That
@@ -459,8 +469,14 @@ describe('failure isolation - the session survives every hook failure mode', () 
         // that a loaded runner could eat. At 6s the margin is ~3s.
         `setTimeout(()=>{require('fs').writeFileSync(${JSON.stringify(marker)},'survived')}, 6000);`,
       );
+      // Wrapper script: the node invocation followed by `; true`, so the
+      // shell forks node as a child instead of exec-ing it. Executable
+      // with a shebang, so the hook's `spawn(command, {shell: true})`
+      // runs it directly; the command is just the wrapper's quoted path.
+      const wrapper = writeScript('tree-wrapper.sh', `#!/bin/sh\n${nodeCmd(sleeper)}; true\n`);
+      chmodSync(wrapper, 0o755);
       writeGlobalHooks([
-        { event: 'prompt-submit', command: `${nodeCmd(sleeper)} ; true`, timeoutSeconds: 1 },
+        { event: 'prompt-submit', command: shellQuote(wrapper), timeoutSeconds: 1 },
       ]);
       const { loadHookSession, fireHookEvent } = await import('../src/lib/hooks.js');
       const s = await loadHookSession(cwd);

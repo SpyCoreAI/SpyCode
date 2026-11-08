@@ -15,7 +15,7 @@ import { describe, expect, test } from 'vitest';
  * import-analysis can only rewrite a literal (see
  * tests/resolved-install-audit.test.ts for why a computed specifier fails).
  */
-import { buildCmdCommandLine, evaluateAuditReport, resolvePnpmCommand } from '../scripts/dependency-audit.mjs';
+import { buildCmdCommandLine, buildPnpmSpawn, evaluateAuditReport, resolvePnpmCommand } from '../scripts/dependency-audit.mjs';
 
 const SCRIPT = fileURLToPath(new URL('../scripts/dependency-audit.mjs', import.meta.url));
 
@@ -162,5 +162,38 @@ describe('resolvePnpmCommand + buildCmdCommandLine (injected win32, runs on Linu
     );
     expect(buildCmdCommandLine(['a"b'])).toBe('"a\\"b"');
     expect(buildCmdCommandLine(['100% ^x'])).toBe('"100^% ^^x"');
+  });
+
+  test('buildPnpmSpawn: a .cmd on win32 goes through cmd.exe, double-wrapped and verbatim', () => {
+    const t = buildPnpmSpawn('C:\\Temp\\pnpm.CMD', ['audit', '--json'], 'win32');
+    expect(t.file).toBe('cmd.exe');
+    expect(t.argv).toEqual(['/d', '/s', '/c', '""C:\\Temp\\pnpm.CMD" "audit" "--json""']);
+    expect(t.windowsVerbatimArguments).toBe(true);
+  });
+
+  test('buildPnpmSpawn: the double wrap survives cmd.exe /s', () => {
+    // cmd.exe /s strips exactly the first and last quote of the /c
+    // string and leaves the rest unchanged (Microsoft cmd docs); the
+    // strip must yield the built command line, not a mangled one.
+    const tokens = ['C:\\Temp\\pnpm.CMD', 'audit', '--json'];
+    const t = buildPnpmSpawn(tokens[0] as string, tokens.slice(1), 'win32');
+    const cArg = t.argv[3] as string;
+    let stripped = cArg.startsWith('"') ? cArg.slice(1) : cArg;
+    const last = stripped.lastIndexOf('"');
+    if (last >= 0) stripped = stripped.slice(0, last) + stripped.slice(last + 1);
+    expect(stripped).toBe(buildCmdCommandLine(tokens));
+  });
+
+  test('buildPnpmSpawn: a .exe on win32 and the bare name on posix spawn directly', () => {
+    expect(buildPnpmSpawn('C:\\Temp\\pnpm.EXE', ['audit', '--json'], 'win32')).toEqual({
+      file: 'C:\\Temp\\pnpm.EXE',
+      argv: ['audit', '--json'],
+      windowsVerbatimArguments: false,
+    });
+    expect(buildPnpmSpawn('pnpm', ['audit', '--json'], 'linux')).toEqual({
+      file: 'pnpm',
+      argv: ['audit', '--json'],
+      windowsVerbatimArguments: false,
+    });
   });
 });

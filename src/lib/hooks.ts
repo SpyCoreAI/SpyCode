@@ -103,6 +103,16 @@ const PAYLOAD_SUMMARY_CAP = 500;
 const OUTPUT_CAP = 16_000;
 /** Cap on the reason / stdout tail shown to the user. */
 const NOTICE_CAP = 500;
+/**
+ * Bound on waiting for the hook's stdin socket to retire at settle (see
+ * `settle` in `runHookCommand`). 500ms: the stdio drain is 200ms and the
+ * libuv EOF timer on a Windows pipe is 50ms, so a close that is going to
+ * complete does so well inside this; a pipe that never closes burns at
+ * most this and can never hang the hook. The windows-equivalents pipe
+ * test allows 1500ms and the hook itself takes ~350ms, so even a
+ * full-bound wait stays inside it.
+ */
+const STDIN_CLOSE_WAIT_MS = 500;
 
 export interface LoadedHook {
   event: HookEvent;
@@ -354,6 +364,20 @@ interface SpawnOutcome {
  * the write end here, as soon as the payload has flushed, gives the close
  * the whole stdio drain window (~200ms) to complete before any census.
  *
+ * That was the 3e theory, and branch CI run 42501464919 falsified its
+ * operative half: the count was IDENTICAL (exactly one PipeWrap over
+ * baseline, three consecutive Windows runs) with the destroy at settle
+ * (3d) and with it at the flush callback (3e). Destroy placement is not
+ * the variable - on Windows the close itself does not complete inside
+ * the drain window, so no placement of the destroy can retire the handle
+ * before a census taken synchronously after settle. What settles this is
+ * not a third destroy in a third spot: `settle` below waits for the
+ * stdin socket's actual `'close'` (bounded by STDIN_CLOSE_WAIT_MS) before
+ * resolving, so the resolved state is the retired state. The flush
+ * destroy stays - it starts the close as early as possible - and the
+ * settle-time destroy stays as the fallback for a write that never
+ * flushes (hook exited first / EPIPE).
+ *
  * Stdin is the one pipe this is safe for. The destroy-vs-unref reasoning
  * in `lib/child-stdio.ts` is about the READ direction - stdout/stderr,
  * where destroying our end SIGPIPEs a descendant still writing. Stdin
@@ -361,8 +385,7 @@ interface SpawnOutcome {
  * flushed into the pipe buffer before this callback runs, so every reader
  * - hook or descendant - already sees the bytes followed by EOF. Closing
  * our end sooner signals nothing and kills nothing; it only retires our
- * own handle. The settle-time destroy stays as the fallback for a write
- * that never flushes (hook exited first / EPIPE).
+ * own handle.
  */
 function destroyHookStdin(child: ChildProcess): void {
   try {
@@ -384,6 +407,12 @@ function runHookCommand(
     let timedOut = false;
     let settled = false;
     let drainTimer: ReturnType<typeof setTimeout> | null = null;
+    // Whether the stdin socket has emitted 'close'. Tracked from spawn so
+    // settle can tell an already-retired stdin from one still closing -
+    // without it, a listener attached at settle could never fire for a
+    // close that already happened, and the wait below would burn its
+    // whole bound on every hook.
+    let stdinClosed = false;
     const settle = (o: SpawnOutcome): void => {
       if (settled) return;
       settled = true;
@@ -395,6 +424,32 @@ function runHookCommand(
       // rather than destroys, and why killing the descendant is the wrong axis.
       if (child) releaseChildStdio(child);
       if (child) destroyHookStdin(child);
+      const stdin = child?.stdin;
+      if (stdin && !stdinClosed) {
+        // The stdin handle is still closing. A census taken in the same
+        // tick as this settle still lists it (branch CI: exactly one
+        // PipeWrap over baseline on Windows in three consecutive runs,
+        // unchanged by moving the destroy from settle to the flush
+        // callback), so resolve only once the socket has actually
+        // retired - or once the bound below fires, so a pipe that never
+        // closes can never hang the hook. The normal path costs nothing:
+        // on POSIX the socket is already closed by settle and this branch
+        // is not taken. The bound timer is unref'd: the wait itself must
+        // never hold the event loop - that is the property this module
+        // exists to guarantee.
+        let done = false;
+        const finish = (): void => {
+          if (done) return;
+          done = true;
+          clearTimeout(bound);
+          stdin.removeListener('close', finish);
+          resolvePromise(o);
+        };
+        const bound = setTimeout(finish, STDIN_CLOSE_WAIT_MS);
+        bound.unref();
+        stdin.once('close', finish);
+        return;
+      }
       resolvePromise(o);
     };
     let child: ChildProcess | undefined;
@@ -493,6 +548,12 @@ function runHookCommand(
     // CI on both Linux runners while passing on macOS.
     child.stdin?.on('error', () => {
       /* the hook exited before reading stdin - expected, never fatal */
+    });
+    // Track the stdin socket's retirement from spawn: settle needs to
+    // know whether the socket is already closed (resolve at once) or
+    // still closing (wait for 'close', bounded - see settle).
+    child.stdin?.once('close', () => {
+      stdinClosed = true;
     });
     try {
       // Retire the stdin write end as soon as the payload has flushed -

@@ -70,6 +70,13 @@ export function resolveGhCommand(overrides: GhResolveOverrides = {}): string | n
  * a POSIX-escaped `\"` arrived intact as one argument while `\$`, backtick
  * and `\\` arrived with their backslashes still attached. `$`, backtick
  * and `\` are literal to `cmd.exe` and need no escaping at all.
+ *
+ * This quoting is the INNER layer only. How the finished command line
+ * reaches `cmd.exe` is `buildGhSpawn`'s job - the 3e code passed it as a
+ * plain argv element, Node re-quoted it (each inner `"` became `\"`),
+ * and `cmd.exe /s` stripped only the outer pair, leaving the command
+ * name literally `\"C:\...\gh.CMD\"` ("not recognized", branch CI run
+ * 42501464919). The inner quoting was never wrong; the transport was.
  */
 export function buildCmdCommandLine(tokens: string[]): string {
   return tokens.map(quoteCmdToken).join(' ');
@@ -85,28 +92,80 @@ function quoteCmdToken(token: string): string {
   return `"${body}"`;
 }
 
+/** What to spawn for one `gh` invocation: the file, its argv, and whether
+ * Node must pass argv verbatim on Windows. */
+export interface GhSpawnTarget {
+  file: string;
+  argv: string[];
+  windowsVerbatimArguments: boolean;
+}
+
+/**
+ * Build the spawn for a resolved `gh` command.
+ *
+ * A resolved `.cmd`/`.bat` file cannot be spawned directly on Windows -
+ * libuv returns EINVAL (the file is not an executable, only cmd.exe can
+ * interpret it; Node docs, child_process "Spawning .bat and .cmd files on
+ * Windows"). Run it via cmd.exe /d /s /c. Two transport rules, both
+ * load-bearing - get either wrong and the fake is never invoked:
+ *
+ * 1. The `/c` argument carries its own outer pair of quotes around the
+ *    already-quoted command line. `cmd.exe /s` strips exactly the first
+ *    and last quote of the string and leaves the rest unchanged
+ *    (Microsoft cmd docs), so the strip removes the outer pair and the
+ *    inner quoting survives intact.
+ * 2. Node must NOT re-quote the `/c` argument. Its default argv quoting
+ *    wraps the string in quotes and escapes each inner `"` as `\"`; `/s`
+ *    then strips the outer pair and leaves the command name literally
+ *    `\"C:\...\gh.CMD\"` - "not recognized as an internal or external
+ *    command", branch CI run 42501464919, all six `gh` tests and both
+ *    `pnpm` tests. `windowsVerbatimArguments: true` disables that
+ *    re-quoting (Node docs: "No quoting or escaping of arguments is done
+ *    on Windows"); it is the same flag Node sets automatically when
+ *    `shell` is CMD, which is why the `shell: true` executors never hit
+ *    this. `shell: true` is NOT the substitute here: Node joins file and
+ *    args with bare spaces (child_process.js normalizeSpawnArguments), so
+ *    an argument with a space ('Test PR', a temp path) would split.
+ *
+ * A resolved `.exe` spawns directly, as before - the production binary
+ * is an `.exe`, the `.cmd` path is the shim case (corepack-style
+ * installs, and the test fake). The `platform` override exists so the
+ * win32 shape is unit-testable on Linux; without it the live platform
+ * is used.
+ */
+export function buildGhSpawn(
+  cmd: string,
+  args: string[],
+  platform: NodeJS.Platform = process.platform,
+): GhSpawnTarget {
+  const useCmd = platform === 'win32' && /\.(?:cmd|bat)$/i.test(cmd);
+  if (!useCmd) return { file: cmd, argv: args, windowsVerbatimArguments: false };
+  return {
+    file: process.env.ComSpec ?? 'cmd.exe',
+    argv: ['/d', '/s', '/c', `"${buildCmdCommandLine([cmd, ...args])}"`],
+    windowsVerbatimArguments: true,
+  };
+}
+
 /** Spawn `gh`, resolved for the platform. Throws when no `gh` is on PATH. */
 function runGh(args: string[], cwd?: string): string {
   const cmd = resolveGhCommand();
   if (cmd === null) throw new Error('gh: command not found on PATH');
-  // A resolved .cmd/.bat file cannot be spawned directly on Windows -
-  // libuv returns EINVAL (the file is not an executable, only cmd.exe can
-  // interpret it; Node docs, child_process "Spawning .bat and .cmd files on
-  // Windows"). Run it via cmd.exe /d /s /c with a command line quoted by
-  // buildCmdCommandLine. `shell: true` is NOT the substitute: Node joins
-  // file and args with bare spaces (child_process.js
-  // normalizeSpawnArguments), so an argument with a space ('Test PR', a
-  // temp path) would split into two. A resolved .exe spawns directly, as
-  // before - the production binary is an .exe, the .cmd path is the shim
-  // case (corepack-style installs, and the test fake).
-  const useCmd = process.platform === 'win32' && /\.(?:cmd|bat)$/i.test(cmd);
-  const file = useCmd ? (process.env.ComSpec ?? 'cmd.exe') : cmd;
-  const argv = useCmd ? ['/d', '/s', '/c', buildCmdCommandLine([cmd, ...args])] : args;
-  return execFileSync(file, argv, {
+  const target = buildGhSpawn(cmd, args);
+  // `windowsVerbatimArguments` is a valid runtime option - Node's docs
+  // list it for execFile, and the async ExecFileOptions type carries it -
+  // but @types/node@20.19.43 omits it from ExecFileSyncOptions, a types
+  // gap. The spread below carries it past tsc without widening the rest
+  // of the literal (spreads are exempt from excess-property checks).
+  const verbatim: { windowsVerbatimArguments?: boolean } = target.windowsVerbatimArguments
+    ? { windowsVerbatimArguments: true }
+    : {};
+  return execFileSync(target.file, target.argv, {
     ...(cwd !== undefined ? { cwd } : {}),
     stdio: ['ignore', 'pipe', 'pipe'],
     timeout: GH_TIMEOUT_MS,
     encoding: 'utf8',
+    ...verbatim,
   })
     .toString()
     .trim();

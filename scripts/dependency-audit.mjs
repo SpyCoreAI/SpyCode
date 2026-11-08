@@ -114,6 +114,13 @@ export function resolvePnpmCommand(overrides = {}) {
  * `"` is escaped as `\"` (cmd.exe passes it through, MSVC yields a
  * literal quote); `$`, backtick and `\` are literal to cmd.exe and need
  * no escaping.
+ *
+ * This quoting is the INNER layer only. How the finished command line
+ * reaches `cmd.exe` is `buildPnpmSpawn`'s job - the 3e code passed it as
+ * a plain argv element, Node re-quoted it (each inner `"` became `\"`),
+ * and `cmd.exe /s` stripped only the outer pair, leaving the command
+ * name literally `\"C:\...\pnpm.CMD\"` ("not recognized", branch CI run
+ * 42501464919). The inner quoting was never wrong; the transport was.
  */
 export function buildCmdCommandLine(tokens) {
   return tokens.map(quoteCmdToken).join(' ');
@@ -129,9 +136,33 @@ function quoteCmdToken(token) {
   return `"${body}"`;
 }
 
-/** True when a resolved binary must go through cmd.exe on Windows. */
-function needsCmdShell(resolved) {
-  return process.platform === 'win32' && /\.(?:cmd|bat)$/i.test(resolved);
+/**
+ * Build the spawn for a resolved `pnpm` command - the same two transport
+ * rules as `src/lib/gh.ts` `buildGhSpawn` (same failure, same fix; this
+ * script is plain JS and cannot import the TS module, so the shape is
+ * duplicated with a cross-reference - keep them in agreement):
+ *
+ * 1. The `/c` argument carries its own outer pair of quotes around the
+ *    already-quoted command line: `cmd.exe /s` strips exactly the first
+ *    and last quote and leaves the rest unchanged (Microsoft cmd docs).
+ * 2. Node must NOT re-quote the `/c` argument - its default argv quoting
+ *    escapes each inner `"` as `\"`, which `/s` then leaves literal
+ *    (`'\"C:\...\pnpm.CMD\"' is not recognized`, branch CI run
+ *    42501464919). `windowsVerbatimArguments: true` disables that
+ *    re-quoting; it is what Node sets automatically when `shell` is CMD.
+ *
+ * A resolved `.exe` spawns directly, as before. The `platform` override
+ * exists so the win32 shape is unit-testable on Linux; without it the
+ * live platform is used.
+ */
+export function buildPnpmSpawn(pnpm, args, platform = process.platform) {
+  const useCmd = platform === 'win32' && /\.(?:cmd|bat)$/i.test(pnpm);
+  if (!useCmd) return { file: pnpm, argv: args, windowsVerbatimArguments: false };
+  return {
+    file: process.env.ComSpec ?? 'cmd.exe',
+    argv: ['/d', '/s', '/c', `"${buildCmdCommandLine([pnpm, ...args])}"`],
+    windowsVerbatimArguments: true,
+  };
 }
 
 /**
@@ -144,17 +175,22 @@ function runFromCli() {
   if (pnpm === null) fail('pnpm audit did not run: spawnSync pnpm ENOENT');
   // A resolved .cmd/.bat file cannot be spawned directly on Windows -
   // libuv returns EINVAL (measured in branch CI: `spawnSync
-  // C:\...\pnpm.CMD EINVAL`). Run it via cmd.exe /d /s /c with a command
-  // line quoted by buildCmdCommandLine. `shell: true` is NOT the
-  // substitute: Node joins file and args with bare spaces
-  // (child_process.js normalizeSpawnArguments), so an argument with a
-  // space would split. A resolved .exe spawns directly, as before.
-  const useCmd = needsCmdShell(pnpm);
-  const file = useCmd ? (process.env.ComSpec ?? 'cmd.exe') : pnpm;
-  const argv = useCmd
-    ? ['/d', '/s', '/c', buildCmdCommandLine([pnpm, 'audit', '--json'])]
-    : ['audit', '--json'];
-  const res = spawnSync(file, argv, { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  // C:\...\pnpm.CMD EINVAL`). Run it via cmd.exe /d /s /c, built by
+  // buildPnpmSpawn: the /c argument is double-wrapped and passed
+  // verbatim, so cmd.exe /s strips the outer pair and the inner quoting
+  // survives (see buildPnpmSpawn - the 3e single-wrapped form was
+  // re-quoted by Node into '\"C:\...\pnpm.CMD\"', branch CI 42501464919).
+  // `shell: true` is NOT the substitute: Node joins file and args with
+  // bare spaces (child_process.js normalizeSpawnArguments), so an
+  // argument with a space would split. A resolved .exe spawns directly,
+  // as before.
+  const target = buildPnpmSpawn(pnpm, ['audit', '--json']);
+  const res = spawnSync(target.file, target.argv, {
+    cwd: ROOT,
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+    windowsVerbatimArguments: target.windowsVerbatimArguments,
+  });
   if (res.error) fail(`pnpm audit did not run: ${res.error.message}`);
   const raw = res.stdout || '';
   if (!raw.trim()) {

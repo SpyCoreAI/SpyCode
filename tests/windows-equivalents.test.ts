@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -27,9 +28,13 @@ import type { AgentEvent } from '../src/lib/agent/loop.js';
  *   vitest worker on Windows).
  * - pipe-survivor settle/release: a node script file spawns the detached
  *   holder instead of `sleep 30 &`, so the shell is out of the measurement.
- * - self-terminating children: a node script kills itself, so the report
- *   (`killed (SIGTERM)` on POSIX, `exit 1` on Windows) is checked in each
- *   platform's own vocabulary, and prompt termination is checked everywhere.
+ * - self-terminating children: a node script kills its parent shell, so the
+ *   report (`killed (SIGTERM)` on POSIX, `exit 1` on Windows) is checked in
+ *   each platform's own vocabulary, and prompt termination is checked
+ *   everywhere. The kill command is a `; :` list on POSIX: macOS /bin/sh
+ *   is bash, which execs a single simple command, so a bare killer would
+ *   kill the vitest worker itself (three dead macOS runs) instead of a
+ *   shell - see `killerCmd` in the self-terminating describe block.
  *
  * The Windows legs below run in branch CI (windows-latest); the Linux legs
  * are verified here.
@@ -341,6 +346,63 @@ child.unref();
 });
 
 describe('self-terminating children', () => {
+  /**
+   * The killer must kill the SHELL, not the script - and on macOS the
+   * shell is only there if the command is a list. macOS `/bin/sh` is
+   * bash, and bash execs a single simple command: the node script's
+   * parent is then the vitest worker itself, and SIGTERM to it kills the
+   * worker - three consecutive macOS runs died with "Worker exited
+   * unexpectedly" and this file never reporting, while Linux (dash, which
+   * never execs) and Windows (cmd.exe, which never execs) passed. A
+   * trailing `; :` makes the command a list, so bash forks for it and
+   * stays the parent to be killed. Proven locally: bash + single command
+   * killed the parent process (exit 143, "Terminated"); bash + `; :`
+   * left the parent alive and the child died SIGTERM. Windows needs no
+   * suffix - cmd.exe never execs - so the command is unchanged there.
+   */
+  function killerCmd(script: string): string {
+    return process.platform === 'win32' ? nodeCmd(script) : `${nodeCmd(script)} ; :`;
+  }
+
+  test('bash execs a single command, so the killer must not run as one', async () => {
+    // Pins the macOS worker-death mechanism on the shells that have it.
+    // A node parent spawns bash -c with the killer as a single command,
+    // and again as a `; :` list; the parent reports whether it survived.
+    // Skipped where bash is absent (Windows runs the win32 branch above).
+    if (process.platform === 'win32') return;
+    const bash = spawnSync('bash', ['--version'], { encoding: 'utf8' });
+    if (bash.error || bash.status !== 0) return; // no bash on this machine - nothing to pin
+    const parent = writeScript(
+      'bash-exec-parent.mjs',
+      `import { spawn } from 'node:child_process';\n` +
+        `const mode = process.argv[2];\n` +
+        `const killer = process.argv[3];\n` +
+        `const cmd = mode === 'single' ? killer : killer + ' ; :';\n` +
+        `const child = spawn(cmd, { shell: '/bin/bash', stdio: ['ignore', 'pipe', 'pipe'] });\n` +
+        `child.on('exit', (code, signal) => {\n` +
+        `  console.log(JSON.stringify({ childSignal: signal, childCode: code }));\n` +
+        `  process.exit(0);\n` +
+        `});\n` +
+        `setTimeout(() => { console.log(JSON.stringify({ childSignal: null })); process.exit(0); }, 2000);\n`,
+    );
+    const killer = writeScript('bash-exec-killer.mjs', `process.kill(process.ppid, 'SIGTERM');\n`);
+    const runParent = (mode: string): { status: number | null; signal: NodeJS.Signals | null; out: string } => {
+      const r = spawnSync(process.execPath, [parent, mode, nodeCmd(killer)], { encoding: 'utf8' });
+      return { status: r.status, signal: r.signal, out: r.stdout ?? '' };
+    };
+    // Single command: bash execs the killer, so the killer's parent is
+    // this parent process - it dies SIGTERM, exactly as the vitest
+    // worker did on macOS.
+    const single = runParent('single');
+    expect(single.signal).toBe('SIGTERM');
+    // Compound command: bash stays the parent and dies instead; the
+    // parent survives and reports the child's SIGTERM.
+    const compound = runParent('list');
+    expect(compound.signal).toBeNull();
+    expect(compound.status).toBe(0);
+    expect(JSON.parse(compound.out.trim()).childSignal).toBe('SIGTERM');
+  });
+
   test('a child that kills itself is reported terminated, promptly, on every platform', async () => {
     // Kill the PARENT (the shell runShellCommand spawned), not this script:
     // the signal/exit is then reported for the direct child, which is what
@@ -356,7 +418,7 @@ describe('self-terminating children', () => {
       requestApproval: () => Promise.resolve({ approved: true }),
     };
     const started = Date.now();
-    const res = await dispatchTool('run_command', { command: nodeCmd(killer) }, ctx);
+    const res = await dispatchTool('run_command', { command: killerCmd(killer) }, ctx);
     const elapsed = Date.now() - started;
     expect(elapsed).toBeLessThan(5_000);
     expect(res.ok).toBe(false);
@@ -377,7 +439,7 @@ describe('self-terminating children', () => {
       `process.kill(process.ppid, 'SIGTERM');\n`,
     );
     const started = Date.now();
-    const run = await runShellCommand(nodeCmd(killer), workDir, 30_000, undefined);
+    const run = await runShellCommand(killerCmd(killer), workDir, 30_000, undefined);
     expect(Date.now() - started).toBeLessThan(5_000);
     expect(run.timedOut).toBe(false);
     if (process.platform === 'win32') {
