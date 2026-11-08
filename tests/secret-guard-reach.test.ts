@@ -33,6 +33,7 @@ import { generateCodebaseGuide } from '../src/lib/codebase-guide.js';
 import { dispatchTool, DEFAULT_LIMITS } from '../src/lib/agent/tools.js';
 import { isContained } from '../src/lib/path-containment.js';
 import { loadSecretGuardSync, loadSecretGuard } from '../src/lib/agent/secrets.js';
+import { freshConfigDir } from './helpers.js';
 
 const SECRET = 'SENTINEL_SECRET_A1B2C3_DO_NOT_LEAK';
 
@@ -230,12 +231,17 @@ describe('no context-assembly reader hands the model a secret file', () => {
 
   test('a project slash-command file symlinked at the secret, in a TRUSTED workspace', async () => {
     await withBed(async (b) => {
-      const { trustWorkspace } = await import('../src/lib/config.js');
+      const { trustWorkspace, __resetConfigForTests } = await import('../src/lib/config.js');
       const cmds = join(b.ws, '.spycore', 'commands');
       mkdirSync(cmds, { recursive: true });
       symlinkSync(join(b.ws, '.env'), join(cmds, 'deploy.md'));
       // Trust FIRST: an untrusted workspace skips the scan entirely, which
       // would make this pin green for the trust gate's reason, not the guard's.
+      // C2: route the config write to a fresh tmpdir - trustWorkspace
+      // builds the config singleton, and without the hook that is the
+      // developer's REAL config dir.
+      freshConfigDir();
+      __resetConfigForTests();
       trustWorkspace(b.ws);
       const r = loadUserCommands(b.ws);
       const text =
@@ -298,7 +304,7 @@ describe('legitimate context still loads', () => {
 
   test('an ordinary skill still loads its whole body', async () => {
     await withBed(async (b) => {
-      const { trustWorkspace } = await import('../src/lib/config.js');
+      const { trustWorkspace, __resetConfigForTests } = await import('../src/lib/config.js');
       const sk = join(b.ws, '.spycore', 'skills', 'helper');
       mkdirSync(sk, { recursive: true });
       writeFileSync(
@@ -308,6 +314,11 @@ describe('legitimate context still loads', () => {
       // Trust FIRST: an untrusted workspace skips project skills entirely,
       // which would make this pin green for the trust gate's reason, not the
       // guard's.
+      // C2: route the config write to a fresh tmpdir - trustWorkspace
+      // builds the config singleton, and without the hook that is the
+      // developer's REAL config dir.
+      freshConfigDir();
+      __resetConfigForTests();
       trustWorkspace(b.ws);
       const skills = new Map(
         discoverSkills(b.ws).map((s) => [s.name, s] as const),
@@ -337,10 +348,15 @@ describe('legitimate context still loads', () => {
 
   test('an ordinary project slash-command still loads', async () => {
     await withBed(async (b) => {
-      const { trustWorkspace } = await import('../src/lib/config.js');
+      const { trustWorkspace, __resetConfigForTests } = await import('../src/lib/config.js');
       const cmds = join(b.ws, '.spycore', 'commands');
       mkdirSync(cmds, { recursive: true });
       writeFileSync(join(cmds, 'deploy.md'), 'BENIGN_CMD\n');
+      // C2: route the config write to a fresh tmpdir - trustWorkspace
+      // builds the config singleton, and without the hook that is the
+      // developer's REAL config dir.
+      freshConfigDir();
+      __resetConfigForTests();
       trustWorkspace(b.ws);
       const r = loadUserCommands(b.ws);
       expect(JSON.stringify([...r.commands.values()])).toContain('BENIGN_CMD');
@@ -368,6 +384,45 @@ describe('the sync and async guards are one decision mechanism', () => {
       }
     });
   });
+
+  test('both agree on the .spycoreignore layer, in every shape it is used', async () => {
+    await withBed(async (b) => {
+      writeFileSync(
+        join(b.ws, '.spycoreignore'),
+        [
+          'internal-notes.md',
+          '*.log',
+          '!keep.log',
+          'build/',
+          'docs/*.md',
+          'packages/**/generated.ts',
+          'secret-dir/',
+          '',
+        ].join('\n'),
+      );
+      const sync = loadSecretGuardSync(b.ws);
+      const async_ = await loadSecretGuard(b.ws);
+      const forms = [
+        'internal-notes.md',
+        'app.log',
+        'keep.log',
+        'sub/deep.log',
+        'build/out.js',
+        'build/nested/deep.js',
+        'docs/a.md',
+        'docs/sub/a.md',
+        'packages/a/generated.ts',
+        'packages/generated.ts',
+        'packages/a/b/generated.ts',
+        'secret-dir/x.txt',
+        'src/index.ts',
+        'README.md',
+      ];
+      for (const f of forms) {
+        expect(sync(join(b.ws, f)), f).toBe(async_(join(b.ws, f)));
+      }
+    });
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -375,27 +430,24 @@ describe('the sync and async guards are one decision mechanism', () => {
 // ─────────────────────────────────────────────────────────────────────────
 
 describe('the reach this mechanism does NOT have, pinned so it cannot be forgotten', () => {
-  test('the SYNC guard does NOT carry the project .spycoreignore layer', async () => {
+  test('the SYNC guard carries the project .spycoreignore layer', async () => {
     await withBed(async (b) => {
       writeFileSync(join(b.ws, '.spycoreignore'), 'internal-notes.md\n');
       writeFileSync(join(b.ws, 'internal-notes.md'), `note=${SECRET}\n`);
       const target = join(b.ws, 'internal-notes.md');
 
-      // The ASYNC guard (used by the agent's file tools) honours it …
+      // Both guards honour a user-declared ignore entry now: the ASYNC guard
+      // (used by the agent's file tools) via globby, the SYNC one via the
+      // synchronous gitignore-subset matcher in secrets.ts. This test was a
+      // pin of the LEAK before the 0.9.10 fix cycle; it now pins the closure.
       expect((await loadSecretGuard(b.ws))(target)).toBe(true);
-      // … the SYNC one cannot: `.spycoreignore` is matched by globby, which is
-      // ESM-only, so it is reachable only through `await import`. Every
-      // context-assembly reader is synchronous, one on a React render path.
-      expect(
-        loadSecretGuardSync(b.ws)(target),
-        'if this is now TRUE, the sync guard gained the ignore layer - update the record rather than the test',
-      ).toBe(false);
+      expect(loadSecretGuardSync(b.ws)(target)).toBe(true);
 
       // Consequence, measured end-to-end rather than asserted about a predicate:
-      // a USER-DECLARED ignore entry does not bound the @import reader. The
-      // always-on denylist (.env, keys, .ssh, credentials) still does. → 
+      // a USER-DECLARED ignore entry now bounds the @import reader. The
+      // always-on denylist (.env, keys, .ssh, credentials) still does too.
       writeFileSync(join(b.ws, 'SPYCODE.md'), '# m\n\n@internal-notes.md\n');
-      expect(injected(b)).toContain(SECRET);
+      expect(injected(b)).not.toContain(SECRET);
     });
   });
 

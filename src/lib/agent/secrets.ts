@@ -14,12 +14,16 @@
  * 2. An optional `.spycoreignore` at the cwd root (gitignore syntax) for
  * project-specific additions.
  *
- * The `.spycoreignore` predicate is loaded once (globby, imported lazily) and
- * the returned guard is synchronous so callers can filter large file lists
- * without awaiting per entry.
+ * The `.spycoreignore` predicate is loaded once (globby, imported lazily, for
+ * the async guard) and the returned guard is synchronous so callers can filter
+ * large file lists without awaiting per entry. The synchronous guard carries
+ * the same layer through a small synchronous gitignore-subset matcher in this
+ * file (globby is ESM-only and cannot be reached synchronously), so the sync
+ * readers - the `@import` chain and the other context-assembly readers - are
+ * bounded by a user-declared ignore entry exactly like the agent's file tools.
  */
-import { existsSync, realpathSync } from 'node:fs';
-import { basename, extname, join, relative } from 'node:path';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { basename, extname, join, relative, sep } from 'node:path';
 import { canonicalize } from '../path-containment.js';
 import { osFold } from '../os-fold.js';
 
@@ -139,6 +143,163 @@ export type SecretGuard = (absPath: string) => boolean;
 const NO_IGNORE: SecretGuard = () => false;
 
 /**
+ * Synchronous `.spycoreignore` matcher (gitignore subset), for the sync guard.
+ *
+ * globby is ESM-only, so the async guard reaches the ignore layer through
+ * `await import` and the sync guard cannot. This matcher is the sync
+ * equivalent: it reads the same file and applies the same rules for the shapes
+ * a `.spycoreignore` actually uses - basename patterns (`*.log`), anchored
+ * patterns (`docs/*.md`), directory patterns (`build/`), `**`, and `!`
+ * negation with last-match-wins. The two loaders must agree on those shapes;
+ * `secret-guard-reach.test.ts` pins the agreement, so a drift between them
+ * goes red instead of silently reopening the `@import` leak.
+ *
+ * Semantics, per gitignore: a pattern with no slash matches a basename at any
+ * depth; a pattern with a slash is anchored at the cwd root; a trailing `/`
+ * matches a directory and everything under it; `*` and `?` never cross `/`.
+ * A directory ignored by a rule cannot be re-included by a deeper negation -
+ * the outermost ignored level decides - which is the git rule, and the safe
+ * direction for a guard.
+ */
+interface IgnoreRule {
+  negated: boolean;
+  dirOnly: boolean;
+  regex: RegExp;
+}
+
+function globToRegex(glob: string): string {
+  let out = '';
+  for (let i = 0; i < glob.length; i++) {
+    const c: string = glob[i] ?? '';
+    if (c === '*') {
+      if (glob[i + 1] === '*') {
+        // `**/` matches zero or more directories; a trailing `/**` matches
+        // everything under; any other `**` is `*` with `/` allowed.
+        if (glob[i + 2] === '/') {
+          out += '(?:[^/]+/)*';
+          i += 2;
+        } else if (i > 0 && glob[i - 1] === '/' && i + 2 === glob.length) {
+          out += '(?:/.+)?';
+          i += 1;
+        } else {
+          out += '.*';
+          i += 1;
+        }
+      } else {
+        out += '[^/]*';
+      }
+    } else if (c === '?') {
+      out += '[^/]';
+    } else if (c === '[') {
+      // Character class, copied through; a leading `!` negates it.
+      let j = i + 1;
+      if (glob[j] === '!') j++;
+      if (glob[j] === ']') j++;
+      while (j < glob.length && glob[j] !== ']') j++;
+      if (j >= glob.length) {
+        out += '\\[';
+      } else {
+        const cls = glob.slice(i + 1, j);
+        out += '[' + (cls.startsWith('!') ? '^' + cls.slice(1) : cls) + ']';
+        i = j;
+      }
+    } else if (c === '\\' && i + 1 < glob.length) {
+      // An escaped char is literal: regex-escape it only if it is special.
+      const next: string = glob[i + 1] ?? '';
+      out += /[.*+?^${}()|[\]\\]/.test(next) ? '\\' + next : next;
+      i += 1;
+    } else if ('.+^${}()|'.includes(c)) {
+      out += '\\' + c;
+    } else {
+      out += c;
+    }
+  }
+  return out;
+}
+
+function parseIgnoreRules(text: string): IgnoreRule[] {
+  const rules: IgnoreRule[] = [];
+  for (let line of text.split('\n')) {
+    line = line.replace(/\r$/, '');
+    // Trailing spaces are stripped unless escaped (gitignore rule).
+    line = line.replace(/(?<!\\) +$/, '');
+    if (line === '' || line.startsWith('#')) continue;
+    let negated = false;
+    if (line.startsWith('!')) {
+      negated = true;
+      line = line.slice(1);
+    } else if (line.startsWith('\\!') || line.startsWith('\\#')) {
+      line = line.slice(1);
+    }
+    if (line === '') continue;
+    let dirOnly = false;
+    if (line.endsWith('/')) {
+      dirOnly = true;
+      line = line.slice(0, -1);
+    }
+    if (line === '') continue;
+    const anchored = line.startsWith('/') || line.includes('/');
+    if (line.startsWith('/')) line = line.slice(1);
+    const body = globToRegex(line);
+    // A slash-less pattern matches a basename at any depth; a slashed one is
+    // anchored at the root and must match the whole relative path.
+    const regex = anchored
+      ? new RegExp('^' + body + '$')
+      : new RegExp('(^|/)' + body + '$');
+    rules.push({ negated, dirOnly, regex });
+  }
+  return rules;
+}
+
+/** Last matching rule decides; `null` when no rule matches. */
+function matchIgnoreRules(relPosix: string, isDir: boolean, rules: IgnoreRule[]): boolean | null {
+  let decision: boolean | null = null;
+  for (const rule of rules) {
+    if (rule.dirOnly && !isDir) continue;
+    if (rule.regex.test(relPosix)) decision = !rule.negated;
+  }
+  return decision;
+}
+
+function isIgnoredByRules(relPosix: string, rules: IgnoreRule[]): boolean {
+  const parts = relPosix.split('/');
+  // Outermost level first: a directory ignored by a rule cannot be
+  // re-included by anything below it.
+  for (let i = 1; i <= parts.length; i++) {
+    const candidate = parts.slice(0, i).join('/');
+    const isDir = i < parts.length;
+    const decision = matchIgnoreRules(candidate, isDir, rules);
+    if (decision === true) return true;
+    // A negation (or no match) at this level leaves deeper levels to decide.
+    // A file-level match is also tested as a directory: a path that IS a
+    // directory named like a dir-only pattern is ignored either way, and a
+    // file cannot be named by a dir-only pattern in practice.
+    if (!isDir && decision === null) {
+      const dirDecision = matchIgnoreRules(candidate, true, rules);
+      if (dirDecision === true) return true;
+    }
+  }
+  return false;
+}
+
+/** Synchronous `.spycoreignore` predicate; NO_IGNORE when the file is absent. */
+function loadIgnorePredSync(cwd: string): SecretGuard {
+  let text: string;
+  try {
+    text = readFileSync(join(cwd, '.spycoreignore'), 'utf8');
+  } catch {
+    return NO_IGNORE;
+  }
+  const rules = parseIgnoreRules(text);
+  if (rules.length === 0) return NO_IGNORE;
+  return (abs) => {
+    const rel = relative(cwd, abs).split(sep).join('/');
+    if (rel === '' || rel === '..' || rel.startsWith('../')) return false;
+    return isIgnoredByRules(rel, rules);
+  };
+}
+
+/**
  * Load the optional `.spycoreignore` predicate. Async because `globby` is an
  * ESM-only package: it can only be reached through `await import`, and there is
  * no synchronous form of that.
@@ -220,18 +381,14 @@ export async function loadSecretGuard(cwd: string, opts: SecretGuardOpts = {}): 
  * The same guard, built synchronously, for the CONTEXT-ASSEMBLY readers - the
  * `@import` chain, the SPYCODE/GUIDE/CHANGELOG loaders, skill and slash-command
  * discovery, and the README summary. Every one of those is synchronous (one of
- * them on a React render path), so they cannot await; before F-2c-6 they simply
- * consulted no guard at all and read whatever the path resolved to.
- *
- * THE ONE DIFFERENCE, STATED RATHER THAN GLOSSED: this carries the always-on
- * built-in denylist and the resolved-path re-check - the layers that refuse
- * `.env`, private keys, `.ssh`, `.aws` and credential files, including through
- * an in-workspace symlink - but NOT the optional project `.spycoreignore`
- * layer, because that needs `await import('globby')` and globby is ESM-only.
- * A user-declared ignore entry therefore does NOT bound these readers.
- * Pinned by `secret-guard-reach.test.ts` so this limit cannot be re-described
- * as closed without a test going red. → .
+ * them on a React render path), so they cannot await; before this fix they
+ * consulted no guard at all and read whatever the path resolved to, and until
+ * the 0.9.10 fix cycle the sync guard also dropped the `.spycoreignore` layer
+ * because globby is ESM-only. It now carries that layer through the
+ * synchronous matcher above, so a user-declared ignore entry bounds these
+ * readers exactly as it bounds the agent's file tools. Agreement between the
+ * two loaders is pinned by `secret-guard-reach.test.ts`.
  */
 export function loadSecretGuardSync(cwd: string): SecretGuard {
-  return buildGuard(cwd, NO_IGNORE);
+  return buildGuard(cwd, loadIgnorePredSync(cwd));
 }

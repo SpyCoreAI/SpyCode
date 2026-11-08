@@ -124,12 +124,14 @@ output, file contents, and MCP server responses are all treated as
    summary rendered into the generated guide. This matters because containment
    alone cannot stop it: a `.env` is genuinely inside the workspace, so a
    symlink named `notes.md` pointing at it is a perfectly legal target that
-   only the secret guard refuses. **One limit, stated because it is real:** the
-   context-assembly readers are synchronous, so they carry the built-in
-   denylist and the resolved-path check but **not** the optional project
-   `.spycoreignore` layer, whose matcher can only be loaded asynchronously. A
-   user-declared ignore entry therefore bounds the agent's file tools but not
-   the context readers; the built-in denylist bounds both.
+   only the secret guard refuses. The context-assembly readers are
+   synchronous, so they carry the built-in denylist, the resolved-path check,
+   AND the optional project `.spycoreignore` layer: the sync guard matches it
+   with a synchronous gitignore-subset matcher (`src/lib/agent/secrets.ts`),
+   while the agent's file tools use globby for the same layer, and the two
+   loaders are pinned to agree (`tests/secret-guard-reach.test.ts`). A
+   user-declared ignore entry therefore bounds both the context readers and
+   the file tools; the built-in denylist bounds both as well.
 5. **Catastrophic-command denylist (best-effort safety net, NOT a sandbox).**
    `run_command` hard-blocks obvious destroyers (`rm -rf /`, mkfs, fork bombs)
    BEFORE the approval prompt, so even `--yes` cannot run them. **Writing to or
