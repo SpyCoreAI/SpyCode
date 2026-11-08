@@ -1,6 +1,10 @@
-#!/usr/bin/env node
 /**
  * dependency-audit.mjs - the mandatory dependency audit gate (M-6).
+ *
+ * No shebang, deliberately: the unit tests import `evaluateAuditReport`
+ * from this file, and Vite's SSR transform rejects a shebang mid-file.
+ * The script is always run via `node scripts/dependency-audit.mjs`, never
+ * executed directly.
  *
  * Runs `pnpm audit --json` and fails on ANY high/critical advisory EXCEPT the
  * single known-patched one:
@@ -30,7 +34,7 @@
  */
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -63,53 +67,95 @@ function patchIsWired() {
   return null;
 }
 
-const res = spawnSync('pnpm', ['audit', '--json'], { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
-if (res.error) fail(`pnpm audit did not run: ${res.error.message}`);
-const raw = res.stdout || '';
-if (!raw.trim()) {
-  fail(`pnpm audit produced no output${res.stderr ? `: ${String(res.stderr).slice(0, 500)}` : ''}`);
-}
-let data;
-try {
-  data = JSON.parse(raw);
-} catch {
-  fail(`pnpm audit returned non-JSON output${res.stderr ? `: ${String(res.stderr).slice(0, 500)}` : ''}`);
-}
-if (data && data.error) {
-  fail(`audit endpoint error: ${data.error.code || ''} ${data.error.message || ''}`.trim());
-}
-
-// pnpm's JSON nests advisories under `advisories` (object keyed by GHSA id or
-// an array); be liberal in what we accept, strict in what we allow.
-const adv = data && data.advisories;
-const list = Array.isArray(adv) ? adv : adv && typeof adv === 'object' ? Object.values(adv) : [];
-if (!Array.isArray(list)) fail('unexpected pnpm audit JSON shape');
-
-const HIGH = new Set(['high', 'critical']);
-let blocked = 0;
-let waived = 0;
-for (const a of list) {
-  const severity = String(a.severity || '').toLowerCase();
-  if (!HIGH.has(severity)) continue;
-  const id = a.id || a.ghsaId || a.advisoryId || '';
-  const pkg = a.package_name || a.packageName || a.module_name || '';
-  const versions = a.vulnerable_versions || a.vulnerableVersions || '';
-  const isKnown =
-    String(id).toUpperCase() === KNOWN.ghsa.toUpperCase() &&
-    pkg === KNOWN.pkg &&
-    String(versions).includes(KNOWN.version);
-  if (isKnown) {
-    const hole = patchIsWired();
-    if (hole) fail(`known advisory ${KNOWN.ghsa} is NOT patched (${hole}) - refusing the exception`);
-    waived += 1;
-    say(`known-patched advisory waived: ${KNOWN.ghsa} (${KNOWN.pkg}@${KNOWN.version}) - backport verified wired`);
-    continue;
+/**
+ * CLI entry point: run `pnpm audit --json` and judge it. Guarded so that
+ * importing this module (the unit tests import `evaluateAuditReport`) does
+ * NOT run the audit - only `node scripts/dependency-audit.mjs` does.
+ */
+function runFromCli() {
+  const res = spawnSync('pnpm', ['audit', '--json'], { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  if (res.error) fail(`pnpm audit did not run: ${res.error.message}`);
+  const raw = res.stdout || '';
+  if (!raw.trim()) {
+    fail(`pnpm audit produced no output${res.stderr ? `: ${String(res.stderr).slice(0, 500)}` : ''}`);
   }
-  blocked += 1;
-  console.error(
-    `[dependency-audit] BLOCKED: ${id} severity=${severity} package=${pkg} versions=${versions} title=${a.title || ''}`,
-  );
+  let data;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    fail(`pnpm audit returned non-JSON output${res.stderr ? `: ${String(res.stderr).slice(0, 500)}` : ''}`);
+  }
+  main(data);
 }
 
-if (blocked > 0) fail(`${blocked} high/critical advisorie(s) above the gate`);
-say(`clean: ${list.length} advisorie(s) scanned, ${waived} known-patched waived, 0 high/critical outstanding`);
+const invokedAsScript =
+  process.argv[1] !== undefined &&
+  resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (invokedAsScript) runFromCli();
+
+/**
+ * The verdict logic, pure and unit-testable (see tests/dependency-audit.test.ts).
+ * Throws an Error for every fail-closed shape; returns the scan summary otherwise.
+ */
+export function evaluateAuditReport(data) {
+  if (!data || typeof data !== 'object') {
+    throw new Error('audit report is not an object');
+  }
+  if (data.error) {
+    throw new Error(`audit endpoint error: ${data.error.code || ''} ${data.error.message || ''}`.trim());
+  }
+  // NON-VACUOUS GUARD. A report without the `advisories` key is NOT a clean
+  // audit - it is a shape change or an error payload that still parsed as
+  // JSON. The old code defaulted a missing key to `[]` and exited 0 with
+  // "clean: 0 advisories scanned", passing vacuously. A real clean audit
+  // carries the key with an empty object; only a missing key fails here.
+  if (!('advisories' in data)) {
+    throw new Error(
+      'audit report has no `advisories` key - cannot tell a clean audit from a changed/error payload; refusing a vacuous pass',
+    );
+  }
+  // pnpm's JSON nests advisories under `advisories` (object keyed by GHSA id or
+  // an array); be liberal in what we accept, strict in what we allow.
+  const adv = data.advisories;
+  const list = Array.isArray(adv) ? adv : adv && typeof adv === 'object' ? Object.values(adv) : [];
+  if (!Array.isArray(list)) throw new Error('unexpected pnpm audit JSON shape');
+
+  const HIGH = new Set(['high', 'critical']);
+  let blocked = 0;
+  let waived = 0;
+  for (const a of list) {
+    const severity = String(a.severity || '').toLowerCase();
+    if (!HIGH.has(severity)) continue;
+    const id = a.id || a.ghsaId || a.advisoryId || '';
+    const pkg = a.package_name || a.packageName || a.module_name || '';
+    const versions = a.vulnerable_versions || a.vulnerableVersions || '';
+    const isKnown =
+      String(id).toUpperCase() === KNOWN.ghsa.toUpperCase() &&
+      pkg === KNOWN.pkg &&
+      String(versions).includes(KNOWN.version);
+    if (isKnown) {
+      const hole = patchIsWired();
+      if (hole) throw new Error(`known advisory ${KNOWN.ghsa} is NOT patched (${hole}) - refusing the exception`);
+      waived += 1;
+      say(`known-patched advisory waived: ${KNOWN.ghsa} (${KNOWN.pkg}@${KNOWN.version}) - backport verified wired`);
+      continue;
+    }
+    blocked += 1;
+    console.error(
+      `[dependency-audit] BLOCKED: ${id} severity=${severity} package=${pkg} versions=${versions} title=${a.title || ''}`,
+    );
+  }
+
+  if (blocked > 0) throw new Error(`${blocked} high/critical advisorie(s) above the gate`);
+  return { scanned: list.length, waived, blocked: 0 };
+}
+
+function main(data) {
+  let result;
+  try {
+    result = evaluateAuditReport(data);
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err));
+  }
+  say(`clean: ${result.scanned} advisorie(s) scanned, ${result.waived} known-patched waived, 0 high/critical outstanding`);
+}
