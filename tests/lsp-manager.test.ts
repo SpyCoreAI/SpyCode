@@ -14,7 +14,8 @@ import {
 } from '../src/lib/agent/lsp/manager.js';
 import { isLspEnabled, loadLspConfig } from '../src/lib/agent/lsp/config.js';
 import { LspError } from '../src/lib/agent/lsp/types.js';
-import { trustWorkspace } from '../src/lib/config.js';
+import { trustWorkspace, __resetConfigForTests } from '../src/lib/config.js';
+import { freshConfigDir } from './helpers.js';
 
 const FIXTURE = fileURLToPath(new URL('./fixtures/lsp-fixture-server.mjs', import.meta.url));
 
@@ -25,6 +26,10 @@ beforeEach(() => {
   cwd = mkdtempSync(join(tmpdir(), 'spycli-lsp-mgr-'));
   savedEnv = { ...process.env };
   delete process.env.SPYCODE_LSP;
+  // C2: writeLspConfig trusts the workspace, which writes the config store -
+  // route it to a fresh tmpdir, never the developer's real config dir.
+  freshConfigDir();
+  __resetConfigForTests();
 });
 
 afterEach(async () => {

@@ -9,7 +9,8 @@ import {
   type ToolContext,
 } from '../src/lib/agent/tools.js';
 import { __clearLspManagersForTests, shutdownLspManagers } from '../src/lib/agent/lsp/manager.js';
-import { trustWorkspace } from '../src/lib/config.js';
+import { trustWorkspace, __resetConfigForTests } from '../src/lib/config.js';
+import { freshConfigDir } from './helpers.js';
 
 const FIXTURE = fileURLToPath(new URL('./fixtures/lsp-fixture-server.mjs', import.meta.url));
 
@@ -26,6 +27,10 @@ beforeEach(() => {
   cwd = mkdtempSync(join(tmpdir(), 'spycli-lsp-tool-'));
   delete process.env.SPYCODE_LSP;
   ctx = { cwd, limits: DEFAULT_LIMITS };
+  // C2: writeLspConfig trusts the workspace, which writes the config store -
+  // route it to a fresh tmpdir, never the developer's real config dir.
+  freshConfigDir();
+  __resetConfigForTests();
 });
 
 afterEach(async () => {
