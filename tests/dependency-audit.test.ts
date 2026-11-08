@@ -166,7 +166,11 @@ describe('resolvePnpmCommand + buildCmdCommandLine (injected win32, runs on Linu
 
   test('buildPnpmSpawn: a .cmd on win32 goes through cmd.exe, double-wrapped and verbatim', () => {
     const t = buildPnpmSpawn('C:\\Temp\\pnpm.CMD', ['audit', '--json'], 'win32');
-    expect(t.file).toBe('cmd.exe');
+    // Same rule as buildGhSpawn (see tests/gh-real.test.ts): the file is
+    // `process.env.ComSpec` - the absolute path on real Windows, which is
+    // what branch CI run 42507192367 returned - and the bare 'cmd.exe'
+    // only when ComSpec is unset. Production code is unchanged.
+    expect(t.file).toBe(process.env.ComSpec ?? 'cmd.exe');
     expect(t.argv).toEqual(['/d', '/s', '/c', '""C:\\Temp\\pnpm.CMD" "audit" "--json""']);
     expect(t.windowsVerbatimArguments).toBe(true);
   });

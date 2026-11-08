@@ -69,6 +69,39 @@ function activeCount(type: string): number {
   return process.getActiveResourcesInfo().filter((r) => r === type).length;
 }
 
+/**
+ * Bring the process's own stdio Sockets into existence before any
+ * PipeWrap baseline is taken.
+ *
+ * WHY. `process.getActiveResourcesInfo()` lists only handles keeping the
+ * event loop alive, and `process.stdout`/`stderr`/`stdin` are created
+ * LAZILY: a worker whose stdout Socket does not exist yet reads one
+ * fewer PipeWrap than the same worker a moment later. Measured in a fresh
+ * piped node process: the census reads 1 PipeWrap before the first stdout
+ * touch and 2 right after it - a +1 with no child involved at all. That
+ * is exactly the signature branch CI run 42507192367 showed on Windows
+ * (5 vs a baseline of 4, stable across both legs), and it is NOT a hook
+ * pipe: the hook's three stdio streams are all unref'd at settle
+ * (`releaseChildStdio`), and an unref'd handle drops out of this census
+ * even when the pipe is still open (measured: unref on a live open stdin
+ * socket takes the count from 6 to 5). So no destroy placement - 3d, 3e,
+ * 3f - could ever have been the variable, and no fourth one can be
+ * either. The baseline must be the process's steady state, so every test
+ * in this file warms the stdio up first; a real leaked child pipe is
+ * still caught, because the warm-up touches only the process's own
+ * stdio, never a child pipe. The mechanism is pinned by the
+ * 'pipe census baseline discipline' tests below.
+ */
+async function warmUpProcessStdio(): Promise<void> {
+  void process.stdout;
+  void process.stderr;
+  void process.stdin;
+  // The handle attaches on a later tick than the first access (the first
+  // console write's own census still reads the old count), so yield once
+  // before any baseline is taken.
+  await new Promise((resolve) => setImmediate(resolve));
+}
+
 function nodeCmd(script: string, ...args: string[]): string {
   return [`"${process.execPath}"`, `"${script}"`, ...args.map((a) => `"${a}"`)].join(' ');
 }
@@ -93,6 +126,7 @@ function holderAlive(pidFile: string): boolean {
 }
 
 beforeEach(async () => {
+  await warmUpProcessStdio();
   configDir = freshConfigDir();
   responder = null;
   workDir = mkdtempSync(join(tmpdir(), 'spycode-win-equiv-'));
@@ -343,6 +377,52 @@ child.unref();
       // not an assertion. Its marker file is removed with the script dir.
     },
   );
+});
+
+describe('pipe census baseline discipline', () => {
+  /**
+   * Pins the lazy-stdio mechanism behind the `warmUpProcessStdio` call in
+   * `beforeEach` - in a FRESH child process, where the worker's own
+   * already-materialized stdio cannot hide it. A child that reads its
+   * PipeWrap census before touching stdout reads one fewer than the same
+   * child right after its first stdout write: the process's own stdout
+   * Socket materializes lazily, and that +1 is indistinguishable in a bare
+   * count from a leaked child pipe. Warming the stdio up first (touch all
+   * three streams, yield a tick) makes the census stable across the same
+   * write. If this test ever goes red, the warm-up premise is wrong and
+   * the pipe tests' baselines are suspect again - do not "fix" it by
+   * deleting the warm-up.
+   */
+  const CENSUS_CHILD = `
+import { writeFileSync } from 'node:fs';
+const [outFile, mode] = process.argv.slice(2);
+const census = () => process.getActiveResourcesInfo().filter((r) => r === 'PipeWrap').length;
+if (mode === 'warm') {
+  void process.stdout; void process.stderr; void process.stdin;
+  await new Promise((r) => setImmediate(r));
+}
+const first = census();
+console.log('touch');
+const second = census();
+writeFileSync(outFile, JSON.stringify({ first, second }));
+`;
+  function runCensusChild(warm: boolean): { first: number; second: number } {
+    const script = writeScript('census-child.mjs', CENSUS_CHILD);
+    const outFile = join(scriptDir, `census-${warm ? 'warm' : 'cold'}.json`);
+    const r = spawnSync(process.execPath, [script, outFile, warm ? 'warm' : 'cold'], {
+      encoding: 'utf8',
+      timeout: 10_000,
+    });
+    expect(r.status).toBe(0);
+    return JSON.parse(readFileSync(outFile, 'utf8')) as { first: number; second: number };
+  }
+
+  test('a cold census grows by one on first stdout touch; a warmed one is stable', () => {
+    const cold = runCensusChild(false);
+    expect(cold.second).toBe(cold.first + 1);
+    const warm = runCensusChild(true);
+    expect(warm.second).toBe(warm.first);
+  });
 });
 
 describe('self-terminating children', () => {

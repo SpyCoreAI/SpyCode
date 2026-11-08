@@ -241,7 +241,17 @@ describe('buildGhSpawn (injected win32, runs on Linux)', () => {
 
   test('a .cmd on win32 goes through cmd.exe, double-wrapped and verbatim', () => {
     const t = buildGhSpawn('C:\\Temp\\gh.CMD', ['--version'], 'win32');
-    expect(t.file).toBe('cmd.exe');
+    // The file is the system command interpreter, not the bare name:
+    // Node docs make `process.env.ComSpec` the default shell on Windows
+    // (the `shell` option defaults to it), and Windows always sets it to
+    // the absolute path (`C:\Windows\system32\cmd.exe`) - which is what
+    // branch CI run 42507192367 returned. The bare 'cmd.exe' is only the
+    // fallback when ComSpec is unset, i.e. the Linux-only shape this test
+    // used to pin by accident. The absolute path is also the safer spawn
+    // target: it needs no PATH lookup, so no earlier `cmd.exe` on PATH
+    // can shadow it. Production code is unchanged; the expectation now
+    // states the rule instead of the fallback spelling.
+    expect(t.file).toBe(process.env.ComSpec ?? 'cmd.exe');
     expect(t.argv).toEqual(['/d', '/s', '/c', '""C:\\Temp\\gh.CMD" "--version""']);
     expect(t.windowsVerbatimArguments).toBe(true);
   });
