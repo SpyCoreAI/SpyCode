@@ -31,7 +31,7 @@
  */
 
 /** The version this baseline was taken at. */
-export const BASELINE_VERSION = "0.9.8";
+export const BASELINE_VERSION = "0.9.9";
 
 /**
  * THE VERSION THAT IS ACTUALLY ON THE REGISTRY, AS A COMMITTED CONSTANT.
@@ -52,7 +52,7 @@ export const BASELINE_VERSION = "0.9.8";
  *
  * MOVE THIS LINE ONLY AS PART OF A PUBLISH. Never with a bump.
  */
-export const LAST_PUBLISHED_VERSION = "0.9.8";
+export const LAST_PUBLISHED_VERSION = "0.9.9";
 
 /** Every flag registered anywhere in packages/cli/src at that publish point. */
 export const BASELINE_FLAGS: readonly string[] = [

@@ -9,9 +9,11 @@ codebase holds itself to. Read it before opening a pull request.
 - **Issues are welcome** - bug reports and feature requests alike. Please use
   the issue templates. A good bug report names the command, the input, what
   you expected, and what you got; logs help.
-- **Pull requests are reviewed** here and, when accepted, ported into the
-  source tree this mirror is published from - your authorship is credited in
-  the ported commit.
+- **Pull requests are reviewed and merged here.** This repository is the
+  source of truth: accepted PRs merge into `main` (subject to the checks
+  below), and your authorship is preserved in the merged commit. Please keep
+  PRs focused, rebase onto current `main` before requesting review, and make
+  sure `pnpm lint` and `pnpm test` are green.
 - **Security reports** go to security@spycore.ai (see
   [SECURITY.md](./SECURITY.md)), never the public tracker.
 - **Code of conduct:** be kind and constructive - harassment of any kind is
