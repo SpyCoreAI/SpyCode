@@ -300,6 +300,9 @@ export const grepTool: ToolDefinition = {
       const fileLines = buf.toString('utf8').split('\n');
       for (let i = 0; i < fileLines.length; i += 1) {
         const line = fileLines[i] as string;
+        // Reset before every test: a stateful regex (see compileRegex)
+        // must never carry lastIndex from one line to the next.
+        re.lastIndex = 0;
         if (!re.test(line)) continue;
         totalMatches += 1;
         filesWithMatch.add(f);
@@ -558,7 +561,15 @@ function topLanguages(extCount: Map<string, number>): Array<{ lang: string; coun
  */
 const MAX_PATTERN_CHARS = 1000;
 
-/** Compile a regex from a bare source or a `/pattern/flags` literal. */
+/** Compile a regex from a bare source or a `/pattern/flags` literal.
+ *
+ * The `g` and `y` flags are stripped: both make `RegExp.prototype.test`
+ * stateful via `lastIndex`, so a single regex reused across lines skips
+ * every second match (`/error/g` matched lines 1, 3, 5, … only). The grep
+ * loop tests one line at a time, so neither flag changes what matches -
+ * only whether the scan is correct. The remaining flags (i, m, s, u)
+ * are stateless under repeated `test()` and pass through untouched.
+ */
 function compileRegex(input: string): RegExp {
   if (input.length > MAX_PATTERN_CHARS) {
     throw new ToolError(
@@ -567,7 +578,10 @@ function compileRegex(input: string): RegExp {
   }
   const literal = /^\/(.+)\/([gimsuy]*)$/s.exec(input);
   try {
-    if (literal) return new RegExp(literal[1] as string, literal[2]);
+    if (literal) {
+      const flags = (literal[2] as string).replace(/[gy]/g, '');
+      return new RegExp(literal[1] as string, flags);
+    }
     return new RegExp(input);
   } catch {
     throw new ToolError(`invalid regular expression: ${input}`);
