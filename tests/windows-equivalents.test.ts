@@ -70,6 +70,85 @@ function activeCount(type: string): number {
 }
 
 /**
+ * Phase 3h diagnostic (CI-only evidence): handle-IDENTITY dump for the
+ * pipe-survivor census, printed with console.log so it lands in the
+ * vitest output on the CI log. Always on for the hooks pipe-survivor
+ * test below - a passing run's dump is evidence too.
+ *
+ * WHY identity, not just a count. The bare count cannot say WHICH handle
+ * is the +1: the 3g warm-up theory (the process's own lazy stdout) was
+ * falsified on Windows run 42510257506 (still 5 vs 4 on both legs), and
+ * the destroy-placement axis was already falsified in 3d/3e/3f. The next
+ * question is only answerable from the runner: is the extra handle the
+ * hook's stdin socket (fd, direction writable-only), a stdout/stderr
+ * socket, the process's own stdio, or something else entirely.
+ *
+ * WHAT identifies a handle here. `process.getActiveResourcesInfo()`
+ * returns type strings ONLY - there is no public API pairing a resource
+ * type with an asyncId - so identity is established three other ways:
+ * (1) OBJECT identity across dumps: every handle is tagged `base` at
+ * baseline, then `same` (present at baseline) or `NEW` (appeared after
+ * baseline) in later dumps - the +1 handle is the NEW line; (2) the
+ * underlying fd (`_handle.fd`: the hook child's stdio pipes read as
+ * real fds on POSIX; on Windows pipes carry no fd, so the field is
+ * absent there and the direction flags carry the identification);
+ * (3) direction flags: a stdin socket is writable-only
+ * (`readable=false, writable=true`), stdout/stderr are readable.
+ * `ref=` is the underlying handle's `hasRef()` - an unref'd handle
+ * drops out of the census even with the pipe still open, so a NEW line
+ * with `ref=false` cannot be the counted +1.
+ */
+const PIPE_SURVIVOR_TEST =
+  'hooks: a pipe-holding survivor leaves NO child pipe holding the event loop';
+let censusBaselineHandles: ReadonlySet<unknown> = new Set();
+
+function describeHandle(handle: unknown): string {
+  const h = handle as {
+    constructor?: { name?: string };
+    _handle?: { constructor?: { name?: string }; fd?: unknown; hasRef?: () => boolean };
+    fd?: unknown;
+    destroyed?: unknown;
+    readable?: unknown;
+    writable?: unknown;
+    connecting?: unknown;
+    pending?: unknown;
+  };
+  const parts = [h.constructor?.name ?? typeof handle];
+  if (h._handle?.constructor?.name) parts.push(`inner=${h._handle.constructor.name}`);
+  if (typeof h._handle?.fd === 'number') parts.push(`fd=${h._handle.fd}`);
+  else if (typeof h.fd === 'number') parts.push(`fd=${h.fd}`);
+  if (typeof h._handle?.hasRef === 'function') parts.push(`ref=${h._handle.hasRef()}`);
+  const flags: Array<[string, unknown]> = [
+    ['destroyed', h.destroyed],
+    ['readable', h.readable],
+    ['writable', h.writable],
+    ['connecting', h.connecting],
+    ['pending', h.pending],
+  ];
+  for (const [key, value] of flags) {
+    if (typeof value === 'boolean') parts.push(`${key}=${value}`);
+  }
+  return parts.join(' ');
+}
+
+function dumpPipeCensus(phase: string): void {
+  const resources = process.getActiveResourcesInfo();
+  const handles = (
+    process as unknown as { _getActiveHandles: () => unknown[] }
+  )._getActiveHandles();
+  if (phase === 'baseline') censusBaselineHandles = new Set(handles);
+  const counts: Record<string, number> = {};
+  for (const r of resources) counts[r] = (counts[r] ?? 0) + 1;
+  const lines = handles.map((h, i) => {
+    const tag = phase === 'baseline' ? 'base' : censusBaselineHandles.has(h) ? 'same' : 'NEW';
+    return `  [${i}] ${tag} ${describeHandle(h)}`;
+  });
+  console.log(
+    `[pipe-census][${PIPE_SURVIVOR_TEST}][${phase}] pipeWraps=${counts.PipeWrap ?? 0} resources=${JSON.stringify(resources)}\n${lines.join('\n')}`,
+  );
+}
+
+/**
  * Bring the process's own stdio Sockets into existence before any
  * PipeWrap baseline is taken.
  *
@@ -295,8 +374,17 @@ child.unref();
     const { loadHookSession, fireHookEvent } = await import('../src/lib/hooks.js');
     const s = await loadHookSession(workDir);
     const before = activeCount('PipeWrap');
+    // Phase 3h diagnostic: handle-identity dumps at baseline, in flight
+    // (~50ms into the hook run, while the hook child is alive or its
+    // pipes are still draining), and after settle. The assertion below
+    // is unchanged - the dumps are evidence only.
+    dumpPipeCensus('baseline');
+    const inflight = setTimeout(() => dumpPipeCensus('after-spawn'), 50);
+    inflight.unref();
     const started = Date.now();
     await fireHookEvent(s, 'prompt-submit', { prompt: 'x' });
+    clearTimeout(inflight);
+    dumpPipeCensus('after-settle');
     expect(Date.now() - started).toBeLessThan(1_500);
     expect(holderAlive(pidFile)).toBe(true);
     expect(activeCount('PipeWrap')).toBe(before);
