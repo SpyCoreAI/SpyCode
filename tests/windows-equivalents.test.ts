@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -67,6 +67,73 @@ const holderPids: number[] = [];
 /** Handles of the given type currently keeping the event loop alive. */
 function activeCount(type: string): number {
   return process.getActiveResourcesInfo().filter((r) => r === type).length;
+}
+
+/**
+ * Phase 3i - wait for the PipeWrap census to drain back to baseline.
+ *
+ * WHY. Branch CI run 42510887833 (head 66ceeb1) identified the +1 in the
+ * hooks pipe-survivor test: after settle, exactly one extra handle -
+ * `[4] NEW Socket destroyed=true readable=false writable=false
+ * connecting=false pending=true`, no inner handle, no fd, and the
+ * ChildProcess already reaped. That is the hook's stdin socket: destroyed
+ * (the flush-callback destroy in `src/lib/hooks.ts`), its libuv PipeWrap
+ * not yet released because a shutdown operation is still pending on the
+ * Windows named pipe. It is NOT a live child pipe holding the loop.
+ *
+ * PROOF (Linux, `/tmp/phase3i/probe1.mjs`, `probe3.mjs`, 3/3 runs each):
+ * destroy() on a child-stdin socket with a pending write leaves the
+ * census elevated by exactly 1 in the SAME tick, with the socket reading
+ * `destroyed=true pending=true _handle=null` - byte-for-byte the Windows
+ * after-settle line - and the count drains back to baseline ~2ms later
+ * with NO further action on the socket. On Windows the same drain takes
+ * longer than the synchronous census taken right after settle resolves,
+ * so the test read 5 vs 4. The drain is passive and unconditional; the
+ * wait below only gives the loop the turns it needs.
+ *
+ * WHY NOT THE OTHER DIRECTIONS.
+ * (b) Settle already awaits the stdin socket's `'close'` (bounded by
+ * `STDIN_CLOSE_WAIT_MS`, `src/lib/hooks.ts`) - that IS the 3f fix, and
+ * the 3h evidence shows the PipeWrap still listed after it. There is
+ * nothing further to await: `'close'` is the terminal event. Extending
+ * the wait to the stdout/stderr sockets is impossible by design -
+ * `'close'` fires only once EVERY inherited pipe is shut, and the
+ * survivor holds them for 30s; the sibling test pins settle <1500ms
+ * while the holder lives 3s.
+ * (c) Excluding destroyed+pending sockets from the census would be
+ * lying about the loop: `getActiveResourcesInfo` still lists the handle
+ * precisely BECAUSE the pending operation keeps it alive until it
+ * completes. A destroyed socket is not a leak, but it is a real,
+ * transient loop-keeping resource - the honest assertion is that it
+ * drains, not that it is invisible.
+ *
+ * FALSIFIABILITY. A genuinely leaked LIVE pipe - open, ref'd, never
+ * destroyed - never drains, so this wait times out above baseline and
+ * the test still fails. Pinned by 'a live refd pipe never reaches
+ * quiescence' below (probe2: live ref'd pipes hold the census elevated
+ * for the whole window). The holder-alive assertion in the hooks test
+ * still proves the survivor lives at assert time, so a pass cannot be
+ * the survivor having died.
+ *
+ * BOUND. 2000ms: the Windows named-pipe shutdown completes well inside
+ * it (the 3f comment records the libuv EOF timer on a Windows pipe as
+ * 50ms, the drain as 200ms, `STDIN_CLOSE_WAIT_MS` as 500ms). A handle
+ * that has not drained in 2s is, for this test's purposes, a leak.
+ */
+const PIPE_QUIESCENCE_TIMEOUT_MS = 2000;
+const PIPE_QUIESCENCE_POLL_MS = 10;
+
+async function waitForPipeQuiescence(
+  baseline: number,
+  timeoutMs: number = PIPE_QUIESCENCE_TIMEOUT_MS,
+): Promise<number> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const count = activeCount('PipeWrap');
+    if (count <= baseline) return count;
+    if (Date.now() >= deadline) return count;
+    await new Promise((resolve) => setTimeout(resolve, PIPE_QUIESCENCE_POLL_MS));
+  }
 }
 
 /**
@@ -387,7 +454,18 @@ child.unref();
     dumpPipeCensus('after-settle');
     expect(Date.now() - started).toBeLessThan(1_500);
     expect(holderAlive(pidFile)).toBe(true);
-    expect(activeCount('PipeWrap')).toBe(before);
+    // Phase 3i: on Windows the after-settle census still lists the hook's
+    // DESTROYED stdin socket (destroyed=true, pending=true - CI run
+    // 42510887833) while its named-pipe shutdown completes. That handle
+    // drains on its own; the test's property is that no pipe is LEFT
+    // holding the loop, so wait for quiescence (bounded) and assert on
+    // the drained count. A live leaked pipe never drains - see the
+    // 'pipe census quiescence' tests below - so this cannot mask one.
+    // The 3h dumps above stay: after-settle is the evidence, this dump
+    // is the drain.
+    const settledCount = await waitForPipeQuiescence(before);
+    dumpPipeCensus('after-quiescence');
+    expect(settledCount).toBe(before);
   });
 
   test('hooks: settle on the hook PROCESS exiting, not on its pipes closing', async () => {
@@ -510,6 +588,82 @@ writeFileSync(outFile, JSON.stringify({ first, second }));
     expect(cold.second).toBe(cold.first + 1);
     const warm = runCensusChild(true);
     expect(warm.second).toBe(warm.first);
+  });
+});
+
+describe('pipe census quiescence', () => {
+  /**
+   * Pins the Phase 3i mechanism behind `waitForPipeQuiescence`, in the
+   * exact shape branch CI run 42510887833 showed on Windows: after
+   * settle, the hook's stdin socket reads `destroyed=true pending=true`
+   * with no handle, its PipeWrap still listed, the child already reaped
+   * - and it drains on its own. The first test reproduces that state on
+   * Linux (probes `/tmp/phase3i/probe1.mjs`, `probe3.mjs`: the same-tick
+   * census after destroy() is elevated by 1 with the socket destroyed
+   * and pending, and ~2ms later it is back at baseline with no further
+   * action). The second test is the falsifier: a LIVE ref'd pipe never
+   * drains, so the wait times out above baseline - a real leak still
+   * fails the hooks test. If either test goes red, the quiescence
+   * premise is wrong and the hooks test's wait is suspect - do not "fix"
+   * it by deleting the wait.
+   */
+  test('a destroyed socket with a pending write drains on its own; the quiescence wait sees it', async () => {
+    const before = activeCount('PipeWrap');
+    const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000);'], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    try {
+      child.stdout?.resume();
+      child.stderr?.resume();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      child.stdin?.on('error', () => {});
+      child.stdin?.write('x');
+      child.stdin?.destroy();
+      // The Windows after-settle signature, in the same tick as the
+      // destroy: still counted, destroyed, a shutdown pending, no handle.
+      const stdinState = child.stdin as unknown as { destroyed?: boolean; pending?: boolean };
+      expect(stdinState.destroyed).toBe(true);
+      expect(stdinState.pending).toBe(true);
+      expect(activeCount('PipeWrap')).toBeGreaterThan(before);
+      // Mirror the hook settle state: read pipes unref'd, child reaped.
+      const { releaseChildStdio } = await import('../src/lib/child-stdio.js');
+      releaseChildStdio(child);
+      child.kill('SIGKILL');
+      await new Promise<void>((resolve) => {
+        if (child.exitCode !== null) resolve();
+        else child.once('exit', () => resolve());
+      });
+      const drained = await waitForPipeQuiescence(before);
+      expect(drained).toBe(before);
+    } finally {
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        /* already gone */
+      }
+    }
+  });
+
+  test('a live refd pipe never reaches quiescence; the wait times out above baseline', async () => {
+    const before = activeCount('PipeWrap');
+    const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000);'], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    try {
+      child.stdout?.resume();
+      child.stderr?.resume();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      // All three pipes open, ref'd, child alive: nothing drains.
+      expect(activeCount('PipeWrap')).toBeGreaterThan(before);
+      const result = await waitForPipeQuiescence(before, 200);
+      expect(result).toBeGreaterThan(before);
+    } finally {
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        /* already gone */
+      }
+    }
   });
 });
 
