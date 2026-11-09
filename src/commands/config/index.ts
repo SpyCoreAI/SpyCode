@@ -116,12 +116,17 @@ export function registerConfigCommand(program: Command): void {
       }
       if (!isKnownKey(key)) fail(unknownKeyError(key));
       const v = store.get(key);
+      // R3-2: the single-key path printed the raw value, so a credentialed
+      // apiUrl reached stdout in cleartext while the bulk dump redacted it.
+      // Route the one value through the same dump screen (byte-identical
+      // when there is nothing to redact).
+      const shown = (redactConfigDump({ [key]: v }) as Record<string, unknown>)[key];
       if (getOutputOptions().json) {
-        json({ [key]: v });
+        json({ [key]: shown });
       } else if (v === undefined) {
         print(`${key} is unset`);
       } else {
-        print(`${key} = ${formatValue(v)}`);
+        print(`${key} = ${formatValue(shown)}`);
       }
     });
 
@@ -151,10 +156,13 @@ export function registerConfigCommand(program: Command): void {
         );
       }
       getConfigStore().set(key, coerced);
+      // Same screen as the single-key get path (R3-2): the success echo
+      // must not print a credentialed apiUrl in cleartext either.
+      const shown = (redactConfigDump({ [key]: coerced }) as Record<string, unknown>)[key];
       if (getOutputOptions().json) {
-        json({ key, value: coerced });
+        json({ key, value: shown });
       } else {
-        success(`${key} set to ${formatValue(coerced)}`);
+        success(`${key} set to ${formatValue(shown)}`);
       }
     });
 

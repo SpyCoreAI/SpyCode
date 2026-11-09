@@ -250,4 +250,14 @@ describe('command spec contract - the shipped tree and the shipped spec agree', 
       'these flags are advertised by the spec but the command does not accept them - tab-completing one produces an error',
     ).toEqual([]);
   });
+
+  // R3-8: the spec said `conversations list --limit` was "(1-20)" while the
+  // code clamps 1-100 (and --help says 1-100). The contract gate checks
+  // presence only, so this pins the description to the code's range.
+  test('conversations list --limit describes the 1-100 clamp the code enforces', () => {
+    const conversations = (COMMAND_SPEC.subcommands ?? []).find((c) => c.name === 'conversations');
+    const list = (conversations?.subcommands ?? []).find((c) => c.name === 'list');
+    const limit = (list?.options ?? []).find((o) => o.name === '--limit');
+    expect(limit?.description).toContain('(1-100)');
+  });
 });

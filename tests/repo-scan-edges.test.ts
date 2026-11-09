@@ -35,6 +35,14 @@ describe('repo-scan package.json facts', () => {
     scan = await scanRepo(workDir);
     expect(scan.pkg).toBeUndefined();
   });
+
+  // R3-14: package.json used to be read whole with no cap (the README in
+  // the same file got a 64 KB cap). Above 1 MB it is skipped before reading.
+  test('an oversized package.json is skipped, not read whole', async () => {
+    pkg({ name: 'big', description: 'x'.repeat(1_100_000) });
+    const scan = await scanRepo(workDir);
+    expect(scan.pkg).toBeUndefined();
+  });
 });
 
 describe('repo-scan README summary', () => {

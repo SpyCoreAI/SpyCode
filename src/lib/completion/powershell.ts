@@ -63,14 +63,32 @@ ${valueEntries.join('\n')}
 Register-ArgumentCompleter -Native -CommandName spycore -ScriptBlock {
     param($wordToComplete, $commandAst, $cursorPosition)
 
-    $tokens = $commandAst.CommandElements | ForEach-Object { $_.ToString() }
+    # Force an ARRAY. A single-element pipeline result unwraps to a
+    # scalar STRING ('spycore'), so $tokens[1..0] indexed the string's
+    # CHARS and $tok.StartsWith('-') threw on [char] - bare 'spycore <TAB>'
+    # completed nothing. @(...) keeps it an array, and the drop below only
+    # slices when a second element actually exists (@('spycore')[1..0]
+    # returns @('spycore') again - the slice alone does not drop the
+    # program name).
+    $tokens = @($commandAst.CommandElements | ForEach-Object { $_.ToString() })
     # Drop the program name itself.
-    if ($tokens.Count -gt 0) { $tokens = $tokens[1..($tokens.Count - 1)] }
+    if ($tokens.Count -gt 1) { $tokens = @($tokens[1..($tokens.Count - 1)]) } else { $tokens = @() }
+
+    # Whether the last token is the partial word being completed or
+    # a finished token depends on the trailing space. After 'spycore
+    # conversations ' the word to complete is empty and 'conversations' is
+    # complete, so the walk must consume ALL tokens and the "previous token"
+    # for flag-value completion is the LAST one; while completing
+    # 'conversations' itself (no trailing space) the last token is the
+    # partial word and must not be walked. $wordToComplete is '' exactly
+    # when the cursor sits after a space.
+    $trailingSpace = ($wordToComplete -eq '')
+    $walkCount = if ($trailingSpace) { $tokens.Count } else { $tokens.Count - 1 }
 
     # Walk forward through non-flag tokens to find the deepest matched path.
     $path = ''
     $i = 0
-    while ($i -lt $tokens.Count - 1) {
+    while ($i -lt $walkCount) {
         $tok = $tokens[$i]
         if ($tok.StartsWith('-')) { $i++; continue }
         $childrenKey = if ($path -eq '') { '__root__' } else { $path }
@@ -83,7 +101,11 @@ Register-ArgumentCompleter -Native -CommandName spycore -ScriptBlock {
     $key = if ($path -eq '') { '__root__' } else { $path }
 
     # Option-value completion: previous token is a value-taking flag.
-    $prev = if ($tokens.Count -ge 2) { $tokens[$tokens.Count - 2] } else { '' }
+    $prev = ''
+    if ($tokens.Count -gt 0) {
+        if ($trailingSpace) { $prev = $tokens[$tokens.Count - 1] }
+        elseif ($tokens.Count -ge 2) { $prev = $tokens[$tokens.Count - 2] }
+    }
     if ($prev.StartsWith('-')) {
         $values = $global:SpycoreCompletionValues["$key::$prev"]
         if ($null -ne $values) {

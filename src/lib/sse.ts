@@ -272,7 +272,10 @@ const RETRY_BASE_MS = 1_000;
  * cleanly OR faults on the way out. A stream that ends any other way is a
  * mid-stream disconnect: we wait (1s, 2s, 4s …) and reconnect, passing through
  * `Last-Event-ID` for resumption per the SSE spec. We cap at `maxRetries`
- * (default 3) to avoid infinite loops in a totally broken network.
+ * (default 3) to avoid infinite loops in a totally broken network. Two
+ * exceptions (R3-1): a 3xx throws at once - undici never follows a redirect,
+ * so retrying cannot help - and a clean end with ZERO events on every attempt
+ * throws once the budget is spent, instead of resolving silently as success.
  *
  * WHY AN APPLICATION `error` IS TERMINAL. It used to count only
  * `done`, so a stream the server ended by refusing the request was read as a
@@ -332,6 +335,10 @@ export async function streamWithRetry(opts: StreamWithRetryOpts): Promise<void> 
   let lastEventId: string | undefined;
   let sawDone = false;
   let sawTerminalError = false;
+  // R3-1: events delivered across ALL attempts. A stream that ends cleanly
+  // with zero events on every attempt is not a dropped connection - it is a
+  // redirect or a non-SSE body, and resolving silently as success hides it.
+  let eventsSeen = 0;
 
   while (true) {
     if (opts.signal?.aborted) {
@@ -374,12 +381,24 @@ export async function streamWithRetry(opts: StreamWithRetryOpts): Promise<void> 
       const failureBody = await safeReadJson(res.body);
       throw mapHttpFailure(status, failureBody, res.headers);
     }
+    // R3-1: undici `request` does not follow redirects, and a 2xx with a
+    // non-SSE body yields zero events - both used to burn the whole retry
+    // budget and then resolve silently as success. A 3xx is diagnosable
+    // from the first response, so fail at once instead of retrying it.
+    if (status >= 300) {
+      throw new SpycoreCliError(
+        `API redirected (HTTP ${status}) - the SSE endpoint did not return a stream.`,
+        EXIT_SERVER_ERROR,
+        'Check your --api-url / apiUrl setting - the endpoint may have moved, or a proxy may be redirecting it.',
+      );
+    }
 
     try {
       for await (const event of parseSSEStream(
         res.body as unknown as AsyncIterable<Buffer>,
         { idleTimeoutMs: opts.idleTimeoutMs },
       )) {
+        eventsSeen += 1;
         if (event.id) lastEventId = event.id;
         // Detect the two TERMINAL states so a clean close after either is not
         // retried. Both are recorded as the event passes; neither ends the
@@ -393,9 +412,23 @@ export async function streamWithRetry(opts: StreamWithRetryOpts): Promise<void> 
         await opts.onEvent(event);
       }
       // Stream ended cleanly. If we saw a terminal event we're finished. If we
-      // didn't, treat it as a mid-stream disconnect and retry.
+      // didn't, treat it as a mid-stream disconnect and retry - EXCEPT when
+      // no event arrived on any attempt: that is a redirect / non-SSE body
+      // (R3-1), not a disconnect, and resolving silently would report a
+      // failed stream as success. A stream that delivered >= 1 event and
+      // then ended cleanly still returns (the pre-existing pin in
+      // tests/sse-edges.test.ts): only the zero-event case throws.
       if (sawDone || sawTerminalError) return;
-      if (attempt >= maxRetries) return;
+      if (attempt >= maxRetries) {
+        if (eventsSeen === 0) {
+          throw new SpycoreCliError(
+            'Stream ended without receiving any events.',
+            EXIT_SERVER_ERROR,
+            'The endpoint answered but sent no SSE events - it may have redirected or returned a non-SSE body. Check your --api-url / apiUrl setting.',
+          );
+        }
+        return;
+      }
       await sleep(backoff(attempt), opts.signal);
       attempt += 1;
       continue;

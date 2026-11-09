@@ -147,6 +147,19 @@ describe('discoverSkills', () => {
     expect(discoverSkills(workDir).map((s) => `${s.name}:${s.source}`)).toEqual(['zeta:project']);
     expect(hasWithheldProjectSkills(workDir)).toBe(false);
   });
+
+  // R3-14: a 200 MB SKILL.md used to be read whole (503.8 MB peak RSS on
+  // `skills list`). Discovery now stat-and-skips above the 1 MB cap; the
+  // small skill next to it is still found.
+  test('an oversized SKILL.md is skipped, a normal one still discovered', async () => {
+    writeSkill(projectRoot(), 'small', SKILL('small', 'small skill', 'S'));
+    const big = join(projectRoot(), 'skills', 'bigskill');
+    mkdirSync(big, { recursive: true });
+    writeFileSync(join(big, 'SKILL.md'), `---\nname: bigskill\ndescription: big\n---\n${'x'.repeat(2_000_000)}\n`, 'utf8');
+    const { discoverSkills } = await import('../src/lib/agent/skills.js');
+    const skills = discoverSkills(workDir, { includeUntrustedProject: true });
+    expect(skills.map((s) => s.name)).toEqual(['small']);
+  });
 });
 
 // ───────────────────────── catalog ─────────────────────────

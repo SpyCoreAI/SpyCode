@@ -15,6 +15,7 @@ import {
 // import adds no runtime cycle (config ← models ← effort would be one, but
 // effort imports nothing at runtime).
 import { isEffortLevel, type EffortLevel } from './effort.js';
+import { EXIT_USER_ERROR, SpycoreCliError } from './errors.js';
 
 /**
  * Persistent CLI configuration. Stored at the OS-appropriate config dir
@@ -320,7 +321,19 @@ export function resolveApiUrl(flagValue?: string | undefined): string {
   if (flagValue && flagValue.trim().length > 0) return flagValue.trim();
   const envValue = process.env.SPYCORE_API_URL;
   if (envValue && envValue.trim().length > 0) return envValue.trim();
-  return getConfigStore().get('apiUrl');
+  // R3-7: the config file is hand-editable - a mistyped `"apiUrl": 42`
+  // used to flow through as the raw number and crash every API call with
+  // a raw TypeError inside normalizeApiBase. Fail here with a clean,
+  // actionable config error instead.
+  const stored = getConfigStore().get('apiUrl');
+  if (typeof stored !== 'string') {
+    throw new SpycoreCliError(
+      `Invalid config: apiUrl must be a URL string, got: ${JSON.stringify(stored)}`,
+      EXIT_USER_ERROR,
+      'Fix apiUrl in your config file, or run `spycore config set apiUrl https://api.spycore.ai/api`.',
+    );
+  }
+  return stored;
 }
 
 /**
@@ -336,6 +349,16 @@ export function resolveApiUrl(flagValue?: string | undefined): string {
  * `/api/`-prefixed call sites happened to resolve.
  */
 export function normalizeApiBase(base: string): string {
+  // R3-7: defence-in-depth beside resolveApiUrl's check - a non-string
+  // base (hand-edited config reaching this directly) used to throw a raw
+  // `base.replace is not a function` TypeError from every API call.
+  if (typeof base !== 'string') {
+    throw new SpycoreCliError(
+      `Invalid config: apiUrl must be a URL string, got: ${JSON.stringify(base)}`,
+      EXIT_USER_ERROR,
+      'Fix apiUrl in your config file, or run `spycore config set apiUrl https://api.spycore.ai/api`.',
+    );
+  }
   const trimmed = base.replace(/\/+$/, '');
   return trimmed.endsWith('/api') ? trimmed : `${trimmed}/api`;
 }
@@ -539,7 +562,27 @@ export function clearStoredTokenInFile(): void {
  */
 export function getStoredMcpServers(): McpServerConfig[] {
   const raw = getConfigStore().get('mcpServers');
-  return Array.isArray(raw) ? raw : [];
+  if (!Array.isArray(raw)) return [];
+  // Per-entry validation, same pattern as getStoredProviders (R3-5): the
+  // config file is hand-editable, and one malformed row used to crash every
+  // MCP list with a raw TypeError (`n.name.localeCompare is not a function`
+  // in loadMcpServers' sort). Only the structurally unusable rows are
+  // skipped: a non-string/empty name, or non-string args (a non-string arg
+  // would throw inside redactFreeText / describeServerTarget downstream).
+  // A missing url (http) or command (stdio) is deliberately NOT filtered
+  // out: `mcp list` tolerates and renders those rows, and `mcp test` on
+  // them fails cleanly at connect time ("Failed to connect") - both are
+  // pinned behavior, not a crash.
+  return raw.filter(
+    (e): e is McpServerConfig =>
+      !!e &&
+      typeof e === 'object' &&
+      typeof (e as McpServerConfig).name === 'string' &&
+      (e as McpServerConfig).name.length > 0 &&
+      ((e as McpServerConfig).args === undefined ||
+        (Array.isArray((e as McpServerConfig).args) &&
+          ((e as McpServerConfig).args as unknown[]).every((a) => typeof a === 'string'))),
+  );
 }
 
 export function setStoredMcpServers(list: McpServerConfig[]): void {

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -290,6 +290,14 @@ describe('appendMemoryNote - /remember quick-add', () => {
     appendMemoryNote(root, 'remembered fact xyz');
     const mem = loadMemory({ cwd: root, home });
     expect(mem.text).toContain('remembered fact xyz');
+  });
+
+  // R3-15: the rewrite is atomic (tmp+rename) - no temp file is left
+  // behind in the project dir after a successful append.
+  test('an append leaves no temp file behind', () => {
+    appendMemoryNote(root, 'first note');
+    appendMemoryNote(root, 'second note');
+    expect(readdirSync(root).filter((f) => f.includes('.spycore-') && f.endsWith('.tmp'))).toEqual([]);
   });
 });
 

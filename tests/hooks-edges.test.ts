@@ -61,6 +61,19 @@ describe('hooks.json parsing', () => {
     expect(s.hooks[0]!.scope).toBe('user');
   });
 
+  // R3-14: a repo-supplied hooks.json over the 1 MB cap is skipped before
+  // reading, never read whole into memory.
+  test('an oversized hooks.json is ignored with a notice', async () => {
+    const big = JSON.stringify({
+      hooks: [{ event: 'pre-tool', command: `echo ${'x'.repeat(1_100_000)}` }],
+    });
+    expect(big.length).toBeGreaterThan(1_048_576);
+    writeFileSync(userHooksPath(), big);
+    const s = await loadHookSession(workDir);
+    expect(s.hooks).toHaveLength(0);
+    expect(s.notices.some((n) => n.includes('over 1 MB'))).toBe(true);
+  });
+
   test('a throwing approval callback skips the project hook', async () => {
     trustWorkspace(workDir);
     mkdirSync(join(workDir, '.spycore'), { recursive: true });

@@ -290,11 +290,14 @@ rl.on('line', (line) => {
     expect((r.error as Error)?.message).toMatch(/Failed to connect/);
   });
 
-  test('valid and invalid timeouts are both accepted', async () => {
+  // R3-6 / R2-9: `--timeout abc` used to silently default (the old test
+  // pinned that lenient behavior); strict-parse now errors loudly, like
+  // the rest of the CLI's numeric flags.
+  test('a valid timeout is accepted and an invalid one errors', async () => {
     await runMcp(['add', 'echo', '--', process.execPath, FIXTURE]);
     let r = await runMcp(['test', 'echo', '--timeout', '5']);
     expect(r.error).toBeUndefined();
     r = await runMcp(['test', 'echo', '--timeout', 'abc']);
-    expect(r.error).toBeUndefined();
+    expect((r.error as Error)?.message).toMatch(/Invalid --timeout/);
   });
 });

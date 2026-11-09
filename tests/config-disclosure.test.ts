@@ -48,6 +48,9 @@ const SENT = {
   mcpUrlPw: 'SENTINELx5xMCPURLPW',
   header: 'SENTINELx6xHEADER',
   envLiteral: 'SENTINELx7xENVLITERAL',
+  // R2-1: a secret-shaped literal in a stdio server's ARGS (not just its
+  // command) - the sink `mcp list --json` used to print it cleartext.
+  mcpArgsToken: 'sk-AAAAAAAAAAAAAAAAAAAA',
 } as const;
 
 /** Non-secret facts a user debugging a broken server must still be able to read. */
@@ -179,6 +182,9 @@ async function seedEverything(headers: Record<string, string>): Promise<void> {
     {
       name: 'localserver',
       command: 'some-server',
+      // R2-1: the corpus seeded a stdio server with a command and env and
+      // NO args, so the `mcp list --json` args leak could never falsify.
+      args: ['--token', SENT.mcpArgsToken],
       env: [{ name: NEEDED.envVarName }, { name: 'PASTED', value: SENT.envLiteral }],
     },
   ]);

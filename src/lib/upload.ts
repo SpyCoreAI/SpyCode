@@ -5,6 +5,7 @@ import FormData from 'form-data';
 import { Readable } from 'node:stream';
 import {
   EXIT_NETWORK_ERROR,
+  EXIT_SERVER_ERROR,
   EXIT_USER_ERROR,
   SpycoreCliError,
 } from './errors.js';
@@ -54,7 +55,8 @@ export interface UploadResult {
   id: string;
   url: string;
   size: number;
-  mime: string;
+  /** The server's MIME for the stored file; absent when the server omits it. */
+  mime?: string;
   filename: string;
   expiresAt?: string | null;
 }
@@ -219,14 +221,45 @@ export async function uploadFile(opts: UploadFileOpts): Promise<UploadResult> {
     url: string;
     size: number;
     filename: string;
-    mimeType: string;
+    mimeType?: string;
+    mime?: string;
     expiresAt?: string | null;
   };
+  // R3-13: a success envelope with null/malformed `data` used to return
+  // undefined fields (or crash on the dereference) - validate the shape
+  // before building the result. Only the fields the callers render are
+  // required (id, url, size, filename); the MIME field is display-only
+  // and the codebase is inconsistent about its name - the file-record
+  // schema says `mimeType`, but upload responses have been observed with
+  // `mime`, so accept either and tolerate its absence (as before).
+  if (
+    !data ||
+    typeof data !== 'object' ||
+    typeof data.id !== 'string' ||
+    data.id.length === 0 ||
+    typeof data.url !== 'string' ||
+    data.url.length === 0 ||
+    typeof data.size !== 'number' ||
+    typeof data.filename !== 'string' ||
+    data.filename.length === 0
+  ) {
+    throw new SpycoreCliError(
+      'Unexpected server response: upload succeeded but returned no file details.',
+      EXIT_SERVER_ERROR,
+      'Try again; if it persists, report it to SpyCore support.',
+    );
+  }
+  const mime =
+    typeof data.mimeType === 'string'
+      ? data.mimeType
+      : typeof data.mime === 'string'
+        ? data.mime
+        : undefined;
   return {
     id: data.id,
     url: data.url,
     size: data.size,
-    mime: data.mimeType,
+    mime,
     filename: data.filename,
     expiresAt: data.expiresAt ?? null,
   };

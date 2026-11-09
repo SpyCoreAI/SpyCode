@@ -274,4 +274,44 @@ describe('redact (4a2 pins: access keys, Map/Set, short bearer tokens)', () => {
     // Below the 8-char floor a bare word after Bearer is prose, not a token.
     expect(redactFreeText('Authorization: Bearer abcdefg')).toBe('Authorization: Bearer abcdefg');
   });
+
+  // R3-4: `modelMaxTokens` is a plain per-model cap, not a credential -
+  // the `token` substring in the pattern used to flag it, so `config get
+  // modelMaxTokens` printed ***redacted*** for the user's own setting.
+  test('R3-4 · modelMaxTokens is not a secret key', () => {
+    expect(isSecretKey('modelMaxTokens')).toBe(false);
+    const out = redactSecrets({ modelMaxTokens: { hermes: 4000 } }) as {
+      modelMaxTokens: Record<string, number>;
+    };
+    expect(out.modelMaxTokens).toEqual({ hermes: 4000 });
+    const dump = redactConfigDump({ modelMaxTokens: { hermes: 4000 } }) as {
+      modelMaxTokens: Record<string, number>;
+    };
+    expect(dump.modelMaxTokens).toEqual({ hermes: 4000 });
+  });
+
+  // R3-3: the hook/command-rule approval stores hold free-text command
+  // strings that can embed a credential - the bulk dump must screen them
+  // like the MCP command/args it already screens.
+  test('R3-3 · redactConfigDump screens hook commands and command-rule entries', () => {
+    const sentinel = `sk-${'A'.repeat(20)}`;
+    const dump = redactConfigDump({
+      approvedProjectHooks: [
+        { workspace: '/w', command: `curl -H "Authorization: Bearer ${sentinel}" https://x` },
+        { workspace: '/w', command: 'echo hi' },
+      ],
+      approvedProjectCommandRules: [
+        { workspace: '/w', kind: 'allow', entry: `run ${sentinel}` },
+        { workspace: '/w', kind: 'deny', entry: 'rm -rf /' },
+      ],
+    }) as {
+      approvedProjectHooks: Array<{ workspace: string; command: string }>;
+      approvedProjectCommandRules: Array<{ workspace: string; kind: string; entry: string }>;
+    };
+    const blob = JSON.stringify(dump);
+    expect(blob).not.toContain(sentinel);
+    expect(dump.approvedProjectHooks[0]?.workspace).toBe('/w');
+    expect(dump.approvedProjectHooks[1]?.command).toBe('echo hi');
+    expect(dump.approvedProjectCommandRules[1]?.entry).toBe('rm -rf /');
+  });
 });

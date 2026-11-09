@@ -112,4 +112,30 @@ describe('config secret redaction', () => {
     expect(out).toContain('https://api.spycore.ai/api');
     expect(out).not.toContain('***redacted***');
   });
+
+  // R3-2: the single-key get path used to print a credentialed apiUrl in
+  // cleartext while the bulk dump redacted it.
+  test('R3-2 · config get apiUrl redacts URL userinfo (text and --json)', async () => {
+    const { getConfigStore } = await import('../src/lib/config.js');
+    getConfigStore().set('apiUrl', 'https://user:s3cret-pass@api.spycore.ai/api');
+    await runConfig(['get', 'apiUrl']);
+    let out = stdout();
+    expect(out).not.toContain('s3cret-pass');
+    expect(out).toContain('https://***redacted***@api.spycore.ai/api');
+    const mark = stdoutChunks.length;
+    await runConfig(['get', 'apiUrl'], ['--json']);
+    out = stdoutChunks.slice(mark).join('');
+    expect(out).not.toContain('s3cret-pass');
+    expect(JSON.parse(out.trim()).apiUrl).toBe('https://***redacted***@api.spycore.ai/api');
+  });
+
+  // R3-4: `modelMaxTokens` is the user's own setting, not a secret.
+  test('R3-4 · config get modelMaxTokens shows the value, not ***redacted***', async () => {
+    const { getConfigStore } = await import('../src/lib/config.js');
+    getConfigStore().set('modelMaxTokens', { hermes: 4000 });
+    await runConfig(['get', 'modelMaxTokens']);
+    const out = stdout();
+    expect(out).not.toContain('***redacted***');
+    expect(out).toContain('4000');
+  });
 });

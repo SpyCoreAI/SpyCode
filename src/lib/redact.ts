@@ -24,6 +24,12 @@ const SECRET_KEY_PATTERN = /token|secret|password|apikey|api_key|accesskey|acces
 
 /** True if a config key name should have its value redacted in dumped output. */
 export function isSecretKey(key: string): boolean {
+  // R3-4: `modelMaxTokens` is a plain per-model cap, not a credential - but
+  // the `token` substring in the pattern below flags it, so `config get
+  // modelMaxTokens` printed `***redacted***` for the user's own setting.
+  // Exempt the known non-secret key by exact name; the pattern still screens
+  // every genuinely secret-shaped name (apiKey, bearerToken, …).
+  if (key === 'modelMaxTokens') return false;
   return key === '__token__' || SECRET_KEY_PATTERN.test(key);
 }
 
@@ -130,11 +136,12 @@ export function redactTemplatedValue(raw: string): string {
  * itself intact - the scheme, host, port and path are what a user debugging a
  * broken server is reading the dump FOR.
  *
- * A URL WITHOUT USERINFO IS RETURNED BYTE-IDENTICAL. `mcp add` and
- * `config set` both refuse credentials in a URL, so every config created
- * through the CLI is untouched by this; only a hand-edited file changes, and it
- * changes from disclosing to not disclosing. Returning `raw` unparsed for that
- * case also avoids URL normalisation quietly rewriting a user's value.
+ * A URL WITHOUT USERINFO IS RETURNED BYTE-IDENTICAL. `config set apiUrl`
+ * accepts a credentialed URL (its `coerceValue` checks the protocol only -
+ * it does NOT refuse userinfo), and a hand-edited file can hold one too, so
+ * this helper is the screen for both routes, not a backstop for a refusal
+ * that exists elsewhere. Returning `raw` unparsed for the no-userinfo case
+ * also avoids URL normalisation quietly rewriting a user's value.
  */
 export function redactUrlCredentials(raw: string): string {
   if (!raw.includes('@')) return raw;
@@ -294,5 +301,26 @@ export function redactConfigDump(value: unknown): unknown {
   if (typeof out.apiUrl === 'string') out.apiUrl = redactUrlCredentials(out.apiUrl);
   if (Array.isArray(out.providers)) out.providers = out.providers.map(redactProvider);
   if (Array.isArray(out.mcpServers)) out.mcpServers = out.mcpServers.map(redactMcpServer);
+  // R3-3: the two hook/command-rule approval stores hold free-text command
+  // strings that can embed a credential (e.g. a hook running
+  // `curl -H "Authorization: Bearer sk-…" …`). Same screen as the MCP
+  // command/args above - redactFreeText over the free-text field only,
+  // workspace/kind untouched.
+  if (Array.isArray(out.approvedProjectHooks)) {
+    out.approvedProjectHooks = out.approvedProjectHooks.map((e) => {
+      if (e === null || typeof e !== 'object' || Array.isArray(e)) return e;
+      const v = { ...(e as Record<string, unknown>) };
+      if (typeof v.command === 'string') v.command = redactFreeText(v.command);
+      return v;
+    });
+  }
+  if (Array.isArray(out.approvedProjectCommandRules)) {
+    out.approvedProjectCommandRules = out.approvedProjectCommandRules.map((e) => {
+      if (e === null || typeof e !== 'object' || Array.isArray(e)) return e;
+      const v = { ...(e as Record<string, unknown>) };
+      if (typeof v.entry === 'string') v.entry = redactFreeText(v.entry);
+      return v;
+    });
+  }
   return out;
 }

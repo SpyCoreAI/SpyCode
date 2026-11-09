@@ -318,7 +318,13 @@ async function runImageEdit(
       if (!data || typeof data !== 'object') continue;
       switch (data.type) {
         case 'image': {
-          const urls = Array.isArray(data.urls) ? (data.urls as string[]) : [];
+          // R3-13: non-string elements in `urls` used to reach
+          // downloadImage() as-is and crash with a raw TypeError - keep
+          // only strings; an empty result still fails cleanly downstream
+          // ("Image edit finished without returning a URL").
+          const urls = Array.isArray(data.urls)
+            ? data.urls.filter((u): u is string => typeof u === 'string')
+            : [];
           imageUrls.push(...urls);
           if (typeof data.revisedPrompt === 'string') {
             revisedPrompt = data.revisedPrompt;
@@ -567,7 +573,11 @@ export function registerImageCommand(program: Command): void {
             if (!data || typeof data !== 'object') continue;
             switch (data.type) {
               case 'image': {
-                const urls = Array.isArray(data.urls) ? (data.urls as string[]) : [];
+                // R3-13: see the edit path above - non-string `urls`
+                // elements are dropped, never passed to downloadImage().
+                const urls = Array.isArray(data.urls)
+                  ? data.urls.filter((u): u is string => typeof u === 'string')
+                  : [];
                 imageUrls.push(...urls);
                 if (typeof data.revisedPrompt === 'string') {
                   revisedPrompt = data.revisedPrompt;

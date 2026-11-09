@@ -18,7 +18,7 @@
  * trailer (Co-Authored-By / Generated-with / robot-emoji lines) even if a
  * model emits one against instructions. This is non-configurable.
  */
-import { api, streamRequest, type StreamEvent } from './api.js';
+import { api, streamRequest, unexpectedServerResponse, type StreamEvent } from './api.js';
 import { WIRE_MESSAGE_MAX_CHARS } from './attachments.js';
 import { EXIT_USER_ERROR, SpycoreCliError } from './errors.js';
 import type { ModelSlug } from './models.js';
@@ -280,6 +280,13 @@ export async function generateText(
     apiUrlOverride: opts.apiUrlOverride,
     body: { model: opts.model.toUpperCase() },
   });
+  // R3-13: a success envelope with null/malformed `data` used to reach
+  // `created.id` as a raw TypeError - and an undefined id was then dropped
+  // by JSON.stringify, so collectTurn sent a body without conversationId
+  // and the server 400'd. Fail cleanly here instead.
+  if (!created || typeof created !== 'object' || typeof created.id !== 'string' || created.id.length === 0) {
+    throw unexpectedServerResponse('conversation creation returned no id');
+  }
   const raw = await collectTurn(created.id, prompt, opts);
   const text = stripGenerationArtifacts(raw);
   if (!text) {

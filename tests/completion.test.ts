@@ -299,6 +299,27 @@ describe('powershell completion', () => {
     expect(out).toContain('[System.Management.Automation.CompletionResult]::new');
   });
 
+  // R3-11: a single-element pipeline result unwraps to a scalar STRING, so
+  // the token list must be forced to an array and the program name dropped
+  // only when a second element exists - otherwise bare `spycore <TAB>`
+  // indexed the string's chars and threw on [char].StartsWith.
+  test('R3-11 · token list is forced to an array before dropping the program name', () => {
+    const out = generatePowerShellCompletion();
+    expect(out).toContain('@($commandAst.CommandElements | ForEach-Object { $_.ToString() })');
+    expect(out).toContain('if ($tokens.Count -gt 1) { $tokens = @($tokens[1..($tokens.Count - 1)]) }');
+  });
+
+  // R3-12: after a trailing space the last token is complete, not the
+  // partial word - the walk must consume all tokens and the flag-value
+  // lookup must read the last token, not the second-to-last.
+  test('R3-12 · trailing space walks the full path and reads the last token as previous', () => {
+    const out = generatePowerShellCompletion();
+    expect(out).toContain("$trailingSpace = ($wordToComplete -eq '')");
+    expect(out).toContain('$walkCount = if ($trailingSpace) { $tokens.Count } else { $tokens.Count - 1 }');
+    expect(out).toContain('while ($i -lt $walkCount)');
+    expect(out).toContain("if ($trailingSpace) { $prev = $tokens[$tokens.Count - 1] }");
+  });
+
 });
 
 describe('bash completion double-quote escaping', () => {

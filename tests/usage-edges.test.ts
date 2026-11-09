@@ -179,4 +179,14 @@ describe('usage edges', () => {
     await runCli(['usage', '--format', 'yaml']);
     expect(allOut()).toContain('PRO');
   });
+
+  // R3-13: a success envelope with null `data` used to crash on
+  // `data.planDisplay` with a raw TypeError.
+  test('a null usage body fails cleanly instead of crashing', async () => {
+    responder = (url) => {
+      if (url.includes('/api/usage')) return jsonResp(200, { success: true, data: null });
+      throw new Error(`unexpected ${url}`);
+    };
+    await expect(runCli(['usage'])).rejects.toThrow(/Unexpected server response/);
+  });
 });

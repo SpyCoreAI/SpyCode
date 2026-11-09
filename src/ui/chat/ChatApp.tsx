@@ -868,10 +868,13 @@ export function ChatApp({ model: initialModel, effort: initialEffort, conversati
         }
         break;
       case 'save-usage':
-        pushNotice('warning', 'Usage: /save <file>');
+        pushNotice('warning', 'Usage: /save <file> [--force]');
         break;
       case 'saved':
         pushNotice('success', `Saved to ${outcome.path}`);
+        break;
+      case 'save-exists':
+        pushNotice('warning', `Refusing to overwrite ${outcome.path} - it already exists. Use /save <file> --force to overwrite.`);
         break;
       case 'save-error':
         pushNotice('error', `Save failed: ${outcome.message}`);

@@ -164,6 +164,29 @@ describe('uploadFile helper', () => {
     }
   });
 
+  // R3-13: a success envelope with null/malformed `data` used to return
+  // undefined fields (or crash on the dereference) instead of failing
+  // cleanly.
+  test('a success envelope with null data fails cleanly', async () => {
+    const file = join(workDir, 'ok.txt');
+    writeFileSync(file, Buffer.from('hello'));
+    responder = () => jsonResp(201, { success: true, data: null });
+    const { uploadFile } = await import('../src/lib/upload.js');
+    await expect(
+      uploadFile({ path: file, url: 'https://api.example.com/api/files/upload' }),
+    ).rejects.toThrow(/Unexpected server response/);
+  });
+
+  test('a success envelope with a malformed data shape fails cleanly', async () => {
+    const file = join(workDir, 'ok2.txt');
+    writeFileSync(file, Buffer.from('hello'));
+    responder = () => jsonResp(201, { success: true, data: { id: 42, url: null } });
+    const { uploadFile } = await import('../src/lib/upload.js');
+    await expect(
+      uploadFile({ path: file, url: 'https://api.example.com/api/files/upload' }),
+    ).rejects.toThrow(/Unexpected server response/);
+  });
+
   test('non-existent file is rejected before any network call', async () => {
     const { uploadFile } = await import('../src/lib/upload.js');
     let caught: unknown = null;

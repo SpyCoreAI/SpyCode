@@ -1,5 +1,5 @@
 import { Command, Option } from 'commander';
-import { api } from '../../lib/api.js';
+import { api, unexpectedServerResponse } from '../../lib/api.js';
 import { getOutputOptions, json, success } from '../../lib/output.js';
 import { readMultilineInput, readStdinPipe } from '../../lib/prompt.js';
 import {
@@ -76,6 +76,12 @@ export function registerMemoryAddCommand(program: Command): void {
             pinned: Boolean(opts.pinned),
           },
         });
+
+        // R3-13: a success envelope with null `data` used to crash on
+        // `created.id` with a raw TypeError on the text path.
+        if (!created || typeof created !== 'object' || typeof created.id !== 'string' || created.id.length === 0) {
+          throw unexpectedServerResponse('memory creation returned no id');
+        }
 
         if (getOutputOptions().json) {
           json(created);

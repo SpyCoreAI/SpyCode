@@ -6,8 +6,9 @@
  * stdio transport: newline-delimited JSON-RPC 2.0, stdout protocol-only.
  *
  * Agent-side methods implemented: initialize, authenticate, session/new,
- * session/prompt, and the session/cancel notification. Client-side methods we
- * call: session/update (notification) and session/request_permission.
+ * session/prompt, and the session/cancel + session/delete notifications.
+ * Client-side methods we call: session/update (notification) and
+ * session/request_permission.
  *
  * v1 capability decisions (each deliberate):
  *  - promptCapabilities: text-only (image/audio/embeddedContext false). Vision
@@ -175,6 +176,15 @@ export class AcpAgentServer {
     e.on('session/new', (params) => this.sessionNew(params));
     e.on('session/prompt', (params) => this.sessionPrompt(params));
     e.onNotification('session/cancel', (params) => this.sessionCancel(params));
+    // R3-9: the sessions map used to only ever grow - no delete path, so a
+    // long-lived `spycore acp` process accumulated one entry per session
+    // forever. A session/delete notification drops the entry (aborting a
+    // running turn first), and a transport close drops them all.
+    e.onNotification('session/delete', (params) => this.sessionDelete(params));
+    e.onClose(() => {
+      for (const session of this.sessions.values()) session.abort?.abort();
+      this.sessions.clear();
+    });
   }
 
   // ─────────────────────── initialize / authenticate ───────────────────────
@@ -282,6 +292,16 @@ export class AcpAgentServer {
     }
     session.cancelRequested = true;
     session.abort?.abort();
+  }
+
+  private sessionDelete(params: unknown): void {
+    const p = isObject(params) ? params : {};
+    const id = typeof p.sessionId === 'string' ? p.sessionId : '';
+    const session = this.sessions.get(id);
+    if (!session) return; // unknown session on a notification - nothing to answer
+    session.cancelRequested = true;
+    session.abort?.abort();
+    this.sessions.delete(id);
   }
 
   // ─────────────────────── prompt turn ───────────────────────

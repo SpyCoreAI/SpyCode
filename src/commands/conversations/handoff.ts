@@ -1,6 +1,6 @@
 import { Command, Option } from 'commander';
 import chalk from 'chalk';
-import { api } from '../../lib/api.js';
+import { api, unexpectedServerResponse } from '../../lib/api.js';
 import { isAuthenticated } from '../../lib/auth.js';
 import { getConfigStore } from '../../lib/config.js';
 import { EXIT_AUTH_ERROR, EXIT_USER_ERROR, SpycoreCliError, isSpycoreCliError } from '../../lib/errors.js';
@@ -201,6 +201,13 @@ export function registerConversationsHandoffCommand(program: Command): void {
             );
           }
           throw err;
+        }
+        // R3-13: a success envelope with null `data` used to crash on
+        // `convo.messages` with a raw TypeError. (The catch above maps only
+        // EXIT_USER_ERROR to "not found", so this server error passes
+        // through untouched.)
+        if (!convo || typeof convo !== 'object') {
+          throw unexpectedServerResponse('conversation fetch returned no conversation');
         }
         const messages = (Array.isArray(convo.messages) ? convo.messages : []).filter(
           (m): m is Message => !!m && typeof m === 'object',

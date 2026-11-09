@@ -9,6 +9,7 @@ import {
   planRewind,
 } from '../lib/agent/checkpoint.js';
 import { isResumable } from '../lib/agent/resume.js';
+import { relativeTime } from '../lib/files.js';
 import { getOutputOptions, json, print, success, warn } from '../lib/output.js';
 import { readSingleLineInput } from '../lib/prompt.js';
 import { EXIT_USER_ERROR, SpycoreCliError } from '../lib/errors.js';
@@ -20,16 +21,10 @@ interface RewindOpts {
   list?: boolean;
 }
 
-function relTime(iso: string): string {
-  const ts = Date.parse(iso);
-  if (Number.isNaN(ts)) return '';
-  const diff = Math.floor((Date.now() - ts) / 1000);
-  if (diff < 5) return 'just now';
-  if (diff < 60) return `${diff}s ago`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  return `${Math.floor(diff / 86400)}d ago`;
-}
+// Relative timestamps come from lib/files.js `relativeTime` (the same one
+// memory/list.ts, files/list.ts and conversations/list.ts use): the local
+// duplicate used to render a future timestamp as "just now" and an old one
+// as "400d ago" instead of "1y ago". Do not reintroduce a local copy.
 
 function truncate(s: string, n: number): string {
   return s.length > n ? `${s.slice(0, n - 1)}…` : s;
@@ -87,8 +82,12 @@ export function registerRewindCommand(program: Command): void {
         print('Recent agent sessions (newest first):');
         for (const s of sessions) {
           const resumeTag = isResumable(s) ? `  ${chalk.dim('↻ resumable')}` : '';
+          // R3-16: id and task come from the session journal on disk (a
+          // cloned repo can ship one) - sanitize them like the paths below
+          // already are. Sanitize BEFORE truncate, as conversations/list.ts
+          // does (clip after sanitize).
           print(
-            `  ${s.id}  ${chalk.dim(relTime(s.startedAt))}  ${s.changes.length} file${s.changes.length === 1 ? '' : 's'}  ${chalk.dim(truncate(s.task, 56))}${resumeTag}`,
+            `  ${sanitizeForDisplay(s.id)}  ${chalk.dim(relativeTime(s.startedAt))}  ${s.changes.length} file${s.changes.length === 1 ? '' : 's'}  ${chalk.dim(truncate(sanitizeForDisplay(s.task), 56))}${resumeTag}`,
           );
         }
         print(chalk.dim('Rewind the newest with `spycore rewind`, or a specific one with `--session <id>`.'));
@@ -124,7 +123,7 @@ export function registerRewindCommand(program: Command): void {
       // ── Preview (text mode) ───────────────────────────────────────────────
       if (!isJson) {
         print(
-          `Rewind session ${session.id} (${relTime(session.startedAt)}) - ${session.changes.length} change${session.changes.length === 1 ? '' : 's'}:`,
+          `Rewind session ${sanitizeForDisplay(session.id)} (${relativeTime(session.startedAt)}) - ${session.changes.length} change${session.changes.length === 1 ? '' : 's'}:`,
         );
         for (const s of steps) {
           // Paths recorded by the agent run - repo/agent-authored names.

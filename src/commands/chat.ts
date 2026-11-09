@@ -1105,10 +1105,13 @@ function renderOneShot(outcome: SlashOutcome, json: boolean): SlashResult {
       w('✓ Starting a new conversation…\n');
       return { consumed: true, newConvo: true };
     case 'save-usage':
-      w('Usage: /save <file>\n');
+      w('Usage: /save <file> [--force]\n');
       return { consumed: true };
     case 'saved':
       w(`✓ Saved to ${outcome.path}\n`);
+      return { consumed: true };
+    case 'save-exists':
+      w(`! Refusing to overwrite ${outcome.path} - it already exists. Use /save <file> --force to overwrite.\n`);
       return { consumed: true };
     case 'save-error':
       w(`! Save failed: ${outcome.message}\n`);

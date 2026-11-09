@@ -23,10 +23,15 @@
  * supported up to MAX_IMPORT_DEPTH levels, guarded against missing files, paths
  * escaping the file's scope, and cycles (a visited-set keyed on absolute path).
  */
+import { randomBytes } from 'node:crypto';
 import {
   existsSync,
+  lstatSync,
   readFileSync,
+  realpathSync,
+  renameSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
@@ -942,6 +947,43 @@ export function appendMemoryNote(cwd: string, note: string): QuickAddResult {
   if (body.length > 0 && !body.endsWith('\n')) body += '\n';
   // Single-line note: collapse internal newlines so it stays one bullet.
   body += `- ${trimmed.replace(/\s*\n\s*/g, ' ')}\n`;
-  writeFileSync(target, body, 'utf8');
+  // R3-15: atomic tmp+rename - a crash mid-write used to leave the user's
+  // living SPYCODE.md truncated with no backup. Same random-temp-name
+  // pattern as the agent tools' writeAtomic (a pid-only name is guessable
+  // by another local process).
+  writeMemoryAtomic(target, body);
   return { path: target, created };
+}
+
+/** Write `content` to `abs` atomically: temp file in the same dir + rename. */
+function writeMemoryAtomic(abs: string, content: string): void {
+  // tmp+rename replaces the PATH, not the file it points at: a symlinked
+  // SPYCODE.md must keep being written THROUGH the link (the old direct
+  // write did), and a dangling link must still fail ENOENT instead of
+  // silently becoming a regular file.
+  const dest = resolveWriteTarget(abs);
+  const tmp = `${dest}.spycore-${process.pid}-${randomBytes(8).toString('hex')}.tmp`;
+  try {
+    writeFileSync(tmp, content, 'utf8');
+    renameSync(tmp, dest);
+  } catch (err) {
+    try {
+      if (existsSync(tmp)) unlinkSync(tmp);
+    } catch {
+      /* ignore cleanup failure */
+    }
+    throw err;
+  }
+}
+
+/** Resolve a write target through a symlink; absent paths pass through. */
+function resolveWriteTarget(abs: string): string {
+  let st;
+  try {
+    st = lstatSync(abs);
+  } catch {
+    return abs; // absent: the atomic write creates it
+  }
+  if (!st.isSymbolicLink()) return abs;
+  return realpathSync(abs); // throws ENOENT for a dangling link, ELOOP for a loop
 }

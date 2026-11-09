@@ -1,5 +1,5 @@
 import { Command } from 'commander';
-import { api } from '../../lib/api.js';
+import { api, unexpectedServerResponse } from '../../lib/api.js';
 import { isAuthenticated } from '../../lib/auth.js';
 import { getConfigStore } from '../../lib/config.js';
 import {
@@ -51,6 +51,20 @@ export function registerWhoamiCommand(program: Command): void {
         });
       } catch (err) {
         fail(err);
+      }
+
+      // R3-13: a success envelope with null `data` used to crash on
+      // `me.email` in the cache write below with a raw TypeError, outside
+      // the try above.
+      if (
+        !me ||
+        typeof me !== 'object' ||
+        typeof me.email !== 'string' ||
+        typeof me.plan !== 'string' ||
+        typeof me.planDisplay !== 'string' ||
+        typeof me.id !== 'string'
+      ) {
+        throw unexpectedServerResponse('whoami returned no account');
       }
 
       // Cache for offline-friendly behaviour later. Always refreshed on

@@ -159,6 +159,23 @@ describe('mcp list / enable / disable / remove', () => {
     const { error } = await runMcp(['disable', 'p']);
     expect(error).toBeTruthy();
   });
+
+  // R3-5: one malformed row (non-string name) used to crash `mcp list`
+  // with `n.name.localeCompare is not a function`, exit 1. The row is
+  // skipped; the good row still lists.
+  test('R3-5 · a malformed stored row does not crash mcp list', async () => {
+    const { setStoredMcpServers, getStoredMcpServers } = await import('../src/lib/config.js');
+    await runMcp(['add', 'good', '--', 'node', 'a.js']);
+    setStoredMcpServers([
+      ...getStoredMcpServers(),
+      { name: 42, command: 'x' } as never,
+      { name: 'badargs', command: 'x', args: [42] } as never,
+    ]);
+    expect(getStoredMcpServers().map((s) => s.name)).toEqual(['good']);
+    const { stdout, error } = await runMcp(['list']);
+    expect(error).toBeUndefined();
+    expect(stdout).toContain('good');
+  });
 });
 
 describe('mcp add/list - remote (http) entries (1.9)', () => {
@@ -332,4 +349,16 @@ describe('mcp test - workspace trust gate (project scope)', () => {
     expect(error, 'the gate over-reached onto user scope').toBeUndefined();
     expect(stdout).toContain('mcp__fix__echo');
   }, 15000);
+
+  // R3-6 / R2-9: `--timeout abc` / `0` / `999` used to silently become
+  // 10 s / 10 s / 120 s. The rest of the CLI strict-parses; this flag now
+  // errors loudly instead.
+  test('R3-6 · mcp test --timeout rejects non-numeric and out-of-range input', async () => {
+    await runMcp(['add', 'fix', '--', process.execPath, FIXTURE]);
+    for (const bad of ['abc', '0', '999', '-5']) {
+      const { error } = await runMcp(['test', 'fix', '--timeout', bad]);
+      expect(error, `--timeout ${bad} must error`).toBeTruthy();
+      expect(String((error as Error).message)).toMatch(/Invalid --timeout/);
+    }
+  });
 });

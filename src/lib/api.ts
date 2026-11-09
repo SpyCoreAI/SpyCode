@@ -208,8 +208,7 @@ export async function apiRequest<T>(
   throw new SpycoreCliError(errMsg, EXIT_USER_ERROR);
 }
 
-function hintFor404(path: string): string {
-  if (/\/conversations\//.test(path)) {
+function hintFor404(path: string): string {  if (/\/conversations\//.test(path)) {
     return 'Conversation ID may be invalid. List with `spycore conversations list`.';
   }
   if (/\/files\//.test(path)) {
@@ -219,6 +218,21 @@ function hintFor404(path: string): string {
     return 'Memory ID may be invalid. List with `spycore memory list`.';
   }
   return 'Double-check the ID - list the resource type with `spycore <command> list`.';
+}
+
+/**
+ * R3-13: a success envelope with a null/malformed `data` used to sail
+ * through apiRequest and crash each caller with a raw TypeError on the
+ * first dereference. Callers that need a field validate the shape and
+ * throw this instead - a clean "unexpected server response" error, never
+ * an unhandled TypeError.
+ */
+export function unexpectedServerResponse(what: string): SpycoreCliError {
+  return new SpycoreCliError(
+    `Unexpected server response: ${what}.`,
+    EXIT_SERVER_ERROR,
+    'The server answered successfully but in a shape the CLI did not expect. Try again; if it persists, report it to SpyCore support.',
+  );
 }
 
 /**

@@ -288,6 +288,28 @@ describe('acp session/new validation', () => {
     const resp = await client.request('session/prompt', { sessionId: id, prompt: [] });
     expect(resp.error?.code).toBe(-32602);
   });
+
+  // R3-9: the sessions map used to only ever grow - no delete path, so a
+  // long-lived `spycore acp` process accumulated one entry per session
+  // forever. A session/delete notification drops the entry: a prompt on
+  // the deleted id is unknown afterwards. (Notifications are async - the
+  // prompt round-trip below is the synchronisation point.)
+  test('session/delete drops the session; a later prompt is unknown', async () => {
+    startServer(new StubProvider([]));
+    const id = await newSession();
+    client.notify('session/delete', { sessionId: id });
+    const resp = await client.request('session/prompt', { sessionId: id, prompt: promptBlocks('hi') });
+    expect(resp.error?.code).toBe(-32602);
+    expect(String(resp.error?.message ?? '')).toMatch(/unknown sessionId/);
+  });
+
+  test('session/delete for an unknown id is a silent no-op', async () => {
+    startServer(new StubProvider([]));
+    const id = await newSession();
+    client.notify('session/delete', { sessionId: 'sess_ghost' });
+    const resp = await client.request('session/prompt', { sessionId: id, prompt: promptBlocks('hi') });
+    expect(resp.error).toBeUndefined();
+  });
 });
 
 describe('acp prompt turn - update sequence', () => {

@@ -346,6 +346,33 @@ describe('control + save', () => {
     const out = await runSlashCommand('save', [join(projectDir, 'x.md')], mkCtx());
     expect(out.kind).toBe('save-error');
   });
+
+  // R3-10: /save used to silently overwrite an existing file. Like
+  // `conversations export`, it now refuses without --force.
+  test('save refuses to overwrite an existing file without --force', async () => {
+    responder = (url) => {
+      if (url.includes('/conversations/cnv_x')) {
+        return jsonResp(200, {
+          success: true,
+          data: {
+            id: 'cnv_x',
+            title: 'Demo',
+            model: 'HERMES',
+            messages: [{ role: 'user', content: 'hi', createdAt: new Date().toISOString() }],
+          },
+        });
+      }
+      throw new Error(`unexpected ${url}`);
+    };
+    const file = join(projectDir, 'keep.md');
+    writeFileSync(file, 'precious contents', 'utf8');
+    const refused = await runSlashCommand('save', [file], mkCtx());
+    expect(refused).toMatchObject({ kind: 'save-exists', path: file });
+    expect(readFileSync(file, 'utf8')).toBe('precious contents');
+    const forced = await runSlashCommand('save', [file, '--force'], mkCtx());
+    expect(forced).toMatchObject({ kind: 'saved', path: file });
+    expect(readFileSync(file, 'utf8')).toContain('# Demo');
+  });
 });
 
 // ── the SHIPPING (Ink) seam routes through the SAME core ────────────────────────

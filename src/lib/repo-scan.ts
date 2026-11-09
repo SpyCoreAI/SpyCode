@@ -64,6 +64,8 @@ const README_SUMMARY_CAP = 500;
  * pure waste (and a hostile README could OOM the scan).
  */
 const README_READ_CAP_BYTES = 64 * 1024;
+/** Cap on bytes read from package.json (R3-14) - see readPackageInfo. */
+const PACKAGE_JSON_READ_CAP_BYTES = 1_048_576;
 
 /**
  * Read at most `maxBytes` from the head of a file. Returns null when the
@@ -231,6 +233,12 @@ function readPackageInfo(cwd: string): PackageInfo | undefined {
   const pkgPath = join(cwd, 'package.json');
   if (!existsSync(pkgPath)) return undefined;
   try {
+    // R3-14: stat-and-skip above the cap BEFORE reading - package.json is
+    // repo-supplied, and it used to be read whole with no cap (the README
+    // in the same file got a 64 KB cap; package.json did not). 1 MB is far
+    // above any real package.json; oversized files degrade to "no package
+    // info", like an unreadable one.
+    if (statSync(pkgPath).size > PACKAGE_JSON_READ_CAP_BYTES) return undefined;
     const pj = JSON.parse(readFileSync(pkgPath, 'utf8')) as {
       name?: unknown;
       description?: unknown;

@@ -22,7 +22,8 @@
  * targets the end-user's repo - nothing here ever writes into the CLI's own
  * source tree.
  */
-import { existsSync, statSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { existsSync, lstatSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { countFileLines, readFilePrefix, readFileSuffix, scanRepo, type RepoScan } from './repo-scan.js';
 import { loadSecretGuardSync } from './agent/secrets.js';
@@ -372,8 +373,44 @@ export async function refreshCodebaseGuide(cwd: string): Promise<GuideRefreshRes
   const scan = await scanRepo(cwd);
   let content = generateCodebaseGuide(scan);
   if (oldNotes) content = replaceNotesSection(content, oldNotes);
-  writeFileSync(path, content, 'utf8');
+  // R3-15: atomic tmp+rename - a crash mid-write used to leave the guide
+  // (including the preserved manual-notes section) truncated. Same
+  // random-temp-name pattern as the agent tools' writeAtomic.
+  writeGuideAtomic(path, content);
   return { path, existed, preservedNotes: oldNotes !== null };
+}
+
+/** Write `content` to `abs` atomically: temp file in the same dir + rename. */
+function writeGuideAtomic(abs: string, content: string): void {
+  // tmp+rename replaces the PATH, not the file it points at: a symlinked
+  // guide must keep being written THROUGH the link (the old direct write
+  // did), and a dangling link must still fail ENOENT instead of silently
+  // becoming a regular file.
+  const dest = resolveWriteTarget(abs);
+  const tmp = `${dest}.spycore-${process.pid}-${randomBytes(8).toString('hex')}.tmp`;
+  try {
+    writeFileSync(tmp, content, 'utf8');
+    renameSync(tmp, dest);
+  } catch (err) {
+    try {
+      if (existsSync(tmp)) unlinkSync(tmp);
+    } catch {
+      /* ignore cleanup failure */
+    }
+    throw err;
+  }
+}
+
+/** Resolve a write target through a symlink; absent paths pass through. */
+function resolveWriteTarget(abs: string): string {
+  let st;
+  try {
+    st = lstatSync(abs);
+  } catch {
+    return abs; // absent: the atomic write creates it
+  }
+  if (!st.isSymbolicLink()) return abs;
+  return realpathSync(abs); // throws ENOENT for a dangling link, ELOOP for a loop
 }
 
 export interface GuideStatus {

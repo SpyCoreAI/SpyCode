@@ -1,5 +1,6 @@
 import { Command, Option } from 'commander';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { existsSync, lstatSync, mkdirSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { api } from '../../lib/api.js';
 import { json, success, print } from '../../lib/output.js';
@@ -127,10 +128,12 @@ export function registerConversationsExportCommand(program: Command): void {
           }
           // Writing to a FILE, not the terminal - keep the bytes verbatim
           // (the display sanitizer is display-only by contract; sanitizing
-          // here would corrupt an exported file).
+          // here would corrupt an exported file). R3-15: atomic
+          // tmp+rename, so a crash mid-write cannot leave a truncated
+          // export behind.
           try {
             mkdirSync(dirname(opts.output), { recursive: true });
-            writeFileSync(opts.output, body, 'utf8');
+            writeExportAtomic(opts.output, body);
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
             throw new SpycoreCliError(
@@ -151,4 +154,37 @@ export function registerConversationsExportCommand(program: Command): void {
         }
       },
     );
+}
+
+/** Write `content` to `abs` atomically: temp file in the same dir + rename. */
+function writeExportAtomic(abs: string, content: string): void {
+  // tmp+rename replaces the PATH, not the file it points at: a symlinked
+  // output must keep being written THROUGH the link (the old direct write
+  // did), and a dangling link must still fail ENOENT instead of silently
+  // becoming a regular file.
+  const dest = resolveWriteTarget(abs);
+  const tmp = `${dest}.spycore-${process.pid}-${randomBytes(8).toString('hex')}.tmp`;
+  try {
+    writeFileSync(tmp, content, 'utf8');
+    renameSync(tmp, dest);
+  } catch (err) {
+    try {
+      if (existsSync(tmp)) unlinkSync(tmp);
+    } catch {
+      /* ignore cleanup failure */
+    }
+    throw err;
+  }
+}
+
+/** Resolve a write target through a symlink; absent paths pass through. */
+function resolveWriteTarget(abs: string): string {
+  let st;
+  try {
+    st = lstatSync(abs);
+  } catch {
+    return abs; // absent: the atomic write creates it
+  }
+  if (!st.isSymbolicLink()) return abs;
+  return realpathSync(abs); // throws ENOENT for a dangling link, ELOOP for a loop
 }

@@ -1,7 +1,7 @@
 import os from 'node:os';
 import { Command } from 'commander';
 import { createSpinner } from '../../lib/spinner.js';
-import { api } from '../../lib/api.js';
+import { api, unexpectedServerResponse } from '../../lib/api.js';
 import { setToken } from '../../lib/auth.js';
 import { openInBrowser } from '../../lib/browser.js';
 import {
@@ -66,6 +66,21 @@ export function registerLoginCommand(program: Command): void {
         });
       } catch (err) {
         fail(err);
+      }
+
+      // R3-13: a success envelope with null `data` used to crash on
+      // `init.approveUrl` with a raw TypeError, outside the try above.
+      // Both fields are used below (approveUrl is printed/opened,
+      // pollToken drives the poll loop), so both are validated.
+      if (
+        !init ||
+        typeof init !== 'object' ||
+        typeof init.approveUrl !== 'string' ||
+        init.approveUrl.length === 0 ||
+        typeof init.pollToken !== 'string' ||
+        init.pollToken.length === 0
+      ) {
+        throw unexpectedServerResponse('login init returned no approve URL');
       }
 
       if (getOutputOptions().json) {

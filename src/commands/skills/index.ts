@@ -19,7 +19,7 @@ import {
   type SkillManifestEntry,
   type SyncState,
 } from '../../lib/skills-sync.js';
-import { api } from '../../lib/api.js';
+import { api, unexpectedServerResponse } from '../../lib/api.js';
 import { isAuthenticated } from '../../lib/auth.js';
 import { EXIT_AUTH_ERROR, EXIT_USER_ERROR, SpycoreCliError } from '../../lib/errors.js';
 import { formatOption, getOutputOptions, info, json, print, resolveFormat, success, warn } from '../../lib/output.js';
@@ -148,6 +148,11 @@ function registerSync(group: Command): void {
       }
 
       const manifest = await api.get<ManifestResp>('/v1/skills/manifest', { apiUrlOverride });
+      // R3-13 (same site as the content check below): a null `data` here
+      // used to crash on `manifest.skills` with a raw TypeError.
+      if (!manifest || typeof manifest !== 'object') {
+        throw unexpectedServerResponse('skills manifest fetch returned no manifest');
+      }
       const entries = Array.isArray(manifest.skills) ? manifest.skills : [];
       const state = readSyncState();
       const plan = planSkillSync(entries, state, syncedSkillExists, Boolean(opts.force));
@@ -169,6 +174,18 @@ function registerSync(group: Command): void {
           const resp = await api.get<ContentResp>(`/v1/skills/${encodeURIComponent(dl.name)}/content`, {
             apiUrlOverride,
           });
+          // R3-13: a success envelope with null/malformed `data` used to
+          // crash inside createHash().update() with a raw TypeError (the
+          // loop is in try/finally with no catch, so it propagated). A
+          // bad content body is a per-skill failure like a hash mismatch:
+          // refuse it, warn, and let the next sync retry it.
+          if (!resp || typeof resp !== 'object' || typeof resp.content !== 'string') {
+            failed += 1;
+            warn(
+              `skill "${sanitizeForDisplay(dl.name)}" returned an unexpected response - refused to install; it will be retried on the next sync`,
+            );
+            continue;
+          }
           // Hash the bytes actually received, and compare against the
           // manifest's claim. The old code recorded `meta.sha256`
           // verbatim - a tampered or truncated download was then ledgered

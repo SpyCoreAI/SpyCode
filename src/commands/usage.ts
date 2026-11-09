@@ -1,5 +1,5 @@
 import { Command, Option } from 'commander';
-import { api } from '../lib/api.js';
+import { api, unexpectedServerResponse } from '../lib/api.js';
 import { formatOption, json, print, resolveFormat, warn, writeFormatted } from '../lib/output.js';
 import { MODEL_DISPLAY, isModelSlug } from '../lib/models.js';
 import { sanitizeForDisplay } from '../lib/sanitize-display.js';
@@ -111,6 +111,14 @@ export function registerUsageCommand(program: Command): void {
       const data = await api.get<UsageResp>('/api/usage', {
         apiUrlOverride: parentOpts.apiUrl,
       });
+
+      // R3-13: a success envelope with null `data` used to crash on
+      // `data.planDisplay` with a raw TypeError. Every field below is
+      // optional and already degrades to an omitted section, so only the
+      // envelope itself needs validating.
+      if (!data || typeof data !== 'object') {
+        throw unexpectedServerResponse('usage fetch returned no usage data');
+      }
 
       const fmt = resolveFormat(opts.format);
       if (fmt === 'json') {

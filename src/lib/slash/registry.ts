@@ -24,7 +24,7 @@
  *    updates its React state). The core only signals `new-conversation`.
  *  - /clear, /exit - pure view/loop control; the core only recognises them.
  */
-import { writeFileSync } from 'node:fs';
+import { existsSync, writeFileSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
 import { resolveModelSlug, type ModelSlug } from '../models.js';
 import {
@@ -89,7 +89,7 @@ export const SLASH_HELP: readonly SlashHelpEntry[] = [
   { command: '/mode [ask|plan|agent]', summary: 'show or switch the session mode (Shift+Tab cycles)' },
   { command: '/compact', summary: 'condense this conversation - older messages are archived (recoverable) behind a summary' },
   { command: '/new', summary: 'start a new conversation' },
-  { command: '/save <file>', summary: 'export this conversation as Markdown' },
+  { command: '/save <file>', summary: 'export this conversation as Markdown (refuses to overwrite without --force)' },
   { command: '/clear', summary: 'clear the visible session' },
   { command: '/exit', summary: 'quit the chat session' },
 ];
@@ -188,6 +188,7 @@ export type SlashOutcome =
   // /save
   | { kind: 'save-usage' }
   | { kind: 'saved'; path: string }
+  | { kind: 'save-exists'; path: string }
   | { kind: 'save-error'; message: string }
   // /clear, /exit - control signals.
   | { kind: 'clear' }
@@ -389,12 +390,18 @@ export async function runSlashCommand(
     case 'save': {
       const file = args[0];
       if (!file) return { kind: 'save-usage' };
+      // R3-10: the same --force discipline as `conversations export` - a
+      // typo'd filename used to silently destroy whatever the target file
+      // held. `--force` is an arg token after the filename
+      // (`/save notes.md --force`); the file itself is always args[0].
+      const force = args.includes('--force');
       try {
+        const path = resolvePath(file);
+        if (existsSync(path) && !force) return { kind: 'save-exists', path };
         const convo = await api.get<ConversationExportResp>(
           `/conversations/${encodeURIComponent(ctx.conversationId)}`,
           { apiUrlOverride: ctx.apiUrl },
         );
-        const path = resolvePath(file);
         writeFileSync(path, conversationToMarkdown(convo), 'utf8');
         return { kind: 'saved', path };
       } catch (err) {

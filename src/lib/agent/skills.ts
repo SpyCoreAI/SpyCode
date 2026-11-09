@@ -36,6 +36,14 @@ export interface DiscoveredSkill {
 export const SKILLS_CATALOG_CAP = 4096;
 /** Cap on a single catalog description line. */
 const DESCRIPTION_CAP = 160;
+/** Cap on bytes read from one SKILL.md during discovery. A skill file is
+ * repository-supplied; only the parsed name/description are ever used here
+ * (the body is capped again at LOAD_SKILL_BODY_CAP on load), so reading a
+ * multi-hundred-MB file whole was pure waste - measured at 503.8 MB peak
+ * RSS for a 200 MB SKILL.md on `skills list`. Same 1 MB stat-and-skip
+ * pattern the repo-markdown readers already use (pass-1 L17). */
+export const SKILL_FILE_READ_CAP_BYTES = 1_048_576;
+
 /**
  * Cap on one skill body as returned by `load_skill`. A skill file is
  * repository-supplied content; without a cap a multi-megabyte SKILL.md rides
@@ -156,6 +164,12 @@ function scanRoot(root: string, source: 'project' | 'user'): DiscoveredSkill[] {
     try {
       if (!existsSync(file) || !statSync(file).isFile()) continue;
       if (isSecret(file)) continue;
+      // R3-14: stat-and-skip above the cap BEFORE reading - the whole
+      // file used to be read into memory first and only truncated
+      // afterwards (LOAD_SKILL_BODY_CAP), so a 200 MB SKILL.md cost
+      // 503.8 MB peak RSS on `skills list`. Oversized skills are skipped
+      // like unreadable ones; discovery never throws.
+      if (statSync(file).size > SKILL_FILE_READ_CAP_BYTES) continue;
       const raw = readFileSync(file, 'utf8');
       const parsed = parseSkillFile(raw, d.name);
       out.push({ name: parsed.name, description: parsed.description, source, path: file });

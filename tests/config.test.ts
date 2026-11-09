@@ -117,3 +117,26 @@ describe('token storage helpers stay out of the schema', () => {
     }
   });
 });
+
+// R3-7: a hand-edited config scalar of the wrong type used to crash at
+// resolve time with a raw TypeError (`raw.toLowerCase is not a function`,
+// `base.replace is not a function`). It now fails with a clean,
+// actionable config error.
+describe('R3-7 · hand-edited config scalars fail cleanly', () => {
+  test('a numeric defaultModel throws a clean config error', async () => {
+    const { getConfigStore } = await import('../src/lib/config.js');
+    const { resolveModelSlug } = await import('../src/lib/models.js');
+    getConfigStore().set('defaultModel', 42 as never);
+    expect(() => resolveModelSlug(undefined)).toThrow(/Invalid config: defaultModel/);
+    // An explicit input bypasses the stored value entirely.
+    expect(resolveModelSlug('minos')).toBe('minos');
+  });
+
+  test('a numeric apiUrl throws a clean config error', async () => {
+    const { getConfigStore, normalizeApiBase, resolveApiUrl } = await import('../src/lib/config.js');
+    getConfigStore().set('apiUrl', 42 as never);
+    expect(() => resolveApiUrl()).toThrow(/Invalid config: apiUrl/);
+    expect(() => normalizeApiBase(42 as never)).toThrow(/Invalid config: apiUrl/);
+    expect(normalizeApiBase('https://api.spycore.ai')).toBe('https://api.spycore.ai/api');
+  });
+});

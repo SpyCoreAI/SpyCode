@@ -252,3 +252,24 @@ describe('appendCappedText (generation output cap)', () => {
     }
   });
 });
+
+// R3-13: a success envelope with null `data` from conversation creation
+// used to reach `created.id` as a raw TypeError (and an undefined id was
+// then dropped by JSON.stringify, so the turn request went out without a
+// conversationId and the server 400'd). It now fails cleanly.
+describe('generateText - malformed server response (R3-13)', () => {
+  test('a null conversation-creation body throws Unexpected server response', async () => {
+    const { freshConfigDir } = await import('./helpers.js');
+    freshConfigDir();
+    const { generateText } = await import('../src/lib/git-generate.js');
+    const { api } = await import('../src/lib/api.js');
+    const post = vi.spyOn(api, 'post').mockResolvedValue(null as never);
+    try {
+      await expect(generateText('do a thing', { model: 'hermes' })).rejects.toThrow(
+        /Unexpected server response/,
+      );
+    } finally {
+      post.mockRestore();
+    }
+  });
+});

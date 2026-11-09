@@ -24,6 +24,7 @@ import {
   untrustWorkspace,
 } from '../../lib/config.js';
 import { formatOption, getOutputOptions, info, json, print, resolveFormat, success, warn } from '../../lib/output.js';
+import { parseStrictIntFlag } from '../../lib/numeric-flags.js';
 import { confirmYesNo } from '../../lib/prompt.js';
 import { accessSync, constants, statSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
@@ -268,8 +269,11 @@ function registerList(group: Command): void {
                 }
               : {
                   // stdio rows keep the exact pre-1.9 keys (backward compat).
+                  // R2-1: the command is built through describeServerTarget,
+                  // as the text table already does - the raw join used to
+                  // print a literal token in args cleartext from --json.
                   name: s.name,
-                  command: [s.command, ...(s.args ?? [])].join(' '),
+                  command: describeServerTarget(s),
                   scope: s.scope,
                   enabled: s.enabled,
                   env: (s.env ?? []).map(describeEnvVar),
@@ -507,7 +511,11 @@ function registerTest(group: Command): void {
           'Run `spycore mcp trust` in this directory to enable it (project servers run local commands or send requests with your credentials - only trust repositories you know).',
         );
       }
-      const timeoutMs = Math.max(1, Math.min(120, Number(opts.timeout ?? 10) || 10)) * 1000;
+      // R3-6 / R2-9: strict-parse like the rest of the CLI - `--timeout
+      // abc` / `0` / `999` used to silently become 10 s / 120 s instead of
+      // erroring, so a typo'd timeout changed the test's timing with no
+      // indication why.
+      const timeoutMs = parseStrictIntFlag(opts.timeout, 'timeout', 1, 120, 10) * 1000;
       info(`Connecting to "${trimmed}" → ${sanitizeForDisplay(describeServerTarget(server))}…`);
       let client;
       try {

@@ -110,6 +110,8 @@ const PAYLOAD_ARGS_CAP = 2_000;
 const PAYLOAD_SUMMARY_CAP = 500;
 /** Cap on collected hook stdout/stderr. */
 const OUTPUT_CAP = 16_000;
+/** Cap on bytes read from one hooks.json file (R3-14). */
+const HOOK_FILE_READ_CAP_BYTES = 1_048_576;
 /** Cap on the reason / stdout tail shown to the user. */
 const NOTICE_CAP = 500;
 /**
@@ -167,6 +169,14 @@ function readHookFile(
   let raw: string;
   try {
     if (!existsSync(path) || !statSync(path).isFile()) return [];
+    // R3-14: stat-and-skip above the cap BEFORE reading - project
+    // hooks.json is repo-supplied, and the whole file used to be read
+    // into memory unboundedly. Same 1 MB pattern as the repo-markdown
+    // readers (pass-1 L17).
+    if (statSync(path).size > HOOK_FILE_READ_CAP_BYTES) {
+      notices.push(`Hooks: ${label} is over 1 MB - ignored.`);
+      return [];
+    }
     raw = readFileSync(path, 'utf8');
   } catch {
     return [];

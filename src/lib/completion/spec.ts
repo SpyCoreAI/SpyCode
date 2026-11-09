@@ -243,7 +243,7 @@ export const COMMAND_SPEC: CommandSpec = {
           description: 'List your recent conversations',
           options: [
             { name: '--page', takesValue: true, description: 'Server page number (1-indexed, 20 rows per page)' },
-            { name: '--limit', takesValue: true, description: 'Client-side cap on rows printed (1-20)' },
+            { name: '--limit', takesValue: true, description: 'Client-side cap on rows printed (1-100)' },
             { name: '--format', takesValue: true, values: FORMAT_VALUES, description: 'Output format' },
           ],
         },

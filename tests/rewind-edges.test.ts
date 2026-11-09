@@ -84,11 +84,46 @@ describe('rewind --list', () => {
     expect(allOut(r)).toContain('No agent sessions recorded for this directory.');
   });
 
-  test('a fresh session lists as just now', async () => {
+  test('a fresh session lists with a seconds-ago time', async () => {
+    // R3-17: the local relTime duplicate rendered this as 'just now'; the
+    // shared lib/files.js relativeTime renders seconds, so the pin moves
+    // to the shared implementation's output.
     seed('do a thing', [{ path: fp('a.txt'), op: 'create', before: null, after: 'A\n' }]);
     const r = await runRewind(['--list']);
     expect(r.error).toBeUndefined();
-    expect(allOut(r)).toContain('just now');
+    expect(allOut(r)).toMatch(/\d+s ago/);
+  });
+
+  // R3-17: the shared relativeTime renders a future timestamp as "in …"
+  // (the local copy said "just now") and an old one with year units
+  // (the local copy capped at days: "400d ago").
+  test('a future session lists as "in …", a 400-day session as "1y ago"', async () => {
+    const future = seed('future session', [{ path: fp('a.txt'), op: 'create', before: null, after: 'A\n' }]);
+    const futureFile = join(ckptDir(), `${future}.json`);
+    const futureSession = JSON.parse(readFileSync(futureFile, 'utf8'));
+    futureSession.startedAt = new Date(Date.now() + 5 * 60_000).toISOString();
+    writeFileSync(futureFile, JSON.stringify(futureSession));
+    const old = seed('old session', [{ path: fp('b.txt'), op: 'create', before: null, after: 'B\n' }]);
+    const oldFile = join(ckptDir(), `${old}.json`);
+    const oldSession = JSON.parse(readFileSync(oldFile, 'utf8'));
+    oldSession.startedAt = new Date(Date.now() - 400 * 86400_000).toISOString();
+    writeFileSync(oldFile, JSON.stringify(oldSession));
+    const r = await runRewind(['--list']);
+    expect(r.error).toBeUndefined();
+    expect(allOut(r)).toContain('in 5m');
+    expect(allOut(r)).toContain('1y ago');
+    expect(allOut(r)).not.toContain('400d ago');
+  });
+
+  // R3-16: the session id and task come from the journal on disk, which a
+  // cloned repo can ship - ANSI escapes in them must not reach the
+  // terminal unsanitized.
+  test('a task carrying ANSI escapes is sanitized in --list', async () => {
+    seed('do a thing \x1b[31mRED\x1b[0m now', [{ path: fp('a.txt'), op: 'create', before: null, after: 'A\n' }]);
+    const r = await runRewind(['--list']);
+    expect(r.error).toBeUndefined();
+    expect(allOut(r)).not.toContain('\x1b[31m');
+    expect(allOut(r)).toContain('RED');
   });
 
   test('a long task is truncated in the list', async () => {

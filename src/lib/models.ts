@@ -42,10 +42,26 @@ export function isModelSlug(value: string): value is ModelSlug {
  * unrecognised slug (lists the valid chat models).
  */
 export function resolveModelSlug(input: string | undefined): ModelSlug {
-  const raw =
-    (input && input.trim().length > 0
-      ? input.trim()
-      : getConfigStore().get('defaultModel')) || 'hermes';
+  // R3-7: the config file is hand-editable - a mistyped
+  // `"defaultModel": 42` used to crash here with a raw
+  // `raw.toLowerCase is not a function` TypeError. A non-string stored
+  // value fails with a clean, actionable config error instead. (An
+  // explicit input bypasses the stored value entirely, so it is only
+  // validated when it is actually used.)
+  let raw: string;
+  if (input && input.trim().length > 0) {
+    raw = input.trim();
+  } else {
+    const stored = getConfigStore().get('defaultModel');
+    if (stored !== undefined && typeof stored !== 'string') {
+      throw new SpycoreCliError(
+        `Invalid config: defaultModel must be a model name string, got: ${JSON.stringify(stored)}`,
+        EXIT_USER_ERROR,
+        'Fix defaultModel in your config file, or run `spycore config set defaultModel hermes`.',
+      );
+    }
+    raw = (stored && stored.trim().length > 0 ? stored.trim() : '') || 'hermes';
+  }
   const slug = raw.toLowerCase();
   if (!isModelSlug(slug)) {
     throw new SpycoreCliError(
