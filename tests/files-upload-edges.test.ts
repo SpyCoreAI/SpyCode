@@ -241,4 +241,51 @@ describe('files upload edges', () => {
     expect(caught).not.toBeNull();
     expect(caught.message).toMatch(/server blew up/);
   });
+
+  test('a Free plan rejection names Starter, not Pro, as the entry tier', async () => {
+    const file = join(workDir, 'tiny.txt');
+    writeFileSync(file, 'x');
+    responder = okUploadResponder('FREE', {
+      id: 'f_1',
+      url: 'https://x/f_1',
+      size: 1,
+      mime: 'text/plain',
+      filename: 'tiny.txt',
+    });
+    const caught = (await runCli(['upload', file])) as Error;
+    expect(caught?.message).toMatch(/require a paid plan \(Starter and above\)/);
+    expect(caught?.message).not.toContain('Pro plans and above');
+  });
+
+  test('a Starter plan upload succeeds (the plan table allows 20 MB)', async () => {
+    const file = join(workDir, 'tiny.txt');
+    writeFileSync(file, 'x');
+    responder = okUploadResponder('STARTER', {
+      id: 'f_1',
+      url: 'https://x/f_1',
+      size: 1,
+      mime: 'text/plain',
+      filename: 'tiny.txt',
+    });
+    const caught = await runCli(['upload', file]);
+    expect(caught).toBeNull();
+    expect(allOut()).toContain('Uploaded tiny.txt');
+  });
+
+  test('a garbage expiresAt warns instead of crashing after a successful upload', async () => {
+    const file = join(workDir, 'tiny.txt');
+    writeFileSync(file, 'x');
+    responder = okUploadResponder('PRO', {
+      id: 'f_1',
+      url: 'https://x/f_1',
+      size: 1,
+      mime: 'text/plain',
+      filename: 'tiny.txt',
+      expiresAt: 'not-a-date',
+    });
+    const caught = await runCli(['upload', file]);
+    expect(caught).toBeNull();
+    expect(allOut()).toContain('Uploaded tiny.txt');
+    expect(allOut()).toContain('could not be parsed');
+  });
 });

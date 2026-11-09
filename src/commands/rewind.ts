@@ -51,6 +51,16 @@ export function registerRewindCommand(program: Command): void {
       const isJson = getOutputOptions().json;
       const cwd = process.cwd();
 
+      // --list used to silently win over --session, dropping the filter
+      // without a word - the two are contradictory, so refuse loudly.
+      if (opts.list && opts.session) {
+        throw new SpycoreCliError(
+          '--list and --session cannot be combined.',
+          EXIT_USER_ERROR,
+          'Use --list to see sessions, then rewind one with --session <id>.',
+        );
+      }
+
       // ── --list ──────────────────────────────────────────────────────────
       if (opts.list) {
         const sessions = listSessions(cwd);

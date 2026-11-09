@@ -157,6 +157,22 @@ export function registerFilesDownloadCommand(program: Command): void {
             })(),
           );
           await pipeline(monitored, sink);
+          // Size verification: a cleanly truncated stream used to be
+          // renamed into place and reported as complete. The metadata size
+          // is the expected byte count - refuse a short (or long) delivery
+          // instead of saving it.
+          if (expectedBytes > 0 && received !== expectedBytes) {
+            try {
+              unlinkSync(tmpPath);
+            } catch {
+              // ignore - the catch below retries the cleanup
+            }
+            throw new SpycoreCliError(
+              `Download incomplete: received ${formatFileSize(received)} of ${formatFileSize(expectedBytes)} - the file was not saved.`,
+              EXIT_NETWORK_ERROR,
+              'Retry the download; if it keeps failing, the server or network is truncating the stream.',
+            );
+          }
           renameSync(tmpPath, outPath);
           spinner?.succeed(display`Saved ${outPath} (${formatFileSize(received)})`);
         } catch (err) {

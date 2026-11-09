@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import {
+  mkdirSync,
   mkdtempSync,
   realpathSync,
   rmSync,
@@ -421,6 +422,42 @@ describe('spycore commit - push gate', () => {
     expect(lastMessage()).toBe('feat: local only');
     expect(git(['ls-remote', 'origin', 'main']).split('\t')[0]).toBe(remoteBefore);
     expect(stderrChunks.join('')).toMatch(/Skipped push/);
+  });
+
+  test('non-interactive --push without --yes refuses before committing', async () => {
+    addRemote();
+    const shaBefore = headSha();
+    writeFileSync(join(repoDir, 'hello.txt'), 'never committed\n');
+    git(['add', '-A']);
+    responder = genResponder(['feat: never committed']);
+    const err = await expectCliError(['commit', '--push']);
+    expect(err.message).toMatch(/Refusing to push without confirmation/);
+    expect(err.hint).toMatch(/Nothing was committed/);
+    expect(headSha()).toBe(shaBefore);
+    expect(git(['diff', '--cached', '--name-only']).trim()).toBe('hello.txt');
+  });
+
+  test('--push --yes in JSON mode prints one combined JSON document', async () => {
+    addRemote();
+    writeFileSync(join(repoDir, 'hello.txt'), 'push me json\n');
+    git(['add', '-A']);
+    responder = genResponder(['feat: push me json']);
+    await runCli(['commit', '--push', '--yes'], ['--json']);
+    const docs = stdoutChunks.join('').trim().split('\n').filter((l) => l.trim().length > 0);
+    expect(docs).toHaveLength(1);
+    const parsed = JSON.parse(docs[0]!) as Record<string, unknown>;
+    expect(parsed).toMatchObject({ committed: true, pushed: true, subject: 'feat: push me json' });
+    expect(parsed.hash).toBe(git(['rev-parse', '--short', 'HEAD']).trim());
+  });
+
+  test('a rebase in progress is refused before any write', async () => {
+    mkdirSync(join(repoDir, '.git', 'rebase-merge'), { recursive: true });
+    writeFileSync(join(repoDir, 'hello.txt'), 'rebased\n');
+    git(['add', '-A']);
+    responder = genResponder(['feat: rebased']);
+    const err = await expectCliError(['commit', '--yes']);
+    expect(err.message).toBe('A rebase is in progress.');
+    expect(err.hint).toMatch(/git rebase --abort/);
   });
 });
 

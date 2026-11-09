@@ -443,6 +443,17 @@ function resolveRunOrThrow(id: string): DetachedRunRecord {
   return refreshStatus(rec);
 }
 
+/**
+ * The machine-readable view of a run record. `argv` is deliberately
+ * dropped: records hold the replayed argv, which may contain pasted secrets
+ * or task text (the writeRecord comment says so) - `runs list --json` used
+ * to dump the full record including it.
+ */
+function publicRecord(rec: DetachedRunRecord): Omit<DetachedRunRecord, 'argv'> {
+  const { argv: _dropped, ...rest } = rec;
+  return rest;
+}
+
 function statusChip(status: DetachedRunStatus): string {
   switch (status) {
     case 'running':
@@ -688,7 +699,7 @@ export function registerRunsCommand(program: Command): void {
     .action((opts: { format?: string }) => {
       const recs = listDetachedRuns();
       if (resolveFormat(opts.format) === 'json') {
-        json(recs);
+        json(recs.map(publicRecord));
         return;
       }
       printRunsTable(recs);
@@ -702,7 +713,7 @@ export function registerRunsCommand(program: Command): void {
     .action(async (id: string, opts: AttachOpts) => {
       const rec = resolveRunOrThrow(id);
       if (getOutputOptions().json) {
-        json(rec);
+        json(publicRecord(rec));
         return;
       }
       await attachRun(rec, opts);
@@ -714,6 +725,12 @@ export function registerRunsCommand(program: Command): void {
     .action(async (id: string) => {
       const rec = resolveRunOrThrow(id);
       if (rec.status !== 'running') {
+        // Text output used to leak into --json mode here (warn/success
+        // before any JSON branch) - machine output gets one JSON document.
+        if (getOutputOptions().json) {
+          json({ id: rec.id, status: rec.status, killed: false });
+          return;
+        }
         warn(`Run ${rec.id} is already ${statusChip(rec.status)} - nothing to kill.`);
         return;
       }
@@ -770,6 +787,10 @@ export function registerRunsCommand(program: Command): void {
       if (!signaled) {
         // Already gone - reconcile and report.
         updateRunRecord(rec.id, { status: 'exited' });
+        if (getOutputOptions().json) {
+          json({ id: rec.id, status: 'exited', killed: false });
+          return;
+        }
         success(`Run ${rec.id} had already exited.`);
         return;
       }
@@ -794,7 +815,21 @@ export function registerRunsCommand(program: Command): void {
           process.kill(pid, 'SIGKILL');
         } catch (err) {
           const code = (err as { code?: unknown }).code;
-          if (code !== 'ESRCH') throw err;
+          if (code === 'ESRCH') {
+            // Already gone - fall through to the liveness re-check below.
+          } else if (code === 'EPERM') {
+            // A raw Error used to escape here, bypassing the CLI's error
+            // rendering (no code, no hint) - map it like the SIGTERM path.
+            throw new SpycoreCliError(
+              `No permission to signal pid ${pid} (run ${rec.id}). It may belong to another user.`,
+              EXIT_USER_ERROR,
+            );
+          } else {
+            throw new SpycoreCliError(
+              `Failed to kill pid ${pid} (run ${rec.id}): ${err instanceof Error ? err.message : String(err)}`,
+              EXIT_USER_ERROR,
+            );
+          }
         }
         try {
           process.kill(-pid, 'SIGKILL');
@@ -813,6 +848,10 @@ export function registerRunsCommand(program: Command): void {
         updateRunRecord(rec.id, { status: 'killed' });
       } else {
         // m4: don't lie - if it's still alive, say so.
+        if (getOutputOptions().json) {
+          json({ id: rec.id, status: rec.status, killed: false });
+          return;
+        }
         warn(`Run ${rec.id} (pid ${pid}) did not exit after SIGKILL - still running.`);
         return;
       }

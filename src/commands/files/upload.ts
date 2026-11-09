@@ -158,8 +158,10 @@ export function registerFilesUploadCommand(program: Command): void {
           if (plan && plan in PLAN_MAX_MB) {
             const maxMb = PLAN_MAX_MB[plan] ?? 0;
             if (maxMb === 0) {
+              // FREE is the only tier with a 0 cap (STARTER already allows
+              // 20 MB per the table above) - say so, not "Pro and above".
               throw new SpycoreCliError(
-                'File uploads are available on Pro plans and above.',
+                'File uploads require a paid plan (Starter and above).',
                 EXIT_USER_ERROR,
                 'Upgrade at https://spycore.ai/pricing',
               );
@@ -250,8 +252,14 @@ export function registerFilesUploadCommand(program: Command): void {
             );
           }
           if (result.expiresAt) {
+            // A garbage expiresAt used to throw RangeError here, AFTER the
+            // success message - validate first and degrade to a warning.
             const expiry = new Date(result.expiresAt);
-            warn(`Auto-expires at ${expiry.toISOString().slice(0, 10)}`);
+            if (Number.isNaN(expiry.getTime())) {
+              warn('The server returned an expiry date that could not be parsed - ignoring it.');
+            } else {
+              warn(`Auto-expires at ${expiry.toISOString().slice(0, 10)}`);
+            }
           }
         } finally {
           if (cleanupTmp) {

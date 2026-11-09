@@ -734,6 +734,7 @@ describe('§12 the sink CATEGORIES - prompt, spinner, completion line', () => {
     'src/commands/conversations/export.ts :: toMarkdown',
     'src/commands/conversations/handoff.ts :: buildHandoffContinueMessage',
     'src/commands/conversations/handoff.ts :: createRunRecorder',
+    'src/commands/conversations/handoff.ts :: fireHookEvent',
     'src/commands/conversations/handoff.ts :: resolveHandoffModel',
     'src/commands/conversations/handoff.ts :: runAgent',
     'src/commands/conversations/share.ts :: buildShareBody',

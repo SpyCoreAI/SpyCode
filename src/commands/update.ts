@@ -20,7 +20,7 @@ export function registerUpdateCommand(program: Command, currentVersion: string):
   program
     .command('update')
     .description('Check for a newer @spycore/cli release and show how to upgrade')
-    .option('--check', 'Only check (default behaviour) - exits 0 if up-to-date, 1 if update available')
+    .option('--check', 'Only check (default behaviour) - exits 0 if up-to-date, 1 if update available, 2 if the registry could not be reached')
     .action(async (opts: { check?: boolean }) => {
       // Force a fresh lookup on explicit invocation - the daily cache is
       // for the passive banner, not for the user who just typed `update`.
@@ -34,17 +34,25 @@ export function registerUpdateCommand(program: Command, currentVersion: string):
           current: currentVersion,
           latest: result?.latest ?? null,
           hasUpdate: result?.hasUpdate ?? false,
+          // --check used to exit 0 when the registry was unreachable, which
+          // is indistinguishable from "up to date" - report it explicitly
+          // and exit 2.
+          checkFailed: result === null,
           installMethod: method,
           upgradeCommand: upgradeCmd,
         });
         if (opts.check && result?.hasUpdate) {
           process.exit(1);
         }
+        if (opts.check && result === null) {
+          process.exit(2);
+        }
         return;
       }
 
       if (!result) {
         info('Could not reach the npm registry. Try again later.');
+        if (opts.check) process.exit(2);
         return;
       }
 

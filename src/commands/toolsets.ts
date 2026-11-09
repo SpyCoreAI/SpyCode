@@ -15,7 +15,7 @@
 import { Command, Option } from 'commander';
 import { getConfigStore } from '../lib/config.js';
 import { EXIT_USER_ERROR, SpycoreCliError } from '../lib/errors.js';
-import { formatOption, json, print, resolveFormat, success } from '../lib/output.js';
+import { formatOption, info, json, print, resolveFormat, success } from '../lib/output.js';
 import { sanitizeForDisplay } from '../lib/sanitize-display.js';
 import {
   TOOLSETS,
@@ -68,6 +68,13 @@ function listToolsets(opts: { format?: string }): void {
 function setDisabled(name: string, surface: ToolsetSurface, disable: boolean): void {
   const current = readToolsetsDisabled();
   const list = new Set(current[surface] ?? []);
+  // A no-op used to print the same success as a real change: disabling an
+  // already-disabled toolset printed "disabled". Say so instead.
+  const already = disable ? list.has(name) : !list.has(name);
+  if (already) {
+    info(`Toolset "${name}" is already ${disable ? 'disabled' : 'enabled'} on ${surface} - nothing changed.`);
+    return;
+  }
   if (disable) list.add(name);
   else list.delete(name);
   const next: Partial<Record<ToolsetSurface, string[]>> = { ...current };

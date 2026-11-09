@@ -390,6 +390,63 @@ describe('files download', () => {
     expect(isSpycoreCliError(caught)).toBe(true);
     expect(readFileSync(out, 'utf8')).toBe('pre-existing');
   });
+
+  test('a cleanly truncated stream is rejected and nothing is saved', async () => {
+    const full = Buffer.from('hello world, this is the whole file');
+    const truncated = full.subarray(0, 5);
+    responder = (url, init) => {
+      if (init.method === 'GET' && url.includes('/api/files/file_1')) {
+        return jsonResp(200, {
+          success: true,
+          data: {
+            id: 'file_1',
+            filename: 'hello.txt',
+            mimeType: 'text/plain',
+            size: full.length,
+            url: 'https://r2.example.com/hello.txt?sig=abc',
+            createdAt: new Date().toISOString(),
+          },
+        });
+      }
+      if (isR2Url(url)) {
+        return streamResp(truncated);
+      }
+      throw new Error(`unexpected ${url}`);
+    };
+    const out = join(workDir, 'hello.txt');
+    await expect(runCli(['download', 'file_1', '--output', out, '--force'])).rejects.toThrow(
+      /Download incomplete: received .* of .* - the file was not saved/,
+    );
+    expect(existsSync(out)).toBe(false);
+  });
+
+  test('a stream that delivers MORE than the metadata size is rejected too', async () => {
+    const payload = Buffer.from('hello world, this is more than advertised');
+    responder = (url, init) => {
+      if (init.method === 'GET' && url.includes('/api/files/file_1')) {
+        return jsonResp(200, {
+          success: true,
+          data: {
+            id: 'file_1',
+            filename: 'hello.txt',
+            mimeType: 'text/plain',
+            size: 5,
+            url: 'https://r2.example.com/hello.txt?sig=abc',
+            createdAt: new Date().toISOString(),
+          },
+        });
+      }
+      if (isR2Url(url)) {
+        return streamResp(payload);
+      }
+      throw new Error(`unexpected ${url}`);
+    };
+    const out = join(workDir, 'hello.txt');
+    await expect(runCli(['download', 'file_1', '--output', out, '--force'])).rejects.toThrow(
+      /Download incomplete/,
+    );
+    expect(existsSync(out)).toBe(false);
+  });
 });
 
 describe('files delete', () => {

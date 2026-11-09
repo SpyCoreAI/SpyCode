@@ -21,7 +21,10 @@ import { createRunRecorder } from '../../lib/agent/checkpoint.js';
 import { currentGitHead, makeRunStateHook } from '../../lib/agent/resume.js';
 import { MODEL_DISPLAY } from '../../lib/models.js';
 import { loadCommandRules } from '../../lib/agent/command-rules.js';
+import { createAgentHooksBridge, fireHookEvent, loadHookSession } from '../../lib/hooks.js';
 import { buildContextInjection } from '../../lib/memory.js';
+import { parseIntFlag } from '../../lib/numeric-flags.js';
+import { readSingleLineInput } from '../../lib/prompt.js';
 
 /**
  * Web ↔ CLI handoff (`spycore conversations handoff <id>`).
@@ -135,6 +138,7 @@ export function registerConversationsHandoffCommand(program: Command): void {
       new Option('--model <slug>', `Agent model (${HANDOFF_MODELS.join('|')}); default: the conversation's model when agent-callable, else styx`),
     )
     .addOption(new Option('--max-turns <n>', 'Max agent turns (default 25)').default(String(DEFAULT_MAX_TURNS)))
+    .addOption(new Option('--cmd-timeout <sec>', 'Timeout for each run_command, in seconds').default('120'))
     .addOption(new Option('--max-tokens <n>', 'Budget cap: total tokens'))
     .addOption(new Option('--max-time <s>', 'Budget cap: wall-clock seconds'))
     .addOption(new Option('--yes', 'Auto-approve writes/commands (headless approval)'))
@@ -146,6 +150,7 @@ export function registerConversationsHandoffCommand(program: Command): void {
           task?: string;
           model?: string;
           maxTurns?: string;
+          cmdTimeout?: string;
           maxTokens?: string;
           maxTime?: string;
           yes?: boolean;
@@ -158,9 +163,18 @@ export function registerConversationsHandoffCommand(program: Command): void {
         const isJson = getOutputOptions().json;
         const cwd = process.cwd();
 
+        // The run_command timeout is configurable (like agent's
+        // --cmd-timeout); non-numeric input errors instead of silently
+        // defaulting, and the value is clamped to 1-3600s. Parsed up front
+        // so a bad value fails before any login or network work.
+        const commandTimeoutMs =
+          parseIntFlag(opts.cmdTimeout, 'cmd-timeout', { min: 1, max: 3600, defaultValue: 120 }) * 1000;
+
         // M5: load command rules, project context, and hooks (like agent.ts
         // does) - handoff runs must respect the user's safety configuration,
-        // not silently drop it.
+        // not silently drop it. The comment used to claim hooks loaded here,
+        // but only rules and context did - prompt-submit and session-start
+        // hooks never fired for handoff runs.
         const commandRules = await loadCommandRules(cwd, {});
         const contextInjection = buildContextInjection({ cwd });
         const projectContext =
@@ -204,6 +218,36 @@ export function registerConversationsHandoffCommand(program: Command): void {
         const last = messages[messages.length - 1]!;
         const lastRole = String(last.role ?? 'unknown').toLowerCase();
 
+        // Lifecycle hooks (like agent.ts): loaded once per run, after the
+        // login gate and the conversation fetch so a failed handoff fires
+        // nothing. Project hooks are double-gated by workspace trust and a
+        // per-hook approval prompt on an interactive TTY - headless runs
+        // skip unapproved project hooks with a warning, never auto-run them.
+        const interactiveHookApproval =
+          process.stdin.isTTY === true && process.stdout.isTTY === true && !isJson
+            ? async (h: { event: string; command: string }): Promise<boolean> => {
+                try {
+                  const answer = await readSingleLineInput(
+                    `Project hook wants to run at ${h.event}:\n  ${sanitizeForDisplay(h.command)}\nAllow and remember for this exact command? [y/N] `,
+                  );
+                  return /^y(es)?$/i.test(answer.trim());
+                } catch {
+                  return false;
+                }
+              }
+            : undefined;
+        const hookSession = await loadHookSession(cwd, {
+          ...(interactiveHookApproval ? { approveProjectHook: interactiveHookApproval } : {}),
+        });
+        const emitHookNotices = (notices: string[]): void => {
+          if (isJson) return;
+          for (const n of notices)
+            process.stderr.write(`${chalk.yellow('⚑')} ${chalk.dim(sanitizeForDisplay(n))}\n`);
+        };
+        emitHookNotices(hookSession.notices);
+        emitHookNotices((await fireHookEvent(hookSession, 'session-start')).notices);
+        const hooksBridge = createAgentHooksBridge(hookSession);
+
         // ── Model: flag wins; else the conversation's model when agent-callable. ──
         const { model, fromFlag } = resolveHandoffModel(convo.model, opts.model);
         if (!fromFlag && model !== (convo.model ?? '').toLowerCase()) {
@@ -224,6 +268,18 @@ export function registerConversationsHandoffCommand(program: Command): void {
         const observeWorkspace = config.get('agentObserveWorkspace') === true;
 
         const task = opts.task?.trim() ? opts.task.trim() : `Handoff of conversation ${convo.id}${convo.title ? ` (${convo.title})` : ''}`;
+
+        // prompt-submit gate (like agent.ts): a blocking hook can refuse
+        // the handoff turn before the run starts.
+        const promptGate = await fireHookEvent(hookSession, 'prompt-submit', { prompt: task });
+        emitHookNotices(promptGate.notices);
+        if (promptGate.blocked) {
+          throw new SpycoreCliError(
+            `Prompt blocked by a user hook${promptGate.blockReason ? `: ${promptGate.blockReason}` : '.'}`,
+            EXIT_USER_ERROR,
+          );
+        }
+
         const recorder = createRunRecorder({
           cwd,
           task,
@@ -314,6 +370,7 @@ export function registerConversationsHandoffCommand(program: Command): void {
             task,
             model,
             maxTurns,
+            commandTimeoutMs,
             apiUrlOverride: parentOpts.apiUrl,
             signal: controller.signal,
             cwd,
@@ -325,6 +382,8 @@ export function registerConversationsHandoffCommand(program: Command): void {
             observeWorkspace,
             // M5: thread through the user's safety configuration.
             ...(commandRules.hasAny ? { commandRules: commandRules.rules } : {}),
+            // Lifecycle-hook bridge (pre/post-tool) - blocking-only influence.
+            ...(hooksBridge.hasAny ? { hooks: hooksBridge } : {}),
             projectContext,
             // The HANDOFF turn: a new agent turn on the existing conversation.
             conversationId: convo.id,
@@ -371,6 +430,11 @@ export function registerConversationsHandoffCommand(program: Command): void {
           throw err;
         } finally {
           process.removeListener('SIGINT', onSigint);
+          try {
+            emitHookNotices((await fireHookEvent(hookSession, 'session-end')).notices);
+          } catch {
+            /* hooks never break the session */
+          }
         }
       },
     );

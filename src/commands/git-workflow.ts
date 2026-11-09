@@ -20,9 +20,9 @@
  *  - Everything echoed to the terminal passes sanitizeForDisplay.
  */
 import { Command, Option } from 'commander';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve as resolvePath } from 'node:path';
 import chalk from 'chalk';
 import type { Ora } from 'ora';
 import { createSpinner } from '../lib/spinner.js';
@@ -47,6 +47,7 @@ import {
   mergeInProgress,
   pushCurrentBranch,
   recentSubjects,
+  runGit,
   shortStatus,
   stageAll,
   stagedDiff,
@@ -124,6 +125,17 @@ function resolveGenerationModel(input: string | undefined): ModelSlug {
   return model;
 }
 
+/** True while a rebase is in progress (rebase-merge / rebase-apply state dirs present). Exported for tests. */
+export function rebaseInProgress(cwd: string): boolean {
+  // Deliberately via the sanctioned runGit helper (src/lib/git.ts), not a
+  // direct spawn import: the child-process census only permits spawn sites
+  // in sanctioned modules, and git-workflow.ts is not one.
+  const r = runGit(cwd, ['rev-parse', '--git-dir']);
+  if (!r.ok) return false;
+  const abs = resolvePath(cwd, r.stdout.trim());
+  return existsSync(join(abs, 'rebase-merge')) || existsSync(join(abs, 'rebase-apply'));
+}
+
 /** Shared repo preconditions - clear errors BEFORE any write is reachable. */
 function assertRepoReady(cwd: string): void {
   if (!isGitRepo(cwd)) {
@@ -145,6 +157,15 @@ function assertRepoReady(cwd: string): void {
       'A merge is in progress.',
       EXIT_USER_ERROR,
       'Finish it (`git merge --continue`) or abort it (`git merge --abort`) first.',
+    );
+  }
+  // assertRepoReady used to check only for a merge - a rebase in progress
+  // is the same class of mid-operation state and must refuse the same way.
+  if (rebaseInProgress(cwd)) {
+    throw new SpycoreCliError(
+      'A rebase is in progress.',
+      EXIT_USER_ERROR,
+      'Finish it (`git rebase --continue`) or abort it (`git rebase --abort`) first.',
     );
   }
 }
@@ -268,6 +289,17 @@ export function registerCommitCommand(program: Command): void {
       const model = resolveGenerationModel(opts.model);
       assertRepoReady(cwd);
 
+      // Decide the push refusal BEFORE any write: --push without --yes in
+      // a non-interactive session used to exit 1 AFTER the commit had
+      // already succeeded. Refusing up front leaves the repo untouched.
+      if (opts.push && !opts.yes && !interactive) {
+        throw new SpycoreCliError(
+          'Refusing to push without confirmation in a non-interactive session.',
+          EXIT_USER_ERROR,
+          'Re-run with --push --yes to push non-interactively. Nothing was committed.',
+        );
+      }
+
       // ── Staging: default staged-only; stage-all only on explicit ask ──
       if (!hasStagedChanges(cwd)) {
         const status = shortStatus(cwd);
@@ -358,9 +390,7 @@ export function registerCommitCommand(program: Command): void {
         );
       }
       const subject = review.text.split('\n')[0] ?? '';
-      if (jsonMode) {
-        jsonOut({ committed: true, hash: committed.hash, subject });
-      } else {
+      if (!jsonMode) {
         process.stderr.write(
           chalk.green(`✓ Committed ${committed.hash} - ${sanitizeForDisplay(subject)}\n`),
         );
@@ -369,15 +399,15 @@ export function registerCommitCommand(program: Command): void {
       // ── Optional push: flag AND confirm ──
       if (opts.push) {
         if (!opts.yes) {
-          if (!interactive) {
-            throw new SpycoreCliError(
-              'Refusing to push without confirmation in a non-interactive session.',
-              EXIT_USER_ERROR,
-              'Re-run with --push --yes to push non-interactively. The commit itself succeeded.',
-            );
-          }
+          // The non-interactive refusal is decided BEFORE the commit (see
+          // the pre-check above) - reaching this branch without --yes means
+          // an interactive session, so only the prompt remains.
           if (!(await confirm('Push to origin?'))) {
-            if (!jsonMode) process.stderr.write(chalk.dim('Skipped push.\n'));
+            if (jsonMode) {
+              jsonOut({ committed: true, hash: committed.hash, subject, pushed: false });
+            } else {
+              process.stderr.write(chalk.dim('Skipped push.\n'));
+            }
             return;
           }
         }
@@ -389,8 +419,18 @@ export function registerCommitCommand(program: Command): void {
             sanitizeForDisplay(pushed.stderr.trim()),
           );
         }
-        if (jsonMode) jsonOut({ pushed: true });
-        else process.stderr.write(chalk.green('✓ Pushed\n'));
+        if (jsonMode) {
+          // One JSON document for the whole command: the old code printed
+          // {committed...} and then a second {pushed: true}, which breaks
+          // consumers expecting a single object on stdout.
+          jsonOut({ committed: true, hash: committed.hash, subject, pushed: true });
+        } else {
+          process.stderr.write(chalk.green('✓ Pushed\n'));
+        }
+        return;
+      }
+      if (jsonMode) {
+        jsonOut({ committed: true, hash: committed.hash, subject });
       }
     });
 }

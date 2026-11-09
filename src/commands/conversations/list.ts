@@ -57,7 +57,9 @@ export function registerConversationsListCommand(program: Command): void {
     .addOption(
       new Option(
         '--limit <n>',
-        `Client-side cap on rows printed (1-${SERVER_PAGE_SIZE}; pages are ${SERVER_PAGE_SIZE} rows server-side)`,
+        // The code clamps to 1-100 (parseIntFlag below); the help used to say
+        // 1-20, which is only the server's page size, not the client cap.
+        `Client-side cap on rows printed (1-100; pages are ${SERVER_PAGE_SIZE} rows server-side)`,
       ).default(String(SERVER_PAGE_SIZE)),
     )
     .addOption(formatOption())

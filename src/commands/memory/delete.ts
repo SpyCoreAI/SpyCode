@@ -36,7 +36,11 @@ export function registerMemoryDeleteCommand(program: Command): void {
               await readSingleLineInput(
                 'Delete ALL memories? Type "delete everything" to confirm: ',
               )
-            ).trim();
+            )
+              .trim()
+              .toLowerCase();
+            // The confirmation phrase is case-insensitive: "Delete
+            // Everything" is the same confirmation as "delete everything".
             if (answer !== 'delete everything') {
               warn('Cancelled.');
               return;

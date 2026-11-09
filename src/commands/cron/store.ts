@@ -15,7 +15,7 @@
  * fires prompts through the chat pipeline, or a crontab/launchd installer).
  */
 import { randomUUID } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { getConfigPath } from '../../lib/config.js';
 import { EXIT_USER_ERROR, SpycoreCliError } from '../../lib/errors.js';
@@ -97,7 +97,22 @@ export function loadCronEntries(): CronEntry[] {
 function saveCronEntries(entries: CronEntry[]): void {
   const path = storePath();
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, `${JSON.stringify(entries, null, 2)}\n`, { mode: 0o600 });
+  // Atomic write via tmp+rename (the runs.ts pattern): a crash mid-write
+  // used to leave a torn cron.json, and then every cron command errored
+  // "not valid JSON". The direct writeFileSync is only the fallback when
+  // the rename itself fails.
+  const tmp = `${path}.tmp-${process.pid}`;
+  writeFileSync(tmp, `${JSON.stringify(entries, null, 2)}\n`, { mode: 0o600 });
+  try {
+    renameSync(tmp, path);
+  } catch {
+    writeFileSync(path, `${JSON.stringify(entries, null, 2)}\n`, { mode: 0o600 });
+    try {
+      unlinkSync(tmp);
+    } catch {
+      // ignore cleanup failure
+    }
+  }
   try {
     chmodSync(path, 0o600);
   } catch {

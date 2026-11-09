@@ -359,6 +359,68 @@ describe('spycore image', () => {
     expect(parsed.localPath).toBe(out);
   });
 
+  test('extra image URLs after the first are reported, not silently dropped', async () => {
+    const first = Buffer.from('FIRST-IMAGE');
+    const second = Buffer.from('SECOND-IMAGE');
+    responder = (url, init) => {
+      if (init.method === 'POST' && url.endsWith('/conversations')) {
+        return jsonResp(200, {
+          success: true,
+          data: { id: 'cnv_img', title: 'New', model: 'HEPHAESTUS' },
+        });
+      }
+      if (init.method === 'POST' && url.includes('/api/chat/stream')) {
+        return sseResp([
+          {
+            type: 'image',
+            urls: ['https://r2.example.com/first.png', 'https://r2.example.com/second.png'],
+          },
+          { type: 'done' },
+        ]);
+      }
+      if (url.includes('/first.png')) {
+        return binaryResp(first);
+      }
+      if (url.includes('/second.png')) {
+        return binaryResp(second);
+      }
+      throw new Error(`unexpected ${url}`);
+    };
+    const out = join(workDir, 'first.png');
+    await runCli(['hello', '--output', out]);
+    expect(readFileSync(out).equals(first)).toBe(true);
+    expect(stderrChunks.join('')).toContain('2 images - saving only the first');
+  });
+
+  test('extra image URLs are named in JSON output as droppedUrls', async () => {
+    const first = Buffer.from('FIRST-IMAGE');
+    responder = (url, init) => {
+      if (init.method === 'POST' && url.endsWith('/conversations')) {
+        return jsonResp(200, {
+          success: true,
+          data: { id: 'cnv_img', title: 'New', model: 'HEPHAESTUS' },
+        });
+      }
+      if (init.method === 'POST' && url.includes('/api/chat/stream')) {
+        return sseResp([
+          {
+            type: 'image',
+            urls: ['https://r2.example.com/first.png', 'https://r2.example.com/second.png'],
+          },
+          { type: 'done' },
+        ]);
+      }
+      if (isR2Url(url)) {
+        return binaryResp(first);
+      }
+      throw new Error(`unexpected ${url}`);
+    };
+    const out = join(workDir, 'first-json.png');
+    await runCli(['hello', '--output', out], ['--json']);
+    const parsed = JSON.parse(stdoutChunks.join('').trim()) as { droppedUrls?: string[] };
+    expect(parsed.droppedUrls).toEqual(['https://r2.example.com/second.png']);
+  });
+
   test('--style threads styleVariance onto the conversation settings', async () => {
     const png = Buffer.from('PNGDATA');
     const calls: Array<{ method: string; url: string; body: unknown }> = [];

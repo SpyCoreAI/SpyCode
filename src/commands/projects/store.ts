@@ -41,7 +41,7 @@
  * meaningless across machines.
  * ─────────────────────────────────────────────────────────────────────────
  */
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { getConfigPath } from '../../lib/config.js';
 
@@ -104,7 +104,21 @@ export function loadProjects(): ProjectEntry[] {
 export function saveProjects(entries: ProjectEntry[]): void {
   const file = registryPath();
   mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, JSON.stringify(entries, null, 2) + '\n', { mode: 0o600 });
+  // Atomic write via tmp+rename (the runs.ts pattern): a crash mid-write
+  // used to leave a torn projects.json. The direct writeFileSync is only
+  // the fallback when the rename itself fails.
+  const tmp = `${file}.tmp-${process.pid}`;
+  writeFileSync(tmp, JSON.stringify(entries, null, 2) + '\n', { mode: 0o600 });
+  try {
+    renameSync(tmp, file);
+  } catch {
+    writeFileSync(file, JSON.stringify(entries, null, 2) + '\n', { mode: 0o600 });
+    try {
+      unlinkSync(tmp);
+    } catch {
+      // ignore cleanup failure
+    }
+  }
 }
 
 /** True when the directory contains a SPYCODE.md workspace marker. */

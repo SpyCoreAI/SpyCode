@@ -348,6 +348,13 @@ async function runImageEdit(
 
   if (spinner) spinner.text = 'Downloading image…';
 
+  // Extra URLs after the first used to be silently dropped - say so, and
+  // name the dropped ones in machine output.
+  const extraUrls = imageUrls.slice(1);
+  if (extraUrls.length > 0) {
+    warn(`The server returned ${imageUrls.length} images - saving only the first; the rest were dropped.`);
+  }
+
   const targetUrl = imageUrls[0]!;
   const { path: outPath, size } = await downloadImage(targetUrl, opts.output, { force: opts.force });
 
@@ -363,6 +370,7 @@ async function runImageEdit(
       input: att.displayPath,
       sourceFileId: uploaded.id,
       url: targetUrl,
+      ...(extraUrls.length > 0 ? { droppedUrls: extraUrls } : {}),
       localPath: outPath,
       size,
       revisedPrompt: revisedPrompt || null,
@@ -437,9 +445,21 @@ export function registerImageCommand(program: Command): void {
         // erroring, clamp to a single image and print one friendly notice
         // (warn() is suppressed in --json, keeping machine output valid). A
         // count of 1 (or omitted) is unchanged - no notice, same as before.
-        const requestedCount = Number(opts.count ?? 1);
+        // But an invalid count (0, -1, non-numeric) used to silently
+        // produce 1 image with no notice - only a positive integer is
+        // accepted now. (parseIntFlag would clamp 0 to 1, which is exactly
+        // the silent behavior being fixed, so the check is explicit here.)
+        const countRaw = (opts.count ?? '1').trim();
+        if (!/^\d+$/.test(countRaw) || !Number.isSafeInteger(Number(countRaw)) || Number(countRaw) < 1) {
+          throw new SpycoreCliError(
+            `Invalid --count: "${opts.count ?? '1'}" is not a positive integer.`,
+            EXIT_USER_ERROR,
+            'Pass --count <n> with n >= 1.',
+          );
+        }
+        const requestedCount = Number(countRaw);
         const count = 1;
-        if (Number.isFinite(requestedCount) && requestedCount > 1) {
+        if (requestedCount > 1) {
           warn(
             "Generating more than one image per request isn't supported yet - generating a single image.",
           );
@@ -565,6 +585,13 @@ export function registerImageCommand(program: Command): void {
 
         if (spinner) spinner.text = 'Downloading image…';
 
+        // Extra URLs after the first used to be silently dropped - say so,
+        // and name the dropped ones in machine output.
+        const extraUrls = imageUrls.slice(1);
+        if (extraUrls.length > 0) {
+          warn(`The server returned ${imageUrls.length} images - saving only the first; the rest were dropped.`);
+        }
+
         const targetUrl = imageUrls[0]!;
         const { path: outPath, size } = await downloadImage(targetUrl, opts.output, { force: opts.force });
 
@@ -577,6 +604,7 @@ export function registerImageCommand(program: Command): void {
           json({
             prompt,
             url: targetUrl,
+            ...(extraUrls.length > 0 ? { droppedUrls: extraUrls } : {}),
             localPath: outPath,
             size,
             revisedPrompt: revisedPrompt || null,

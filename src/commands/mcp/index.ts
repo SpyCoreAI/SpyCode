@@ -25,6 +25,7 @@ import {
 } from '../../lib/config.js';
 import { formatOption, getOutputOptions, info, json, print, resolveFormat, success, warn } from '../../lib/output.js';
 import { confirmYesNo } from '../../lib/prompt.js';
+import { accessSync, constants } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
 
 /**
@@ -52,6 +53,40 @@ function collectEnv(value: string, previous: string[]): string[] {
 
 function scopeOf(projectFlag: boolean | undefined): McpScope {
   return projectFlag ? 'project' : 'user';
+}
+
+/** True when `file` exists and is executable. */
+function isExecutableFile(file: string): boolean {
+  try {
+    accessSync(file, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * True when `cmd` resolves to something spawnable: a path (absolute, or
+ * relative to the cwd, when it contains a separator) that exists and is
+ * executable, or a bare name found on PATH (with PATHEXT on Windows). A
+ * typo'd binary used to be accepted here and only discovered later at
+ * `mcp test` or agent start.
+ */
+export function stdioCommandExists(cmd: string): boolean {
+  if (cmd.length === 0) return false;
+  const hasSeparator = cmd.includes('/') || (process.platform === 'win32' && cmd.includes('\\'));
+  if (hasSeparator) return isExecutableFile(resolvePath(cmd));
+  const pathDirs = (process.env.PATH ?? '').split(process.platform === 'win32' ? ';' : ':');
+  for (const dir of pathDirs) {
+    if (!dir) continue;
+    if (isExecutableFile(resolvePath(dir, cmd))) return true;
+    if (process.platform === 'win32') {
+      for (const ext of ['.exe', '.cmd', '.bat', '.com']) {
+        if (isExecutableFile(resolvePath(dir, `${cmd}${ext}`))) return true;
+      }
+    }
+  }
+  return false;
 }
 
 /** Build the env list from raw --env strings, surfacing a clear parse error. */
@@ -166,6 +201,13 @@ function registerAdd(group: Command): void {
           throw new SpycoreCliError('--header applies to --url servers only.', EXIT_USER_ERROR);
         }
         const [cmd, ...rest] = argv;
+        if (!stdioCommandExists(cmd as string)) {
+          throw new SpycoreCliError(
+            `Command "${cmd}" was not found on PATH (or at that path).`,
+            EXIT_USER_ERROR,
+            'Check the spelling, or pass the absolute path to the executable. Test after adding with `spycore mcp test ' + trimmed + '`.',
+          );
+        }
         const env = parseEnvList(opts.env ?? []);
         entry = {
           name: trimmed,

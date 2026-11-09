@@ -69,10 +69,30 @@ export function registerPingCommand(program: Command): void {
       } catch {
         // empty body - treat as failure below
       }
-      if (res.statusCode !== 200 || !health || health.status !== 'ok') {
+      if (res.statusCode !== 200) {
         fail(
           new SpycoreCliError(
             `API responded with HTTP ${res.statusCode}`,
+            EXIT_NETWORK_ERROR,
+          ),
+        );
+      }
+      // A 200 with an unparseable body, or a body that does not report ok,
+      // used to be reported as "API responded with HTTP 200" - success
+      // language for a failed health check. Name the actual failure.
+      if (!health) {
+        fail(
+          new SpycoreCliError(
+            'API responded with HTTP 200 but the health response could not be parsed as JSON.',
+            EXIT_NETWORK_ERROR,
+            'The API may be unhealthy or misconfigured.',
+          ),
+        );
+      }
+      if (health.status !== 'ok') {
+        fail(
+          new SpycoreCliError(
+            `API health check did not report ok (status: ${sanitizeForDisplay(String(health.status))}).`,
             EXIT_NETWORK_ERROR,
           ),
         );

@@ -20,6 +20,7 @@ import { Command, Option } from 'commander';
 import {
   cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -82,26 +83,87 @@ function listSubdirs(root: string): string[] {
   }
 }
 
-function skillImportItem(srcDir: string, destDir: string, scope: 'user' | 'project'): ImportItem {
+/** Scan a skill directory for entries the copy will carry over verbatim: symlinks and executable files (scripts). Bounded (500 entries) so a pathological tree cannot stall the plan. */
+function scanRiskySkillEntries(srcDir: string): {
+  executables: string[];
+  symlinks: string[];
+  executableCount: number;
+  symlinkCount: number;
+} {
+  const out = {
+    executables: [] as string[],
+    symlinks: [] as string[],
+    executableCount: 0,
+    symlinkCount: 0,
+  };
+  const stack = [srcDir];
+  let seen = 0;
+  while (stack.length > 0) {
+    const dir = stack.pop()!;
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const e of entries) {
+      if (++seen > 500) return out;
+      const p = join(dir, e.name);
+      let st;
+      try {
+        st = lstatSync(p);
+      } catch {
+        continue;
+      }
+      if (st.isSymbolicLink()) {
+        out.symlinkCount += 1;
+        if (out.symlinks.length < 5) out.symlinks.push(e.name);
+        continue;
+      }
+      if (st.isDirectory()) {
+        stack.push(p);
+        continue;
+      }
+      if (st.isFile() && (st.mode & 0o111) !== 0) {
+        out.executableCount += 1;
+        if (out.executables.length < 5) out.executables.push(e.name);
+      }
+    }
+  }
+  return out;
+}
+
+function skillImportItem(srcDir: string, destDir: string, scope: 'user' | 'project', force = false): ImportItem {
   const name = basename(srcDir);
   const srcFile = join(srcDir, 'SKILL.md');
   const destFile = join(destDir, 'SKILL.md');
   const targetLabel = `${scope === 'user' ? 'user' : 'project'} skill ${name}`;
+  // Whole-directory copies used to carry scripts and symlinks over with no
+  // warning at all - surface them in the preview detail and again at apply.
+  const risky = scanRiskySkillEntries(srcDir);
+  const riskyNote =
+    risky.executableCount > 0 || risky.symlinkCount > 0
+      ? ` - WARNING: copies ${risky.executableCount} executable file(s) and ${risky.symlinkCount} symlink(s) as-is - review them before applying`
+      : '';
   let status: ImportItem['status'] = 'new';
-  let detail = `new → ${destDir}`;
+  let detail = `new → ${destDir}${riskyNote}`;
   if (existsSync(destFile)) {
     try {
       const same = readFileSync(srcFile, 'utf8') === readFileSync(destFile, 'utf8');
       if (same) {
         status = 'identical';
-        detail = 'already imported (identical) - skip';
+        detail = `already imported (identical) - skip${riskyNote}`;
       } else {
         status = 'conflict';
-        detail = `target exists with different content - skip (use --force to overwrite)`;
+        detail = force
+          ? `target exists with different content - will overwrite with --force${riskyNote}`
+          : `target exists with different content - skip (use --force to overwrite)${riskyNote}`;
       }
     } catch {
       status = 'conflict';
-      detail = 'target exists and could not be compared - skip (use --force to overwrite)';
+      detail = force
+        ? `target exists and could not be compared - will overwrite with --force${riskyNote}`
+        : `target exists and could not be compared - skip (use --force to overwrite)${riskyNote}`;
     }
   }
   return {
@@ -114,6 +176,16 @@ function skillImportItem(srcDir: string, destDir: string, scope: 'user' | 'proje
     apply: () => {
       mkdirSync(destDir, { recursive: true });
       cpSync(srcDir, destDir, { recursive: true, force: true });
+      if (risky.executableCount > 0 || risky.symlinkCount > 0) {
+        const shown = [...risky.executables, ...risky.symlinks].join(', ');
+        const extra =
+          risky.executableCount + risky.symlinkCount > risky.executables.length + risky.symlinks.length
+            ? ', …'
+            : '';
+        warn(
+          `imported skill "${sanitizeForDisplay(name)}" copied ${risky.executableCount} executable file(s) and ${risky.symlinkCount} symlink(s) as-is (${sanitizeForDisplay(shown)}${extra}) - review them.`,
+        );
+      }
       return `skill "${name}" → ${scope} scope`;
     },
   };
@@ -147,18 +219,30 @@ export function mapClaudeMcpServer(name: string, entry: ClaudeMcpEntry): McpServ
   };
 }
 
-function mcpImportItem(server: McpServerConfig, scope: 'user' | 'project', cwd: string): ImportItem {
+/** JSON with object keys sorted recursively, so two configs that differ only in key order compare equal. JSON.stringify is order-sensitive and used to report identical servers as conflicts. */
+export function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([, v]) => v !== undefined)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableStringify(v)}`).join(',')}}`;
+}
+
+function mcpImportItem(server: McpServerConfig, scope: 'user' | 'project', cwd: string, force = false): ImportItem {
   const existing = readScope(scope, cwd).find((s) => s.name === server.name);
   let status: ImportItem['status'] = 'new';
   let detail = `new ${scope}-scope MCP server "${server.name}" (${server.command})`;
   if (existing) {
-    const same = JSON.stringify({ ...existing, scope: undefined }) === JSON.stringify({ ...server, scope: undefined });
+    const same = stableStringify({ ...existing, scope: undefined }) === stableStringify({ ...server, scope: undefined });
     if (same) {
       status = 'identical';
       detail = `"${server.name}" already configured identically - skip`;
     } else {
       status = 'conflict';
-      detail = `"${server.name}" already configured differently - skip (use --force to overwrite)`;
+      detail = force
+        ? `"${server.name}" already configured differently - will overwrite with --force`
+        : `"${server.name}" already configured differently - skip (use --force to overwrite)`;
     }
   }
   return {
@@ -222,6 +306,7 @@ export function planClaudeCode(
   includeProject: boolean,
   home: string = homedir(),
   configDir?: string,
+  force = false,
 ): ImportPlan {
   const items: ImportItem[] = [];
 
@@ -236,7 +321,7 @@ export function planClaudeCode(
       if (skillName.startsWith('.')) continue; // never import dotfile dirs
       if (!existsSync(join(dir, 'SKILL.md'))) continue;
       const dest = join(scope === 'user' ? userSkillsDir() : projectSkillsDir(cwd), skillName);
-      items.push(skillImportItem(dir, dest, scope));
+      items.push(skillImportItem(dir, dest, scope, force));
     }
   }
 
@@ -256,7 +341,7 @@ export function planClaudeCode(
         warn(`skipping MCP server "${sanitizeForDisplay(name)}" from ${file} - unsupported shape (only stdio command entries import)`);
         continue;
       }
-      items.push(mcpImportItem(mapped, scope, cwd));
+      items.push(mcpImportItem(mapped, scope, cwd, force));
     }
   }
 
@@ -274,16 +359,28 @@ export function planClaudeCode(
   return { source: 'claude-code', items };
 }
 
+/**
+ * Resolve a --from-dir path: only a bare `~` or a `~/...` prefix expands to
+ * the home directory. Any other `~` prefix (e.g. `~other/x`) is a literal
+ * path - the old code treated every `~` prefix as $HOME + rest, so `~other/x`
+ * silently became $HOME/other/x.
+ */
+export function resolveFromDirRoot(dir: string, home: string = homedir()): string {
+  if (dir === '~') return home;
+  if (dir.startsWith('~/')) return join(home, dir.slice(2));
+  return dir;
+}
+
 /** Build the import plan for --from-dir: any directory of <name>/SKILL.md. Exported for tests. */
-export function planFromDir(dir: string, cwd: string): ImportPlan {
-  const root = dir.startsWith('~') ? join(homedir(), dir.slice(1)) : dir;
+export function planFromDir(dir: string, cwd: string, force = false): ImportPlan {
+  const root = resolveFromDirRoot(dir);
   if (!existsSync(root) || !statSync(root).isDirectory()) {
     throw new SpycoreCliError(`--from-dir "${dir}" is not a directory.`, EXIT_USER_ERROR);
   }
   const items = listSubdirs(root)
     .filter((d) => !basename(d).startsWith('.'))
     .filter((d) => existsSync(join(d, 'SKILL.md')))
-    .map((d) => skillImportItem(d, join(userSkillsDir(), basename(d)), 'user'));
+    .map((d) => skillImportItem(d, join(userSkillsDir(), basename(d)), 'user', force));
   return { source: `--from-dir ${dir}`, items };
 }
 
@@ -305,9 +402,9 @@ export function registerImportCommand(program: Command): void {
         const cwd = process.cwd();
         let plan: ImportPlan;
         if (opts.fromDir) {
-          plan = planFromDir(opts.fromDir, cwd);
+          plan = planFromDir(opts.fromDir, cwd, opts.force === true);
         } else if (source === 'claude-code') {
-          plan = planClaudeCode(cwd, opts.includeProject === true);
+          plan = planClaudeCode(cwd, opts.includeProject === true, undefined, undefined, opts.force === true);
         } else {
           throw new SpycoreCliError(
             `Unknown import source "${source}".`,
@@ -363,7 +460,7 @@ export function registerImportCommand(program: Command): void {
           }
           print('');
           print(
-            `${counts.new} new, ${counts.identical} already-imported, ${counts.conflict} conflict${counts.conflict === 1 ? '' : 's'} (skipped without --force).`,
+            `${counts.new} new, ${counts.identical} already-imported, ${counts.conflict} conflict${counts.conflict === 1 ? '' : 's'}${opts.force ? ' (overwritten with --force).' : ' (skipped without --force).'}`,
           );
           return;
         }

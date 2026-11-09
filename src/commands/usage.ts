@@ -1,6 +1,6 @@
 import { Command, Option } from 'commander';
 import { api } from '../lib/api.js';
-import { formatOption, json, print, resolveFormat, writeFormatted } from '../lib/output.js';
+import { formatOption, json, print, resolveFormat, warn, writeFormatted } from '../lib/output.js';
 import { MODEL_DISPLAY, isModelSlug } from '../lib/models.js';
 import { sanitizeForDisplay } from '../lib/sanitize-display.js';
 
@@ -122,8 +122,15 @@ export function registerUsageCommand(program: Command): void {
         return;
       }
 
-      const showRolling = !opts.week;
-      const showWeekly = !opts.rolling;
+      const bothFlags = Boolean(opts.week && opts.rolling);
+      // --week and --rolling together used to suppress BOTH sections (and
+      // the per-model table) with no warning - the combination selects
+      // nothing, so say so and show both sections instead of almost nothing.
+      if (bothFlags) {
+        warn('--week and --rolling together select nothing on their own - showing both sections.');
+      }
+      const showRolling = !opts.week || bothFlags;
+      const showWeekly = !opts.rolling || bothFlags;
       const lines: string[] = [];
 
       // Plan line: display name preferred; the raw enum rides along when the
@@ -181,7 +188,7 @@ export function registerUsageCommand(program: Command): void {
       // the image model), does not gate quota the way the bucket totals do.
       const perModel = data.perModel ?? {};
       const keys = Object.keys(perModel);
-      if (keys.length > 0 && !opts.week && !opts.rolling) {
+      if (keys.length > 0 && showRolling && showWeekly) {
         lines.push('Per-model usage (credits)');
         const rows = keys.map((k) => ({
           name: displayName(k),

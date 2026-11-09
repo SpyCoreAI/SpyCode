@@ -13,7 +13,7 @@
  * nothing is ever deleted.
  */
 import { Command, Option } from 'commander';
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { userSkillsDir } from '../../lib/agent/skills.js';
 import {
@@ -26,9 +26,44 @@ import {
   unpinSkill,
 } from '../../lib/agent/skill-curator.js';
 import { officialSkillNames } from '../../lib/skills-sync.js';
+import { parseIntFlag } from '../../lib/numeric-flags.js';
+import { readSingleLineInput } from '../../lib/prompt.js';
 import { EXIT_USER_ERROR, SpycoreCliError } from '../../lib/errors.js';
 import { formatOption, getOutputOptions, info, json, print, resolveFormat, success, warn } from '../../lib/output.js';
 import { sanitizeForDisplay } from '../../lib/sanitize-display.js';
+
+/** A --pin target must be a real user-global skill directory - pinning a name that does not exist used to silently succeed. */
+function requireUserSkill(name: string, userDir: string): void {
+  if (
+    name.length === 0 ||
+    name.startsWith('.') ||
+    name.includes('/') ||
+    name.includes('\\')
+  ) {
+    throw new SpycoreCliError(
+      `Invalid skill name "${name}".`,
+      EXIT_USER_ERROR,
+      'Skill names are plain directory names under the user skills directory.',
+    );
+  }
+  let st;
+  try {
+    st = statSync(join(userDir, name));
+  } catch {
+    throw new SpycoreCliError(
+      `No user-global skill named "${name}".`,
+      EXIT_USER_ERROR,
+      'See `spycore skills list` for installed skills.',
+    );
+  }
+  if (!st.isDirectory()) {
+    throw new SpycoreCliError(
+      `"${name}" is not a skill directory.`,
+      EXIT_USER_ERROR,
+      'See `spycore skills list` for installed skills.',
+    );
+  }
+}
 
 export function registerCurator(group: Command): void {
   group
@@ -37,24 +72,31 @@ export function registerCurator(group: Command): void {
     .addOption(formatOption())
     .addOption(new Option('--stale-days <n>', 'Inactivity threshold in days').default(String(DEFAULT_STALE_DAYS)))
     .addOption(new Option('--archive', 'Archive every listed stale skill (never deletes)'))
+    .addOption(new Option('--yes', 'Archive without the confirmation prompt (only with --archive)'))
     .addOption(new Option('--pin <name>', 'Exempt a skill from every curator transition'))
     .addOption(new Option('--unpin <name>', 'Lift a pin'))
     .action(
-      (opts: { format?: string; staleDays?: string; archive?: boolean; pin?: string; unpin?: string }) => {
+      async (opts: { format?: string; staleDays?: string; archive?: boolean; yes?: boolean; pin?: string; unpin?: string }) => {
         const userDir = userSkillsDir();
+        // Pin/unpin first. A bare --pin/--unpin keeps its old early return;
+        // combined with --archive it falls through so the archive is NOT
+        // silently dropped.
         if (opts.pin) {
           const name = opts.pin.trim();
+          requireUserSkill(name, userDir);
           pinSkill(name, userDir);
           success(`Pinned "${sanitizeForDisplay(name)}" - exempt from stale detection and archiving.`);
-          return;
+          if (!opts.archive) return;
         }
         if (opts.unpin) {
           const name = opts.unpin.trim();
           unpinSkill(name, userDir);
           success(`Unpinned "${sanitizeForDisplay(name)}".`);
-          return;
+          if (!opts.archive) return;
         }
-        const staleDays = Math.max(1, Math.floor(Number(opts.staleDays) || DEFAULT_STALE_DAYS));
+        // Invalid input errors instead of silently defaulting: --stale-days
+        // abc used to become 90.
+        const staleDays = parseIntFlag(opts.staleDays, 'stale-days', { min: 1, defaultValue: DEFAULT_STALE_DAYS });
         // The sync ledger's official skills are off-limits, like project skills.
         const exclude = officialSkillNames();
         const stale = findStaleSkills({ userDir, inactiveDays: staleDays, exclude });
@@ -72,6 +114,29 @@ export function registerCurator(group: Command): void {
         }
 
         if (opts.archive) {
+          // Bulk archiving used to run with no confirmation at all. A
+          // destructive-by-volume move needs consent: --yes, or an
+          // interactive y/N prompt; non-interactive without --yes refuses.
+          if (stale.length > 0 && !opts.yes) {
+            if (process.stdin.isTTY !== true || getOutputOptions().json) {
+              throw new SpycoreCliError(
+                `Refusing to archive ${stale.length} skill${stale.length === 1 ? '' : 's'} without confirmation in a non-interactive session.`,
+                EXIT_USER_ERROR,
+                'Re-run with --archive --yes to archive non-interactively.',
+              );
+            }
+            const answer = (
+              await readSingleLineInput(
+                `Archive ${stale.length} stale skill${stale.length === 1 ? '' : 's'} (moves to ${SKILL_ARCHIVE_DIRNAME}/ - never deletes)? (y/N): `,
+              )
+            )
+              .trim()
+              .toLowerCase();
+            if (answer !== 'y' && answer !== 'yes') {
+              info('Cancelled - nothing was archived.');
+              return;
+            }
+          }
           let n = 0;
           for (const s of stale) {
             try {

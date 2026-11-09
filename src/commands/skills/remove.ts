@@ -1,12 +1,25 @@
 import { rmSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, isAbsolute, relative, resolve as resolvePath } from 'node:path';
 import { Command, Option } from 'commander';
-import { discoverSkills } from '../../lib/agent/skills.js';
+import { discoverSkills, projectSkillsDir, userSkillsDir } from '../../lib/agent/skills.js';
 import { officialSkillNames } from '../../lib/skills-sync.js';
 import { isPromptCancelled, readSingleLineInput } from '../../lib/prompt.js';
 import { EXIT_USER_ERROR, SpycoreCliError } from '../../lib/errors.js';
 import { getOutputOptions, info, json, success, warn } from '../../lib/output.js';
 
+/**
+ * True when `dir` is strictly inside one of the skills roots (user-global
+ * or this cwd's project skills). The skills directory itself is NOT inside
+ * itself - deleting it would wipe every skill. Exported for tests.
+ */
+export function isWithinSkillsRoots(dir: string, cwd: string): boolean {
+  const abs = resolvePath(dir);
+  const roots = [resolvePath(userSkillsDir()), resolvePath(projectSkillsDir(cwd))];
+  return roots.some((root) => {
+    const rel = relative(root, abs);
+    return rel.length > 0 && !rel.startsWith('..') && !isAbsolute(rel);
+  });
+}
 /**
  * `spycore skills remove <name>` - delete a USER-CREATED or PROJECT skill
  * directory (y/N confirm unless --yes). Official skills (recorded in the
@@ -45,7 +58,19 @@ export function registerRemove(group: Command): void {
         );
       }
 
-      const dir = dirname(skill.path);
+      const dir = resolvePath(dirname(skill.path));
+      // Containment: the recursive delete below must stay inside a skills
+      // directory. discoverSkills is trusted to only return paths under
+      // those roots, but a compromised or buggy discovery result must never
+      // turn `skills remove` into a recursive delete of an arbitrary tree -
+      // verify here, at the point of the delete.
+      if (!isWithinSkillsRoots(dir, cwd)) {
+        throw new SpycoreCliError(
+          `Refusing to remove "${name}": its directory (${dir}) is outside the skills directories.`,
+          EXIT_USER_ERROR,
+          'The discovered skill path is not one this command will delete - inspect the skill and remove it by hand if it is really yours.',
+        );
+      }
       if (!opts.yes) {
         if (process.stdin.isTTY !== true) {
           throw new SpycoreCliError(

@@ -3,7 +3,7 @@ import { api } from '../../lib/api.js';
 import { fail, getOutputOptions, json, print, success } from '../../lib/output.js';
 import { redactFreeText } from '../../lib/redact.js';
 import { sanitizeForDisplay } from '../../lib/sanitize-display.js';
-import { EXIT_USER_ERROR, SpycoreCliError } from '../../lib/errors.js';
+import { EXIT_USER_ERROR, SpycoreCliError, isSpycoreCliError } from '../../lib/errors.js';
 
 interface ShareMessage {
   role: string;
@@ -43,10 +43,14 @@ interface ShareCreateResp {
  * redacted in memory, and only the redacted body is POSTed.
  */
 export function buildShareBody(convo: ConversationGetResp): ShareBody {
+  // Server-shape drift: a response without a messages array used to crash
+  // with a raw TypeError on .map - degrade to an empty history, the same
+  // guard handoff.ts already uses.
+  const messages = Array.isArray(convo.messages) ? convo.messages : [];
   return {
     title: redactFreeText(convo.title || '(untitled)'),
     model: convo.model,
-    messages: convo.messages.map((m) => ({
+    messages: messages.map((m) => ({
       role: m.role,
       content: redactFreeText(m.content),
       model: m.model,
@@ -83,6 +87,21 @@ export function registerConversationsShareCommand(program: Command): void {
         const apiOpts = { apiUrlOverride: parentOpts.apiUrl };
 
         if (opts.revoke) {
+          // A 404 on the DELETE conflates two different facts: "no such
+          // conversation" and "the platform has no share routes". Check
+          // the conversation exists first so each maps to its own error.
+          try {
+            await api.get(`/conversations/${encodeURIComponent(id)}`, apiOpts);
+          } catch (err) {
+            if (isSpycoreCliError(err) && err.code === EXIT_USER_ERROR) {
+              throw new SpycoreCliError(
+                `Conversation not found: ${id}`,
+                EXIT_USER_ERROR,
+                'Run `spycore conversations list` to see available IDs.',
+              );
+            }
+            throw err;
+          }
           try {
             await api.delete(`/conversations/${encodeURIComponent(id)}/share`, apiOpts);
           } catch (err) {

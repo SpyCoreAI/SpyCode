@@ -65,7 +65,11 @@ export function registerConversationsShowCommand(program: Command): void {
           throw err;
         }
 
-        const tail = convo.messages.slice(-limit);
+        // Server-shape drift: a response without a messages array used to
+        // crash with a raw TypeError on .slice - degrade to an empty
+        // history, the same guard handoff.ts already uses.
+        const messages = Array.isArray(convo.messages) ? convo.messages : [];
+        const tail = messages.slice(-limit);
 
         if (getOutputOptions().json) {
           json({ id: convo.id, title: convo.title, model: convo.model, messages: tail });

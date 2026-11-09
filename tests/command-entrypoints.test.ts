@@ -351,6 +351,13 @@ describe('skills lint and curator wiring', () => {
     expect(parsed.stale).toEqual([]);
     expect(parsed.pinned).toEqual([]);
     stdoutChunks = [];
+    // --pin requires a real skill directory (4b2: pinning a nonexistent
+    // skill errors instead of silently succeeding).
+    const { getConfigPath } = await import('../src/lib/config.js');
+    const { dirname } = await import('node:path');
+    const skillDir = join(dirname(getConfigPath()), 'skills', 'demo-skill');
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(join(skillDir, 'SKILL.md'), '# Demo\n', 'utf8');
     await runCli(MOD, 'registerSkillsCommand', ['skills', 'curator', '--pin', 'demo-skill']);
     expect(stdout()).toContain('Pinned "demo-skill"');
     stdoutChunks = [];

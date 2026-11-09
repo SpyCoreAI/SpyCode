@@ -276,6 +276,7 @@ export const COMMAND_SPEC: CommandSpec = {
               values: EXPORT_FORMAT_VALUES,
             },
             { name: '--output', short: '-o', takesValue: true, description: 'Write to file instead of stdout' },
+            { name: '--force', description: 'Overwrite the output file if it already exists' },
           ],
         },
         {
@@ -294,6 +295,7 @@ export const COMMAND_SPEC: CommandSpec = {
             { name: '--max-turns', takesValue: true, description: 'Maximum agent turns' },
             { name: '--max-tokens', takesValue: true, description: 'Maximum tokens for the run' },
             { name: '--max-time', takesValue: true, description: 'Maximum run time' },
+            { name: '--cmd-timeout', takesValue: true, description: 'Timeout for each run_command, in seconds' },
             { name: '--no-web', description: 'Disable web tools for the run' },
             { name: '--yes', short: '-y', description: 'Skip confirmation prompts' },
           ],
@@ -655,6 +657,7 @@ export const COMMAND_SPEC: CommandSpec = {
             { name: '--format', takesValue: true, values: FORMAT_VALUES, description: 'Output format' },
             { name: '--stale-days', takesValue: true, description: 'Inactivity threshold in days' },
             { name: '--archive', description: 'Archive every listed stale skill (never deletes)' },
+            { name: '--yes', description: 'Archive without the confirmation prompt (only with --archive)' },
             { name: '--pin', takesValue: true, description: 'Exempt a skill from every curator transition' },
             { name: '--unpin', takesValue: true, description: 'Lift a pin' },
           ],
