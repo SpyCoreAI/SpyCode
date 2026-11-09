@@ -1272,7 +1272,7 @@ describe('§8 legitimate terminal control must keep working', () => {
     // CRLF-normalised at the READ. Git checks this repository out with CRLF
     // on Windows, so the pattern below - which spans a line break - cannot match
     // the raw bytes. Normalising here is the form the repository already uses
-    // (`scripts/gen-third-party-licenses.mjs:90`), and it is a no-op on LF.
+    // (`scripts/gen-third-party-licenses.mjs:133`), and it is a no-op on LF.
     const src = readFileSync(
       fileURLToPath(new URL('../src/commands/chat.ts', import.meta.url)),
       'utf8',

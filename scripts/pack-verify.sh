@@ -118,9 +118,14 @@ FAIL=0
 # pinned by a LITERAL - F-2c-31's F-I3 lesson: a floor compared only against
 # itself is not a floor.
 CHECKS=0
-# TODAY'S MEASURED count on a green run. Raising the number of checks raises
-# this in the same commit; that is the R-6a rule applied to cases.
-CHECK_FLOOR=19
+# TODAY'S MEASURED count on a green run: 20, measured 2026-11-09 on this
+# manifest - 18 fixed checks + 1 per declared entry point, and the manifest
+# declares 2 (main build/index.js and bin spycore). Raising the number of
+# checks, or changing the entry-point count, raises this in the same commit;
+# that is the R-6a rule applied to cases. R4-1 (phase 5 pass 4): the floor
+# sat at 19 while the green run already counted 20, so exactly one dropped
+# check still passed - a floor one below the measured count is not a floor.
+CHECK_FLOOR=20
 
 cleanup() {
   [ -n "$STUB_PID" ] && kill "$STUB_PID" 2>/dev/null
@@ -700,9 +705,13 @@ absent'
   fi
   #  A PASS MUST BE PROVED ABLE TO SEE A CASE. Without this the self-test
   # could be emptied and would still print a green summary - which is exactly
-  # the three routes F-2c-31 measured one level up.
-  if [ "$ST_RAN" -lt 30 ]; then
-    printf '::error::pack-verify self-test ran only %s case(s), floor 30\n' "$ST_RAN"
+  # the three routes F-2c-31 measured one level up. The floor is TODAY'S
+  # MEASURED case count (61, measured 2026-11-09): every st() call is
+  # unconditional, so the count has no legitimate variation - re-pin it in the
+  # same commit whenever a case is added. R4-1 (phase 5 pass 4): the floor sat
+  # at 30 while 61 cases ran, so 31 cases could vanish before it tripped.
+  if [ "$ST_RAN" -lt 61 ]; then
+    printf '::error::pack-verify self-test ran only %s case(s), floor 61\n' "$ST_RAN"
     return 1
   fi
   return 0
