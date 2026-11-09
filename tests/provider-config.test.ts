@@ -207,14 +207,16 @@ describe('provider command - round-trip + persistence', () => {
     expect(getDefaultProviderName()).toBeUndefined(); // → resolves to spycore
   });
 
-  test('list masks an inline stored key (stored:••••last4), never the full key', async () => {
+  test('list never leaks key material (no last4): an inline stored key shows as `stored`', async () => {
     await runProvider(['add', 'secretbox', '--base-url', 'https://h.example/v1', '--model', 'm', '--api-key', 'sk-supersecret-WXYZ']);
     const list = await runProvider(['list'], { json: true });
-    expect(list.stdout).toContain('stored:••••WXYZ');
+    expect(list.stdout).toContain('"stored"');
+    expect(list.stdout).not.toContain('WXYZ');
     expect(list.stdout).not.toContain('sk-supersecret-WXYZ');
     // text mode too
     const text = await runProvider(['list']);
-    expect(text.stdout).toContain('stored:••••WXYZ');
+    expect(text.stdout).toContain('stored');
+    expect(text.stdout).not.toContain('WXYZ');
     expect(text.stdout).not.toContain('sk-supersecret-WXYZ');
   });
 });

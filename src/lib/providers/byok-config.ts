@@ -64,13 +64,17 @@ export function isLocalBaseURL(baseURL: string): boolean {
   } catch {
     return false;
   }
-  // URL strips the brackets from an IPv6 literal, so `[::1]` → `::1`.
+  // URL strips the brackets from an IPv6 literal, so `[::1]` → `::1` -
+  // except on Node 24, where hostname keeps the brackets ('[::1]').
+  // Match both spellings. The whole 127/8 block is loopback, not just
+  // 127.0.0.1: 127.0.0.2 and friends are local too.
+  const bareHost = host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
   return (
-    host === 'localhost' ||
-    host === '127.0.0.1' ||
-    host === '0.0.0.0' ||
-    host === '::1' ||
-    host.endsWith('.local')
+    bareHost === 'localhost' ||
+    bareHost.startsWith('127.') ||
+    bareHost === '0.0.0.0' ||
+    bareHost === '::1' ||
+    bareHost.endsWith('.local')
   );
 }
 
@@ -150,7 +154,9 @@ export function resolveByokConfig(opts: {
   const baseURL = ((opts.baseUrl ?? '').trim() || defaults.baseURL).replace(/\/+$/, '');
   const apiKeyEnv = (opts.apiKeyEnv ?? '').trim() || defaults.apiKeyEnv;
   const raw = opts.env[apiKeyEnv];
-  const apiKey = raw && raw.trim().length > 0 ? raw : undefined;
+  // Trim: a key with a trailing newline/space (copy-paste, env file) is
+  // otherwise sent verbatim and comes back 401.
+  const apiKey = raw && raw.trim().length > 0 ? raw.trim() : undefined;
   requireKey(type, apiKey, apiKeyEnv);
   return { type, model, baseURL, apiKey, routingLine: byokRoutingLine(type, model, baseURL) };
 }
@@ -194,14 +200,14 @@ function resolveStoredKey(
   const defaults = BYOK_TYPE_DEFAULTS[stored.type];
   const fromVar = (name: string): string | undefined => {
     const v = env[name];
-    return v && v.trim().length > 0 ? v : undefined;
+    return v && v.trim().length > 0 ? v.trim() : undefined;
   };
   const flagEnv = (apiKeyEnvFlag ?? '').trim();
   if (flagEnv.length > 0) return { apiKey: fromVar(flagEnv), consultedVar: flagEnv };
   const storedEnv = (stored.apiKeyEnv ?? '').trim();
   if (storedEnv.length > 0) return { apiKey: fromVar(storedEnv), consultedVar: storedEnv };
-  if (stored.apiKey && stored.apiKey.length > 0) {
-    return { apiKey: stored.apiKey, consultedVar: defaults.apiKeyEnv };
+  if (stored.apiKey && stored.apiKey.trim().length > 0) {
+    return { apiKey: stored.apiKey.trim(), consultedVar: defaults.apiKeyEnv };
   }
   if (!defaults.keyOptional) {
     return { apiKey: fromVar(defaults.apiKeyEnv), consultedVar: defaults.apiKeyEnv };
@@ -233,9 +239,25 @@ export function resolveProviderSelection(opts: {
   // Built-in SpyCore default.
   if (target.toLowerCase() === 'spycore') return { kind: 'spycore' };
 
-  // A saved provider config, matched by name.
-  const stored = opts.stored.find((p) => p.name === target);
+  // A saved provider config, matched by name. Case-insensitive, like the
+  // built-ins below: `provider add Foo` must answer to `--provider foo`.
+  const stored = opts.stored.find((p) => p.name.toLowerCase() === target.toLowerCase());
   if (stored) {
+    // A stored OAuth entry needs its client id to refresh: without the
+    // stored id AND the env var, the factory would fall through to the
+    // missing-key error, which is the wrong diagnosis for an OAuth config.
+    // Fail here with the re-auth hint instead.
+    if (
+      stored.oauthRefreshToken &&
+      !stored.oauthClientId &&
+      !(opts.env.SPYCORE_GOOGLE_CLIENT_ID ?? '').trim()
+    ) {
+      throw new SpycoreCliError(
+        `Provider "${stored.name}" uses Google OAuth but has no OAuth client ID stored.`,
+        EXIT_USER_ERROR,
+        `Re-authenticate with \`spycore provider add ${stored.name} --type google --oauth\`, or set SPYCORE_GOOGLE_CLIENT_ID.`,
+      );
+    }
     const model = (opts.model ?? stored.model ?? '').trim();
     if (model.length === 0) {
       throw new SpycoreCliError(

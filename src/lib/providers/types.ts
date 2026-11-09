@@ -43,6 +43,15 @@ export type ProviderEvent =
   | { type: 'done' }
   | { type: 'error'; message: string }
   /**
+   * OPTIONAL + informational: the model stopped before a natural end
+   * (e.g. OpenAI `finish_reason: length`, Anthropic `stop_reason:
+   * max_tokens`, Google `finishReason: MAX_TOKENS`). The turn's text so
+   * far is still the reply; the warning says it may be incomplete. BYOK
+   * adapters emit it; the SpyCore provider never does (its server does
+   * not surface a finish reason). Consumers may ignore it.
+   */
+  | { type: 'warning'; message: string }
+  /**
    * OPTIONAL + informational: server-side skills the backend activated for
    * this turn. Only the SpyCore provider emits it (mapped from its
    * `skills_activated` SSE event); BYOK adapters never do. The loop surfaces

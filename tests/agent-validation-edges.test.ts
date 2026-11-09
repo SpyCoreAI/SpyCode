@@ -147,12 +147,18 @@ describe('agent leftover arms', () => {
     expect(stdout()).toMatch(/note: Command rules: skipped allow entry/);
   });
 
-  test('non-numeric tool/timeout flags fall back to defaults in dry-run', async () => {
-    await runAgentCli([
-      'do a thing', '--dry-run',
-      '--max-tool-calls-per-turn', 'abc', '--cmd-timeout', 'abc',
-    ]);
-    expect(stdout()).toMatch(/timeout: 120s per run_command/);
+  test('non-numeric tool/timeout flags error instead of falling back to defaults', async () => {
+    // 4b1 item 1: the old silent fallback is the defect under fix - an
+    // unparseable numeric flag must error, never silently default. The
+    // previous pin (dry-run prints `timeout: 120s per run_command` for
+    // `--cmd-timeout abc`) asserted the defective behaviour and is
+    // replaced, not deleted.
+    await expect(
+      runAgentCli(['do a thing', '--dry-run', '--max-tool-calls-per-turn', 'abc']),
+    ).rejects.toThrow(/Invalid --max-tool-calls-per-turn/);
+    await expect(
+      runAgentCli(['do a thing', '--dry-run', '--cmd-timeout', 'abc']),
+    ).rejects.toThrow(/Invalid --cmd-timeout/);
   });
 
   test('a final reply already ending in a newline gains no second one', async () => {

@@ -16,7 +16,13 @@
 import { request } from 'undici';
 import { parseSSEStream } from '../sse.js';
 import { EXIT_USER_ERROR, SpycoreCliError } from '../errors.js';
-import { connectionErrorMessage, errText, readErrorDetail } from './wire.js';
+import {
+  BYOK_REQUEST_BODY_TIMEOUT_MS,
+  BYOK_REQUEST_HEADERS_TIMEOUT_MS,
+  connectionErrorMessage,
+  errText,
+  readErrorDetail,
+} from './wire.js';
 import { pruneByokSessions, trimHistoryMessages } from './history.js';
 import type {
   CreateConversationParams,
@@ -32,6 +38,7 @@ interface GooglePart {
 }
 interface GoogleCandidate {
   content?: { parts?: GooglePart[] };
+  finishReason?: unknown;
 }
 interface GoogleUsageMetadata {
   promptTokenCount?: unknown;
@@ -83,7 +90,11 @@ export class GoogleProvider implements Provider {
     this.oauthAccessToken = opts.oauthAccessToken;
     this.refreshOAuthToken = opts.refreshOAuthToken;
     if (!this.apiKey && !this.oauthAccessToken && !this.refreshOAuthToken) {
-      throw new Error('GoogleProvider requires either apiKey or oauthAccessToken');
+      throw new SpycoreCliError(
+        'GoogleProvider requires either apiKey or oauthAccessToken',
+        EXIT_USER_ERROR,
+        'Save a key with `spycore provider add --type google --api-key-env GEMINI_API_KEY`, or use --oauth.',
+      );
     }
   }
 
@@ -135,7 +146,16 @@ export class GoogleProvider implements Provider {
     trimHistoryMessages(session.messages);
     this.lastUsed.set(params.conversationId, Date.now());
 
-    const url = `${this.baseURL}/v1beta/models/${encodeURIComponent(params.model)}:streamGenerateContent?alt=sse`;
+    // Model ids may carry a path segment (`models/gemini-2.0-flash` is
+    // the resource name Google documents). Encode per segment: a blanket
+    // encodeURIComponent turns the slash into %2F and the API 404s. A
+    // leading `models/` is stripped first - the URL already carries it.
+    const modelPath = params.model
+      .replace(/^models\//, '')
+      .split('/')
+      .map((seg) => encodeURIComponent(seg))
+      .join('/');
+    const url = `${this.baseURL}/v1beta/models/${modelPath}:streamGenerateContent?alt=sse`;
     const buildHeaders = (): Record<string, string> => {
       const headers: Record<string, string> = {
         'content-type': 'application/json',
@@ -172,6 +192,8 @@ export class GoogleProvider implements Provider {
           headers: buildHeaders(),
           body,
           signal: params.signal,
+          headersTimeout: BYOK_REQUEST_HEADERS_TIMEOUT_MS,
+          bodyTimeout: BYOK_REQUEST_BODY_TIMEOUT_MS,
         });
       } catch (err) {
         if (params.signal?.aborted) {
@@ -242,6 +264,9 @@ export class GoogleProvider implements Provider {
     let sawUsage = false;
     let usageInput = 0;
     let usageOutput = 0;
+    // The API reports why generation stopped per candidate; MAX_TOKENS
+    // means the reply was cut off mid-thought.
+    let finishReason: string | undefined;
     /**
      * A turn that ends in error must still leave the history alternating:
      * keep the partial assistant reply when one exists, otherwise take
@@ -272,6 +297,8 @@ export class GoogleProvider implements Provider {
           return;
         }
         const parts = chunk.candidates?.[0]?.content?.parts ?? [];
+        const reason = chunk.candidates?.[0]?.finishReason;
+        if (typeof reason === 'string' && reason.length > 0) finishReason = reason;
         for (const part of parts) {
           if (typeof part.text === 'string' && part.text.length > 0) {
             assistantText += part.text;
@@ -303,6 +330,12 @@ export class GoogleProvider implements Provider {
     // alt=sse has no terminator event - a clean stream end IS completion.
     session.messages.push({ role: 'assistant', content: assistantText });
     if (sawUsage) yield { type: 'usage', input: usageInput, output: usageOutput };
+    if (finishReason === 'MAX_TOKENS') {
+      yield {
+        type: 'warning',
+        message: 'Response truncated (max tokens hit) - the reply may be incomplete.',
+      };
+    }
     yield { type: 'done' };
   }
 }

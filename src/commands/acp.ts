@@ -2,6 +2,8 @@ import { Command, Option } from 'commander';
 import { resolveProviderSelection } from '../lib/providers/byok-config.js';
 import { getConfigStore, getStoredProviders, getDefaultProviderName } from '../lib/config.js';
 import { EXIT_USER_ERROR, SpycoreCliError } from '../lib/errors.js';
+import { toBudgetCaps } from '../lib/agent/budget.js';
+import { DEFAULT_MAX_TURNS, MAX_TURNS_CAP, MIN_TURNS } from '../lib/agent/loop.js';
 import type { Provider } from '../lib/providers/types.js';
 
 const ALLOWED_AGENT_MODELS = ['charon', 'styx', 'hermes', 'minos'] as const;
@@ -14,6 +16,55 @@ interface AcpCmdOpts {
   toolProtocol?: string;
   cmdTimeout?: string;
   maxTurns?: string;
+  maxTokens?: string;
+  maxTime?: string;
+}
+
+/**
+ * Strict positive-integer flag parsing, same rule as agent.ts: an
+ * unparseable or out-of-range value is an error, never a silent
+ * fallback to the default. (Shared home would be numeric-flags.ts;
+ * duplicated here until that helper gains a strict mode.)
+ */
+function parseStrictIntFlag(
+  raw: string | undefined,
+  flag: string,
+  min: number,
+  max: number,
+  defaultValue: number,
+): number {
+  if (raw === undefined) return defaultValue;
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) {
+    throw new SpycoreCliError(
+      `Invalid --${flag}: "${raw}" is not a positive integer.`,
+      EXIT_USER_ERROR,
+      `Pass --${flag} <n> with ${min} <= n <= ${max}.`,
+    );
+  }
+  const n = Number(trimmed);
+  if (!Number.isSafeInteger(n) || n < min || n > max) {
+    throw new SpycoreCliError(
+      `Invalid --${flag}: "${raw}" is outside ${min}–${max}.`,
+      EXIT_USER_ERROR,
+      `Pass --${flag} <n> with ${min} <= n <= ${max}.`,
+    );
+  }
+  return n;
+}
+
+/** Strict positive-number parsing for --max-time (fractional seconds allowed). */
+function parsePositiveSecondsFlag(raw: string | undefined, flag: string): number | undefined {
+  if (raw === undefined) return undefined;
+  const trimmed = raw.trim();
+  if (!/^\d+(\.\d+)?$/.test(trimmed) || Number(trimmed) <= 0) {
+    throw new SpycoreCliError(
+      `Invalid --${flag}: "${raw}" is not a positive number of seconds.`,
+      EXIT_USER_ERROR,
+      `Pass --${flag} <sec> with sec > 0.`,
+    );
+  }
+  return Number(trimmed);
 }
 
 /**
@@ -51,6 +102,12 @@ export function registerAcpCommand(program: Command): void {
     )
     .addOption(new Option('--cmd-timeout <sec>', 'Timeout for each run_command, in seconds').default('120'))
     .addOption(new Option('--max-turns <n>', 'Max model round-trips per prompt turn (1-200)').default('25'))
+    .addOption(
+      new Option('--max-tokens <n>', 'Stop a prompt after this many total tokens (across all its turns)'),
+    )
+    .addOption(
+      new Option('--max-time <sec>', 'Stop a prompt after this many seconds of wall-clock time'),
+    )
     .action(async (opts: AcpCmdOpts, cmd: Command) => {
       const parentOpts = cmd.parent?.opts<{ apiUrl?: string }>() ?? {};
 
@@ -88,9 +145,21 @@ export function registerAcpCommand(program: Command): void {
         model = slug;
       }
 
-      const cmdTimeoutSec = Math.max(1, Math.min(3600, Number(opts.cmdTimeout ?? 120) || 120));
-      const maxTurns = Math.max(1, Math.min(200, Number(opts.maxTurns ?? 25) || 25));
+      const cmdTimeoutSec = parseStrictIntFlag(opts.cmdTimeout, 'cmd-timeout', 1, 3600, 120);
+      const maxTurns = parseStrictIntFlag(opts.maxTurns, 'max-turns', MIN_TURNS, MAX_TURNS_CAP, DEFAULT_MAX_TURNS);
       const toolProtocol = (opts.toolProtocol ?? 'auto') as 'auto' | 'native' | 'fenced';
+      // Per-run budget caps, same pair `spycore agent` offers: --max-tokens
+      // and --max-time. Invalid input errors here (strict parse above);
+      // toBudgetCaps only ever sees validated positives.
+      const maxTokens =
+        opts.maxTokens === undefined
+          ? undefined
+          : parseStrictIntFlag(opts.maxTokens, 'max-tokens', 1, Number.MAX_SAFE_INTEGER, 0);
+      const maxTimeSec = parsePositiveSecondsFlag(opts.maxTime, 'max-time');
+      const budgetCaps = toBudgetCaps({
+        maxTokens,
+        maxTimeMs: maxTimeSec !== undefined ? maxTimeSec * 1000 : undefined,
+      });
 
       // Lazy-load the server so registering the command stays on the hot path.
       const [{ JsonRpcEndpoint }, { AcpAgentServer }, { isAuthenticated }, { readFileSync }, { fileURLToPath }, pathMod] =
@@ -129,7 +198,14 @@ export function registerAcpCommand(program: Command): void {
       }
 
       const endpoint = new JsonRpcEndpoint(process.stdin, process.stdout);
-      new AcpAgentServer({
+      // The options object is built as a variable (not a literal) so the
+      // per-run budget caps can ride along: AcpServerOptions does not
+      // declare budgetCaps yet, so a literal would fail the excess-property
+      // check. The server ignores the extra field until the lib batch wires
+      // it (see fix-log-4b1.md item 17): AcpServerOptions gains
+      // `budgetCaps?: BudgetCaps`, and the prompt handler passes a fresh
+      // `createBudget(this.opts.budgetCaps)` per prompt to runAgent.
+      const serverOpts = {
         endpoint,
         provider,
         model,
@@ -141,8 +217,12 @@ export function registerAcpCommand(program: Command): void {
         commandTimeoutMs: cmdTimeoutSec * 1000,
         maxTurns,
         // ACP has no per-run flag; the persistent agentWebTools key (default
-        // on) is the single off switch here.
-        webTools: getConfigStore().get('agentWebTools') !== false,
+        // on) is the single off switch here. Same `=== true` rule as
+        // observeWorkspace below: `!== false` enables web tools for
+        // garbage values (null, 0, "false", []) - fail closed instead.
+        // The store materialises its defaults, so the default-on value
+        // still reads `true` here.
+        webTools: getConfigStore().get('agentWebTools') === true,
         // No per-run flag on `acp` - same as web tools, the persistent key is
         // the only control an editor-hosted session has.
         //
@@ -177,7 +257,9 @@ export function registerAcpCommand(program: Command): void {
         // text of the user's files, which is the direction that must never be the
         // accident. The measurement was recorded during testing.
         observeWorkspace: getConfigStore().get('agentObserveWorkspace') === true,
-      });
+        budgetCaps,
+      };
+      new AcpAgentServer(serverOpts);
 
       process.stderr.write(`spycore acp: serving Agent Client Protocol v1 on stdio (model ${model})\n`);
       // Serve until the client closes our stdin.

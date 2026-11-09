@@ -635,6 +635,11 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
         // A-9: the final answer made a claim the run cannot back.
         pushNotice('warning', sanitizeForDisplay(e.text));
         break;
+      case 'warning':
+        // 4b1: BYOK finish-reason warning (e.g. truncation on max tokens) -
+        // the reply may be incomplete.
+        pushNotice('warning', sanitizeForDisplay(e.text));
+        break;
       case 'tool_call_cap':
         pushNotice(
           'warning',

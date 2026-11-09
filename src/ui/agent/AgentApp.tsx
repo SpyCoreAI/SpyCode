@@ -387,6 +387,10 @@ export function AgentApp({ task, model, provider, maxTurns, maxToolCallsPerTurn,
           // A-9: warn only - the final answer stands, the mismatch is visible.
           push({ kind: 'notice', variant: 'warning', text: sanitizeForDisplay(e.text) });
           break;
+        case 'warning':
+          // 4b1: BYOK finish-reason warning (e.g. truncation on max tokens).
+          push({ kind: 'notice', variant: 'warning', text: sanitizeForDisplay(e.text) });
+          break;
         case 'budget':
           setBudgetSnap({ tokensUsed: e.tokensUsed, turnsUsed: e.turnsUsed, elapsedMs: e.elapsedMs });
           break;

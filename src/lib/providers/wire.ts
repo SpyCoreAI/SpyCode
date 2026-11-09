@@ -6,6 +6,16 @@
  * detail comes only from response BODIES, never request headers.
  */
 
+/**
+ * Explicit per-request timeouts for BYOK adapters. These pin the undici
+ * defaults (30s to first byte, 300s for the body) so a hung endpoint is a
+ * decision, not an accident of whatever the HTTP client ships. The body
+ * bound stays at the undici default on purpose: a slow-streaming turn must
+ * not die mid-reply; the agent's own abort signal is what cuts a run short.
+ */
+export const BYOK_REQUEST_HEADERS_TIMEOUT_MS = 30_000;
+export const BYOK_REQUEST_BODY_TIMEOUT_MS = 300_000;
+
 export function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }

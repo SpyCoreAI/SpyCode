@@ -169,6 +169,9 @@ const ENV_VARS: CliSchema['envVars'] = [
   { name: 'SPYCORE_CONFIG_DIR', description: 'Override the OS-default config directory.' },
   { name: 'SPYCORE_NO_COLOR', description: 'Disable ANSI colour output (NO_COLOR is also honoured).' },
   { name: 'SPYCORE_NO_UPDATE_CHECK', description: 'Set to 1 to skip the daily update check.' },
+  { name: 'SPYCORE_NO_NOTIFY', description: 'Set to 1 to disable desktop notifications.' },
+  { name: 'SPYCORE_GOOGLE_CLIENT_ID', description: 'Google OAuth client ID for BYOK Google providers (stored with the provider by `spycore provider add --oauth` when present).' },
+  { name: 'SPYCODE_GUARDIAN_THRESHOLD', description: 'Override the guardian threshold: consecutive approval rejections before the denial circuit breaker engages (0 disables it).' },
 ];
 
 const EXIT_CODES = {

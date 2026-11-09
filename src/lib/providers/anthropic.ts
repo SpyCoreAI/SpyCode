@@ -14,7 +14,13 @@
 import { request } from 'undici';
 import { parseSSEStream } from '../sse.js';
 import { EXIT_USER_ERROR, SpycoreCliError } from '../errors.js';
-import { connectionErrorMessage, errText, readErrorDetail } from './wire.js';
+import {
+  BYOK_REQUEST_BODY_TIMEOUT_MS,
+  BYOK_REQUEST_HEADERS_TIMEOUT_MS,
+  connectionErrorMessage,
+  errText,
+  readErrorDetail,
+} from './wire.js';
 import { pruneByokSessions, trimHistoryMessages } from './history.js';
 import type {
   CreateConversationParams,
@@ -63,6 +69,8 @@ interface AnthropicStreamData {
   delta?: { type?: unknown; text?: unknown };
   /** message_delta */
   usage?: AnthropicUsage;
+  /** message_delta: why the model stopped ('end_turn' | 'max_tokens' | 'stop_sequence' | 'tool_use'). */
+  stop_reason?: unknown;
   /** error */
   error?: { message?: unknown };
 }
@@ -142,7 +150,14 @@ export class AnthropicProvider implements Provider {
 
     let res;
     try {
-      res = await request(url, { method: 'POST', headers, body, signal: params.signal });
+      res = await request(url, {
+        method: 'POST',
+        headers,
+        body,
+        signal: params.signal,
+        headersTimeout: BYOK_REQUEST_HEADERS_TIMEOUT_MS,
+        bodyTimeout: BYOK_REQUEST_BODY_TIMEOUT_MS,
+      });
     } catch (err) {
       if (params.signal?.aborted) {
         // The user message was already pushed with no assistant reply to
@@ -193,6 +208,8 @@ export class AnthropicProvider implements Provider {
     let sawUsage = false;
     let usageInput = 0;
     let usageOutput = 0;
+    // Why the model stopped - 'max_tokens' means the reply was cut off.
+    let stopReason: string | undefined;
     /**
      * A turn that ends in error must still leave the history alternating:
      * keep the partial assistant reply when one exists, otherwise take
@@ -245,6 +262,7 @@ export class AnthropicProvider implements Provider {
               usageOutput = Number(u.output_tokens ?? 0) || usageOutput;
               sawUsage = true;
             }
+            if (typeof chunk.stop_reason === 'string') stopReason = chunk.stop_reason;
             break;
           }
           case 'error': {
@@ -256,6 +274,12 @@ export class AnthropicProvider implements Provider {
           case 'message_stop': {
             session.messages.push({ role: 'assistant', content: assistantText });
             if (sawUsage) yield { type: 'usage', input: usageInput, output: usageOutput };
+            if (stopReason === 'max_tokens') {
+              yield {
+                type: 'warning',
+                message: 'Response truncated (max tokens hit) - the reply may be incomplete.',
+              };
+            }
             yield { type: 'done' };
             return;
           }
@@ -276,6 +300,12 @@ export class AnthropicProvider implements Provider {
     // Stream ended without message_stop (unusual) - still finish gracefully.
     session.messages.push({ role: 'assistant', content: assistantText });
     if (sawUsage) yield { type: 'usage', input: usageInput, output: usageOutput };
+    if (stopReason === 'max_tokens') {
+      yield {
+        type: 'warning',
+        message: 'Response truncated (max tokens hit) - the reply may be incomplete.',
+      };
+    }
     yield { type: 'done' };
   }
 }

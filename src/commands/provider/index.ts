@@ -43,14 +43,20 @@ export function healthCheckTimeoutMs(): number {
   return Number.isFinite(raw) && raw > 0 ? raw : 30_000;
 }
 
-/** How a provider's key is sourced, for `list` - never the key itself. */
+/** How a provider's key is sourced, for `list` - never the key itself, not even its last characters. */
 function keySource(p: StoredProviderConfig): string {
   if (p.apiKeyEnv && p.apiKeyEnv.length > 0) return `env:${p.apiKeyEnv}`;
-  if (p.apiKey && p.apiKey.length > 0) return `stored:••••${p.apiKey.slice(-4)}`;
+  if (p.apiKey && p.apiKey.length > 0) return 'stored';
   // Key-required types fall back to their default env var at run time; the
   // keyless state is only meaningful for OpenAI-compatible local servers.
   const defaults = BYOK_TYPE_DEFAULTS[p.type];
   return defaults.keyOptional ? 'none' : `env:${defaults.apiKeyEnv} (default)`;
+}
+
+/** Case-insensitive lookup: `provider add Foo` must answer to `foo` everywhere. */
+function findStored(name: string): StoredProviderConfig | undefined {
+  const target = name.trim().toLowerCase();
+  return getStoredProviders().find((p) => p.name.toLowerCase() === target);
 }
 
 function registerAdd(group: Command): void {
@@ -87,7 +93,7 @@ function registerAdd(group: Command): void {
         );
       }
       const existing = getStoredProviders();
-      if (existing.some((p) => p.name === trimmedName)) {
+      if (existing.some((p) => p.name.toLowerCase() === trimmedName.toLowerCase())) {
         throw new SpycoreCliError(
           `A provider named "${trimmedName}" already exists.`,
           EXIT_USER_ERROR,
@@ -322,22 +328,23 @@ function registerRemove(group: Command): void {
     .addOption(new Option('-y, --yes', 'Delete without the confirmation prompt'))
     .action(async (name: string, opts: { yes?: boolean }) => {
       const trimmed = name.trim();
-      const list = getStoredProviders();
-      if (!list.some((p) => p.name === trimmed)) {
+      const stored = findStored(trimmed);
+      if (!stored) {
         throw new SpycoreCliError(`No saved provider named "${trimmed}".`, EXIT_USER_ERROR, 'List them: spycore provider list');
       }
+      const list = getStoredProviders();
       // Destructive: confirm first. The prompt sanitizes the composed
       // question (see prompt.ts); a non-answer cancels the deletion.
-      if (!opts.yes && !(await confirmYesNo(`Delete saved provider "${trimmed}"?`))) {
+      if (!opts.yes && !(await confirmYesNo(`Delete saved provider "${stored.name}"?`))) {
         info('Cancelled - nothing deleted.');
         return;
       }
-      setStoredProviders(list.filter((p) => p.name !== trimmed));
-      if (getDefaultProviderName() === trimmed) {
+      setStoredProviders(list.filter((p) => p.name !== stored.name));
+      if (getDefaultProviderName() === stored.name) {
         setDefaultProviderName(undefined);
         info('It was the default - default reset to spycore.');
       }
-      success(`Removed provider "${trimmed}".`);
+      success(`Removed provider "${stored.name}".`);
     });
 }
 
@@ -352,15 +359,17 @@ function registerUse(group: Command): void {
         success('Default provider set to spycore (built-in).');
         return;
       }
-      if (!getStoredProviders().some((p) => p.name === target)) {
+      const stored = findStored(target);
+      if (!stored) {
         throw new SpycoreCliError(
           `No saved provider named "${target}".`,
           EXIT_USER_ERROR,
           'List them: spycore provider list  ·  reset to built-in: spycore provider use spycore',
         );
       }
-      setDefaultProviderName(target);
-      success(`Default provider set to "${target}".`);
+      // Store the canonical saved name, not the typed casing.
+      setDefaultProviderName(stored.name);
+      success(`Default provider set to "${stored.name}".`);
     });
 }
 
@@ -371,12 +380,14 @@ function registerTest(group: Command): void {
     .addOption(new Option('--model <id>', 'Model to test with (overrides the saved model)'))
     .action(async (name: string, opts: { model?: string }) => {
       const target = name.trim();
-      if (!getStoredProviders().some((p) => p.name === target)) {
+      const stored = findStored(target);
+      if (!stored) {
         throw new SpycoreCliError(`No saved provider named "${target}".`, EXIT_USER_ERROR, 'List them: spycore provider list');
       }
+      const targetName = stored.name;
       // Reuse the exact agent-run resolution (key precedence, missing-model error).
       const selection = resolveProviderSelection({
-        providerFlag: target,
+        providerFlag: targetName,
         model: opts.model,
         baseUrl: undefined,
         apiKeyEnv: undefined,
@@ -385,26 +396,52 @@ function registerTest(group: Command): void {
         defaultProvider: undefined,
       });
       if (selection.kind !== 'byok') {
-        throw new SpycoreCliError(`Provider "${target}" is not testable.`, EXIT_USER_ERROR);
+        throw new SpycoreCliError(`Provider "${targetName}" is not testable.`, EXIT_USER_ERROR);
       }
       const { config } = selection;
-      info(`Testing "${target}" → ${config.baseURL} (model ${config.model})…`);
+      info(`Testing "${targetName}" → ${config.baseURL} (model ${config.model})…`);
       // The factory lazy-loads whichever adapter speaks this config's wire.
       const { createByokProvider } = await import('../../lib/providers/factory.js');
       const provider = await createByokProvider(config);
       const conversationId = await provider.createConversation({ model: config.model });
+      // Same 30s bound as the `provider add` health check: without it a
+      // stalled endpoint hangs here until the undici body timeout (300s)
+      // with no progress output. The AbortController actually closes the
+      // connection on timeout instead of abandoning it.
+      const timeoutMs = healthCheckTimeoutMs();
+      const abort = new AbortController();
+      const timer = setTimeout(() => abort.abort(), timeoutMs);
+      info(`Waiting for a reply (up to ${timeoutMs / 1000}s)…`);
       let errMsg: string | null = null;
-      for await (const ev of provider.streamChat({ conversationId, message: 'Reply with: OK', model: config.model })) {
-        if (ev.type === 'error') {
-          errMsg = ev.message;
-          break;
+      try {
+        for await (const ev of provider.streamChat({
+          conversationId,
+          message: 'Reply with: OK',
+          model: config.model,
+          signal: abort.signal,
+        })) {
+          if (ev.type === 'error') {
+            errMsg = ev.message;
+            break;
+          }
+          if (ev.type === 'done') break;
         }
-        if (ev.type === 'done') break;
+      } catch (err) {
+        if (abort.signal.aborted) {
+          throw new SpycoreCliError(
+            `Provider "${targetName}" test timed out after ${timeoutMs / 1000}s.`,
+            EXIT_NETWORK_ERROR,
+            'Check that the endpoint is reachable and the key is valid.',
+          );
+        }
+        throw err;
+      } finally {
+        clearTimeout(timer);
       }
       if (errMsg) {
-        throw new SpycoreCliError(`Provider "${target}" test failed: ${errMsg}`, EXIT_NETWORK_ERROR);
+        throw new SpycoreCliError(`Provider "${targetName}" test failed: ${errMsg}`, EXIT_NETWORK_ERROR);
       }
-      success(`Provider "${target}" is reachable.`);
+      success(`Provider "${targetName}" is reachable.`);
     });
 }
 

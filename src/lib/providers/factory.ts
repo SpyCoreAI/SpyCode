@@ -6,6 +6,7 @@
  */
 import { EXIT_USER_ERROR, SpycoreCliError } from '../errors.js';
 import { getStoredProviders, setStoredProviders } from '../config.js';
+import type { OAuthConfig } from '../oauth.js';
 import type { ByokConfig } from './byok-config.js';
 import type { Provider } from './types.js';
 
@@ -51,7 +52,18 @@ export async function createByokProvider(config: ByokConfig): Promise<Provider> 
         // fallback for providers stored before the id was kept; with
         // neither, googleOAuthConfig throws the setup hint. Use a dummy
         // port - we only need the token URL and client ID for refresh.
-        const oauthConfig = googleOAuthConfig(0, config.oauthClientId);
+        // googleOAuthConfig throws a plain Error - wrap it so the CLI
+        // renders the code + hint instead of a raw stack.
+        let oauthConfig: OAuthConfig;
+        try {
+          oauthConfig = googleOAuthConfig(0, config.oauthClientId);
+        } catch (err) {
+          throw new SpycoreCliError(
+            err instanceof Error ? err.message : String(err),
+            EXIT_USER_ERROR,
+            'Re-authenticate with `spycore provider add --type google --oauth`.',
+          );
+        }
         // Refresh on demand, not just once at construction: access tokens
         // expire after ~1h, so a provider built here used to die mid-run
         // with 401. The initial refresh still runs now (a bad refresh
@@ -63,7 +75,17 @@ export async function createByokProvider(config: ByokConfig): Promise<Provider> 
         // from one) so the next process does not retry with a revoked token.
         let currentRefreshToken = config.oauthRefreshToken;
         const refresh = async (): Promise<string> => {
-          const tokens = await refreshAccessToken(oauthConfig, currentRefreshToken);
+          // refreshAccessToken has no timeout of its own (its fetch takes
+          // no signal - see the lib batch's oauth.ts follow-up), so bound
+          // it here: a hung token endpoint must fail the refresh after
+          // 30s instead of hanging provider construction - or a mid-run
+          // 401 retry - forever. The race only unblocks the caller; the
+          // underlying fetch still settles on its own.
+          const tokens = await withTimeout(
+            refreshAccessToken(oauthConfig, currentRefreshToken),
+            OAUTH_REFRESH_TIMEOUT_MS,
+            'Google OAuth token refresh timed out after 30s',
+          );
           if (tokens.refreshToken !== currentRefreshToken) {
             currentRefreshToken = tokens.refreshToken;
             if (config.sourceName) persistRotatedRefreshToken(config.sourceName, tokens.refreshToken);
@@ -85,10 +107,41 @@ export async function createByokProvider(config: ByokConfig): Promise<Provider> 
           );
         }
       }
+      // An OAuth client id with no refresh token and no key is an
+      // incomplete OAuth config, not a missing-key config - say so.
+      if (config.oauthClientId && !config.oauthRefreshToken && !config.apiKey) {
+        throw new SpycoreCliError(
+          'Provider uses Google OAuth but has no refresh token stored.',
+          EXIT_USER_ERROR,
+          'Re-authenticate with `spycore provider add --type google --oauth`.',
+        );
+      }
       const apiKey = requireKey(config);
       return new GoogleProvider({ baseURL: config.baseURL, apiKey });
     }
   }
+  // No default case on purpose: a runtime (tampered) config with an
+  // unknown type must fail loudly here instead of resolving to undefined
+  // and crashing later at the first method call.
+  throw new SpycoreCliError(
+    `Unknown BYOK provider type: ${String((config as { type?: unknown }).type ?? '')}.`,
+    EXIT_USER_ERROR,
+    'A stored provider config lists one of: openai, anthropic, google. Re-save it with `spycore provider add`.',
+  );
+}
+
+/** Bound on a Google OAuth refresh (call-site only - see the refresh closure). */
+const OAUTH_REFRESH_TIMEOUT_MS = 30_000;
+
+/** Race a promise against a timeout; the timeout error names the operation. */
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
 }
 
 /**

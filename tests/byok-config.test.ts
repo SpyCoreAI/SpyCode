@@ -41,12 +41,17 @@ describe('isLocalBaseURL', () => {
     expect(isLocalBaseURL('http://mybox.local:11434')).toBe(true);
   });
 
-  test('KNOWN GAP: IPv6 loopback is missed on Node 24 - URL keeps the brackets', () => {
-    // The source comment claims `new URL('http://[::1]/').hostname` is '::1';
-    // measured on this runtime it is '[::1]', so the '::1' check never fires.
-    // Flagged for a fix; pinned here so the gap cannot be re-described away.
+  test('IPv6 loopback counts as local (bracketed hostname form)', () => {
+    // Node 24 keeps the brackets in URL.hostname ('[::1]'); the check
+    // strips them before comparing, so the loopback is recognised.
     expect(new URL('http://[::1]:11434').hostname).toBe('[::1]');
-    expect(isLocalBaseURL('http://[::1]:11434')).toBe(false);
+    expect(isLocalBaseURL('http://[::1]:11434')).toBe(true);
+  });
+
+  test('the rest of the 127/8 loopback block counts as local', () => {
+    expect(isLocalBaseURL('http://127.0.0.2:8080/v1')).toBe(true);
+    expect(isLocalBaseURL('http://127.1.2.3:8080/v1')).toBe(true);
+    expect(isLocalBaseURL('http://127.255.255.255:8080/v1')).toBe(true);
   });
 
   test('public hosts are not local', () => {

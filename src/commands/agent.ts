@@ -18,7 +18,6 @@ import { describeToolsForPrompt } from '../lib/agent/tools.js';
 import {
   createRunBudget,
   resolveBudgetCaps,
-  resolveMaxTurns,
   resolveObserveWorkspaceEnabled,
   resolveWebToolsEnabled,
 } from '../lib/agent/run-config.js';
@@ -82,6 +81,41 @@ import { shutdownLspManagers } from '../lib/agent/lsp/manager.js';
 import { shutdownAllMcpClients } from '../lib/agent/mcp-client.js';
 
 const ALLOWED_AGENT_MODELS = ['charon', 'styx', 'hermes', 'minos'] as const;
+
+/**
+ * Strict positive-integer flag parsing for the runaway-guard flags
+ * (--max-turns, --max-tool-calls-per-turn, --cmd-timeout). Unlike
+ * parseIntFlag (which clamps) and resolveMaxTurns (which silently falls
+ * back to the default), an unparseable or out-of-range value is an
+ * error: `--max-turns abc` or `0` must never silently become 25, and a
+ * cap must never silently go uncapped.
+ */
+function parseStrictIntFlag(
+  raw: string | undefined,
+  flag: string,
+  min: number,
+  max: number,
+  defaultValue: number,
+): number {
+  if (raw === undefined) return defaultValue;
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) {
+    throw new SpycoreCliError(
+      `Invalid --${flag}: "${raw}" is not a positive integer.`,
+      EXIT_USER_ERROR,
+      `Pass --${flag} <n> with ${min} <= n <= ${max}.`,
+    );
+  }
+  const n = Number(trimmed);
+  if (!Number.isSafeInteger(n) || n < min || n > max) {
+    throw new SpycoreCliError(
+      `Invalid --${flag}: "${raw}" is outside ${min}–${max}.`,
+      EXIT_USER_ERROR,
+      `Pass --${flag} <n> with ${min} <= n <= ${max}.`,
+    );
+  }
+  return n;
+}
 
 /**
  * H-2 - the `--json` event stream must not carry raw tool arguments. A
@@ -542,16 +576,15 @@ export function registerAgentCommand(program: Command): void {
         throw new SpycoreCliError('Task description is required.', EXIT_USER_ERROR);
       }
 
-      const maxTurns = resolveMaxTurns(opts.maxTurns);
-      const maxToolCallsPerTurn = Math.max(
+      const maxTurns = parseStrictIntFlag(opts.maxTurns, 'max-turns', MIN_TURNS, MAX_TURNS_CAP, DEFAULT_MAX_TURNS);
+      const maxToolCallsPerTurn = parseStrictIntFlag(
+        opts.maxToolCallsPerTurn,
+        'max-tool-calls-per-turn',
         1,
-        Math.min(
-          MAX_TOOL_CALLS_PER_TURN_CAP,
-          Number(opts.maxToolCallsPerTurn ?? DEFAULT_MAX_TOOL_CALLS_PER_TURN) ||
-            DEFAULT_MAX_TOOL_CALLS_PER_TURN,
-        ),
+        MAX_TOOL_CALLS_PER_TURN_CAP,
+        DEFAULT_MAX_TOOL_CALLS_PER_TURN,
       );
-      const cmdTimeoutSec = Math.max(1, Math.min(3600, Number(opts.cmdTimeout ?? 120) || 120));
+      const cmdTimeoutSec = parseStrictIntFlag(opts.cmdTimeout, 'cmd-timeout', 1, 3600, 120);
       const commandTimeoutMs = cmdTimeoutSec * 1000;
       const verifyCommand = (opts.verify ?? '').trim() || undefined;
       const verifyAttempts = clampVerifyAttempts(Number(opts.verifyAttempts ?? 3));
@@ -629,6 +662,16 @@ export function registerAgentCommand(program: Command): void {
         }
         const target = resolveResumeTarget(cwd, opts.resume as string | true);
         const { session, state } = target;
+        // A record without a conversation id has no server-side transcript
+        // to re-bind to (the run never reached its first model turn) -
+        // fail cleanly instead of crashing on a non-null assertion below.
+        if (state.conversationId === null) {
+          throw new SpycoreCliError(
+            `Session ${session.id} has no recorded conversation to resume (the run never reached its first model turn).`,
+            EXIT_USER_ERROR,
+            'Start a fresh run instead of --resume.',
+          );
+        }
         task = session.task;
 
         // Model: an explicit --model overrides (stated in the banner);
@@ -710,7 +753,7 @@ export function registerAgentCommand(program: Command): void {
         // provider with the recorded capability so 'auto' resolves to exactly
         // the protocol this conversation already speaks.
         const spycore = new SpyCoreProvider();
-        spycore.seedCapabilities(state.conversationId!, { nativeTools: state.nativeTools });
+        spycore.seedCapabilities(state.conversationId, { nativeTools: state.nativeTools });
         provider = spycore;
         toolProtocol = 'auto';
 
@@ -725,7 +768,7 @@ export function registerAgentCommand(program: Command): void {
         resumeRun = {
           target,
           drift,
-          conversationId: state.conversationId!,
+          conversationId: state.conversationId,
           continueMessage: buildResumeContinueMessage({
             state,
             driftAccepted,
@@ -962,7 +1005,10 @@ export function registerAgentCommand(program: Command): void {
           cwd,
           task,
           initial: {
-            providerKind: selection.kind === 'byok' ? 'byok' : 'spycore',
+            // The run is journaled under the provider it ACTUALLY ran on:
+            // after a BYOK→SpyCore fallback useByok is false even though
+            // the selection was byok.
+            providerKind: useByok ? 'byok' : 'spycore',
             model,
             planMode,
             maxTurns,
@@ -1194,6 +1240,10 @@ export function registerAgentCommand(program: Command): void {
             break;
           case 'evidence_warn':
             // A-9: the final answer made a claim the run cannot back - warn only.
+            process.stderr.write(`${chalk.yellow('⚠')} ${chalk.dim(sanitizeForDisplay(e.text))}\n`);
+            break;
+          case 'warning':
+            // 4b1: BYOK finish-reason warning - the reply may be incomplete.
             process.stderr.write(`${chalk.yellow('⚠')} ${chalk.dim(sanitizeForDisplay(e.text))}\n`);
             break;
           case 'budget': {

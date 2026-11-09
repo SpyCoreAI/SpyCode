@@ -185,11 +185,10 @@ describe('createByokProvider dispatch', () => {
     ).rejects.toThrow(/Google OAuth token refresh failed/);
   });
 
-  test('an unknown type returns no provider (the switch has no default - visible, not silent)', async () => {
+  test('an unknown type throws instead of returning no provider', async () => {
     const { createByokProvider } = await import('../src/lib/providers/factory.js');
-    const provider = await createByokProvider(
-      baseConfig({ type: 'bogus' as unknown as ByokConfig['type'] }),
-    );
-    expect(provider).toBeUndefined();
+    await expect(
+      createByokProvider(baseConfig({ type: 'bogus' as unknown as ByokConfig['type'] })),
+    ).rejects.toThrow(/Unknown BYOK provider type: bogus/);
   });
 });

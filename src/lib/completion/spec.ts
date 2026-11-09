@@ -730,6 +730,8 @@ export const COMMAND_SPEC: CommandSpec = {
         },
         { name: '--cmd-timeout', takesValue: true, description: 'Timeout for each run_command, in seconds' },
         { name: '--max-turns', takesValue: true, description: 'Max model round-trips per prompt turn (1-200)' },
+        { name: '--max-tokens', takesValue: true, description: 'Stop a prompt after this many total tokens (across all its turns)' },
+        { name: '--max-time', takesValue: true, description: 'Stop a prompt after this many seconds of wall-clock time' },
       ],
     },
     {

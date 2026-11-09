@@ -465,15 +465,11 @@ interface StreamTurnInput {
  * be left half-applied.
  */
 /**
- * 4b1 added ProviderEvent 'warning' (BYOK finish_reason truncation). This
- * clone's ProviderEvent predates the variant, so the discriminant is read
- * through a widened string — once the variant lands in types.ts this still
- * compiles and matches the same way. Do not "simplify" to
- * `event.type === 'warning'` until then: tsc rejects it (TS2367 while
- * variants remain, TS2339 once the chain narrows to `never`).
+ * 4b1 added ProviderEvent 'warning' (BYOK finish_reason truncation); the
+ * variant is in types.ts, so the discriminant reads directly.
  */
 function isWarningEvent(event: ProviderEvent): boolean {
-  return (event as { type: string }).type === 'warning';
+  return event.type === 'warning';
 }
 
 async function streamTurn(input: StreamTurnInput): Promise<TurnResult> {

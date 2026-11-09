@@ -10,6 +10,7 @@
  * message + the conversation id - the prior history lives server-side.
  */
 import { api, streamRequest, type StreamEvent } from '../api.js';
+import { EXIT_SERVER_ERROR, SpycoreCliError } from '../errors.js';
 import type {
   CreateConversationParams,
   Provider,
@@ -35,6 +36,15 @@ export class SpyCoreProvider implements Provider {
       apiUrlOverride: params.apiUrlOverride,
       body: { model: params.model.toUpperCase() },
     });
+    // A server response without an id must fail here: publishing
+    // `undefined` as the conversation id breaks every later turn.
+    if (typeof resp?.id !== 'string' || resp.id.length === 0) {
+      throw new SpycoreCliError(
+        'The server created a conversation without an id.',
+        EXIT_SERVER_ERROR,
+        'The server response was malformed - retry, and report it if it repeats.',
+      );
+    }
     this.nativeToolsByConversation.set(resp.id, resp.capabilities?.nativeTools === true);
     return resp.id;
   }
@@ -126,6 +136,10 @@ export class SpyCoreProvider implements Provider {
         yield { type: 'done' };
         return;
       }
+      // Poll the (time) budget after EVERY event, not just text chunks:
+      // a turn streaming only tool calls used to never check shouldStop
+      // and ran past its budget.
+      if (params.shouldStop?.()) return;
     }
   }
 }
