@@ -1,7 +1,9 @@
 /**
  * Minimal type declarations for `node:sqlite` (added in Node 22.5.0 behind
- * `--experimental-sqlite`; usable without the flag since Node 22.13.0 - the
- * repo pins @types/node 20, which predates it). Only the surface
+ * `--experimental-sqlite`; usable without the flag since Node 22.13.0, and
+ * with FTS5 in the bundled SQLite since Node 22.16.0 (22.13.0/22.15.0
+ * have no FTS5; session-search.ts builds an FTS5 table, so the floor is
+ * 22.16.0 - the repo pins @types/node 20, which predates it). Only the surface
  * session-search.ts uses is declared - enough for typecheck, nothing more.
  * Verified against the real Node 24 runtime (not better-sqlite3's API).
  */

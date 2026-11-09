@@ -616,14 +616,22 @@ describe('pipe census baseline discipline', () => {
    * Pins the lazy-stdio mechanism behind the `warmUpProcessStdio` call in
    * `beforeEach` - in a FRESH child process, where the worker's own
    * already-materialized stdio cannot hide it. A child that reads its
-   * PipeWrap census before touching stdout reads one fewer than the same
+   * PipeWrap census before touching stdout reads fewer than the same
    * child right after its first stdout write: the process's own stdout
-   * Socket materializes lazily, and that +1 is indistinguishable in a bare
-   * count from a leaked child pipe. Warming the stdio up first (touch all
-   * three streams, yield a tick) makes the census stable across the same
-   * write. If this test ever goes red, the warm-up premise is wrong and
-   * the pipe tests' baselines are suspect again - do not "fix" it by
+   * Socket materializes lazily, and that growth is indistinguishable in a
+   * bare count from a leaked child pipe. Warming the stdio up first (touch
+   * all three streams, yield a tick) makes the census stable across the
+   * same write. If this test ever goes red, the warm-up premise is wrong
+   * and the pipe tests' baselines are suspect again - do not "fix" it by
    * deleting the warm-up.
+   *
+   * The cold growth is pinned as growth, not as an exact +1: the first
+   * stdout write materializes BOTH output pipes (stdout + stderr), so the
+   * census after it is always 2 - but the starting baseline is version
+   * dependent. Measured 2026-11-09, spawnSync with piped stdio, 10/10
+   * runs each: Node 22.13.0 and 22.16.0 start at 0 (cold 0 -> 2, the
+   * `+1` form fails there); Node 22.23.4 and 24.22.1 start at 1 (cold
+   * 1 -> 2). The warm half is exact on every version (3 -> 3).
    */
   const CENSUS_CHILD = `
 import { writeFileSync } from 'node:fs';
@@ -649,9 +657,9 @@ writeFileSync(outFile, JSON.stringify({ first, second }));
     return JSON.parse(readFileSync(outFile, 'utf8')) as { first: number; second: number };
   }
 
-  test('a cold census grows by one on first stdout touch; a warmed one is stable', () => {
+  test('a cold census grows on first stdout touch; a warmed one is stable', () => {
     const cold = runCensusChild(false);
-    expect(cold.second).toBe(cold.first + 1);
+    expect(cold.second).toBeGreaterThan(cold.first);
     const warm = runCensusChild(true);
     expect(warm.second).toBe(warm.first);
   });

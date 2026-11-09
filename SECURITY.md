@@ -204,8 +204,8 @@ Linux verified 2026-11-09 (full suite, 3658 tests, on node 24), with the
 `multi-tool`, `symlink-escape`, `catastrophic-guard` and `config-0600`
 checks green. Coverage was last measured 2026-11-08: lines 73.94%,
 statements 73.44%, functions 77.99%, branches 67.45% (re-stamp at release
-prep). Node 20 is not supported: `engines` requires `>=22.13.0` and the CI
-matrix runs node 22 and 24, plus the 22.13.0 minimum on Ubuntu.
+prep). Node 20 is not supported: `engines` requires `>=22.16.0` and the CI
+matrix runs node 22 and 24, plus the 22.16.0 minimum on Ubuntu.
 
 **amd64 is not verified in this release.** Only emulated amd64 was available
 here, and under emulation the heaviest checks exceed their time limits and fail

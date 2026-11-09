@@ -29,19 +29,22 @@ jobs:
         node-version: [22, 24]
         include:
           # R4-5 - a bare major resolves to the latest 22.x/24.x, so the
-          # matrix never ran the declared minimum (engines >=22.13.0, the
+          # matrix never ran the declared minimum (engines >=22.16.0, the
           # first 22.x release where node:sqlite works without
-          # --experimental-sqlite; it landed in 22.5.0 behind the flag).
+          # --experimental-sqlite AND ships FTS5: unflagged since 22.13.0,
+          # FTS5 enabled since 22.16.0 - 22.13.0/22.15.0 have no FTS5 and
+          # session search builds an FTS5 table; it landed in 22.5.0
+          # behind the flag).
           # One extra Ubuntu leg pins the floor; a dependency on a newer
           # Node API would otherwise pass CI everywhere and break on
           # exactly the oldest version the package claims to support.
           - os: ubuntu-24.04
-            node-version: '22.13.0'
+            node-version: '22.16.0'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       # standalone: pnpm runs on its own bundled runtime — pnpm 11.6+ needs
       # newer node builtins than node 20 provides (node:sqlite, used by the
-      # session search, requires node 22.13+). The matrix therefore runs the
+      # session search, requires node 22.16+ for FTS5). The matrix therefore runs the
       # two supported LTS lines, 22 and 24; the project itself builds and
       # tests on the matrix node version.
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
