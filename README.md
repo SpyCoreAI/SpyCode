@@ -18,7 +18,7 @@ providers, skills, an MCP client, and an ACP server for IDE integration.
 
 [![npm](https://img.shields.io/npm/v/%40spycore%2Fcli?color=8A63D2&label=npm)](https://www.npmjs.com/package/@spycore/cli)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![node](https://img.shields.io/badge/node-%3E%3D22.5-339933?logo=node.js&logoColor=white)](https://nodejs.org)
+[![node](https://img.shields.io/badge/node-%3E%3D22.13-339933?logo=node.js&logoColor=white)](https://nodejs.org)
 [![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20WSL-lightgrey)](#install)
 
 </div>
@@ -56,7 +56,7 @@ providers, skills, an MCP client, and an ACP server for IDE integration.
 npm install -g @spycore/cli
 ```
 
-Requirements: **Node 22.5+**. macOS and Linux are supported; Windows via WSL.
+Requirements: **Node 22.13+**. macOS and Linux are supported; Windows via WSL.
 
 Alternatively, the installer at [spycore.ai/spycode](https://spycore.ai/spycode)
 sets up the same package (a dependency-free binary distribution is planned).
