@@ -141,7 +141,7 @@ function tryWmicBootTimeMs(): number | null {
   try {
     const out = execFileSync('wmic', ['os', 'get', 'LastBootUpTime', '/value'], {
       encoding: 'utf-8',
-      timeout: 15_000,
+      timeout: 5_000,
     });
     return parseWmicBootTime(out);
   } catch {
@@ -163,7 +163,7 @@ function tryPowerShellBootTimeMs(): number | null {
         '-Command',
         '(Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().ToString("o")',
       ],
-      { encoding: 'utf-8', timeout: 30_000 },
+      { encoding: 'utf-8', timeout: 10_000 },
     );
     const ms = Date.parse(out.trim());
     return Number.isFinite(ms) ? ms : null;
