@@ -602,8 +602,13 @@ describe('L22 stored providers are validated per entry', () => {
       'junk',
     ] as never);
     const stored = getStoredProviders();
-    expect(stored).toHaveLength(1);
-    expect(stored[0]?.name).toBe('good');
+    // Structurally corrupt rows (non-string name, empty baseURL, non-object)
+    // are dropped. An unknown `type` is KEPT: it flows to
+    // resolveProviderSelection / keySource, which throw the clean
+    // `Unknown BYOK provider type` error (R2 L9) instead of the entry
+    // silently vanishing from every list.
+    expect(stored).toHaveLength(2);
+    expect(stored.map((p) => p.name).sort()).toEqual(['bad-type', 'good']);
   });
 });
 

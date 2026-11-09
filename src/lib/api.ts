@@ -15,6 +15,14 @@ export interface ApiOptions {
   apiUrlOverride?: string | undefined;
   /** Skip the Authorization header even if a token is stored. Used by the public login route. */
   anonymous?: boolean;
+  /**
+   * Explicit bearer token for this one call, used instead of the stored
+   * token. `logout` clears the local token first and then revokes it
+   * server-side: without this the revoke goes out unauthenticated (the
+   * stored token is already gone) and the server-side session stays live.
+   * Still gated by the trusted-host check below - never sent elsewhere.
+   */
+  authToken?: string | undefined;
   /** Body for POST/PUT/DELETE; serialised as JSON. */
   body?: unknown;
   /** Extra headers to merge with defaults. */
@@ -77,7 +85,7 @@ export async function apiRequest<T>(
   // Authorization header, so the token can't be exfiltrated to an attacker- or
   // prompt-injected base URL. Self-hosting/dev still works via localhost.
   if (!opts.anonymous && isTrustedTokenHost(url)) {
-    const token = await getToken();
+    const token = opts.authToken ?? (await getToken());
     if (token) headers.authorization = `Bearer ${token}`;
   }
 

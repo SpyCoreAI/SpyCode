@@ -320,4 +320,93 @@ describe('4b1 item 2 - a BYOK→SpyCore fallback run is journaled as spycore', (
     expect(sessions).toHaveLength(1);
     expect(getResumeState(sessions[0]!)?.providerKind).toBe('spycore');
   });
+
+  test('a Google OAuth refresh failure falls back to SpyCore instead of hard-failing (R2 M2 + L8)', { timeout: 60_000 }, async () => {
+    process.chdir(workDir);
+    const { setStoredTokenInFile, getConfigStore, setStoredProviders } = await import('../src/lib/config.js');
+    setStoredTokenInFile('spycli_test_token');
+    getConfigStore().set('providerFallback', true);
+    setStoredProviders([
+      {
+        name: 'gbox',
+        type: 'google',
+        baseURL: 'https://generativelanguage.googleapis.com',
+        model: 'g-model',
+        oauthRefreshToken: 'rt-revoked',
+        oauthClientId: 'cid-1',
+      },
+    ]);
+    // The token endpoint rejects the revoked refresh token. Before the
+    // fix this threw out of createByokProvider - before the fallback try
+    // was ever entered - so the run hard-failed despite providerFallback.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: false,
+        status: 400,
+        text: async () => '{"error":"invalid_grant","error_description":"Token has been expired or revoked."}',
+      })),
+    );
+    let streamCalls = 0;
+    undiciState.responder = (url: string, init: Record<string, unknown>) => {
+      const method = (init.method as string | undefined) ?? 'GET';
+      if (method === 'GET' && url.endsWith('/auth/cli/whoami')) {
+        return jsonResp(200, { success: true, data: { plan: 'pro' } });
+      }
+      if (method === 'POST' && url.endsWith('/conversations')) {
+        return jsonResp(200, { success: true, data: { id: 'cnv_fallback' } });
+      }
+      if (method === 'POST' && url.includes('/api/chat/stream')) {
+        streamCalls += 1;
+        if (streamCalls === 1) {
+          return sseResp([{ type: 'text', content: 'STANDARD' }, { type: 'done' }]);
+        }
+        if (streamCalls === 2) {
+          return sseResp([
+            { type: 'text', content: toolBlock('write_file', { path: 'marker.txt', content: 'v1\n' }) },
+            { type: 'done' },
+          ]);
+        }
+        return sseResp([{ type: 'text', content: 'Done.' }, { type: 'done' }]);
+      }
+      throw new Error(`unexpected ${method} ${url}`);
+    };
+    const r = await runAgent(['make a marker file', '--provider', 'gbox', '--model', 'styx', '--yes']);
+    expect(r.error).toBeUndefined();
+    expect(r.stderr).toMatch(/Falling back to SpyCore/);
+    expect(readFileSync(join(workDir, 'marker.txt'), 'utf8')).toBe('v1\n');
+    // L8: the probe never ran (construction failed first), and a probe
+    // must never be recorded as a real call anyway - no phantom usage.
+    const { getByokUsage } = await import('../src/lib/byok-usage.js');
+    expect(getByokUsage()['gbox']).toBeUndefined();
+  });
+
+  test('the same refresh failure is still a hard error with fallback off (R2 M2)', { timeout: 60_000 }, async () => {
+    process.chdir(workDir);
+    const { setStoredTokenInFile, setStoredProviders } = await import('../src/lib/config.js');
+    setStoredTokenInFile('spycli_test_token');
+    setStoredProviders([
+      {
+        name: 'gbox',
+        type: 'google',
+        baseURL: 'https://generativelanguage.googleapis.com',
+        model: 'g-model',
+        oauthRefreshToken: 'rt-revoked',
+        oauthClientId: 'cid-1',
+      },
+    ]);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: false,
+        status: 400,
+        text: async () => '{"error":"invalid_grant","error_description":"Token has been expired or revoked."}',
+      })),
+    );
+    undiciState.responder = () => {
+      throw new Error('must not reach any endpoint - construction fails first');
+    };
+    const r = await runAgent(['make a marker file', '--provider', 'gbox', '--model', 'styx', '--yes']);
+    expect(String((r.error as Error)?.message)).toMatch(/Google OAuth token refresh failed/);
+  });
 });

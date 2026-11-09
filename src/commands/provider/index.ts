@@ -45,6 +45,16 @@ export function healthCheckTimeoutMs(): number {
 
 /** How a provider's key is sourced, for `list` - never the key itself, not even its last characters. */
 function keySource(p: StoredProviderConfig): string {
+  // A hand-edited / corrupted entry can carry an unknown type: fail with
+  // the same clean error as resolveProviderSelection, not a raw TypeError
+  // off the undefined defaults lookup below.
+  if (!isByokType(p.type)) {
+    throw new SpycoreCliError(
+      `Unknown BYOK provider type: ${String(p.type ?? '')}.`,
+      EXIT_USER_ERROR,
+      'A stored provider config lists one of: openai, anthropic, google. Re-save it with `spycore provider add`.',
+    );
+  }
   if (p.apiKeyEnv && p.apiKeyEnv.length > 0) return `env:${p.apiKeyEnv}`;
   if (p.apiKey && p.apiKey.length > 0) return 'stored';
   // Key-required types fall back to their default env var at run time; the

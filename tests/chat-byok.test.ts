@@ -81,6 +81,10 @@ function stdout(): string {
   return stdoutChunks.join('');
 }
 
+function stderr(): string {
+  return stderrChunks.join('');
+}
+
 function jsonResp(status: number, body: unknown): MockResp {
   return { statusCode: status, headers: {}, body: { json: async () => body } };
 }
@@ -88,6 +92,20 @@ function jsonResp(status: number, body: unknown): MockResp {
 function openaiSse(deltas: string[]): MockResp {
   const lines = deltas.map((d) => `data: ${JSON.stringify({ choices: [{ delta: { content: d } }] })}\n\n`);
   lines.push('data: [DONE]\n\n');
+  return {
+    statusCode: 200,
+    headers: { 'content-type': 'text/event-stream' },
+    body: Readable.from([Buffer.from(lines.join(''), 'utf8')]) as unknown as MockBody,
+  };
+}
+
+/** A reply cut off by max_tokens, with usage totals on the final chunk. */
+function openaiSseTruncated(): MockResp {
+  const lines = [
+    `data: ${JSON.stringify({ choices: [{ delta: { content: 'cut ' } }] })}\n\n`,
+    `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'length' }], usage: { prompt_tokens: 10, completion_tokens: 5 } })}\n\n`,
+    'data: [DONE]\n\n',
+  ];
   return {
     statusCode: 200,
     headers: { 'content-type': 'text/event-stream' },
@@ -169,6 +187,34 @@ describe('BYOK chat (logged out)', () => {
     await runChat(['chat', '--provider', 'local', '--no-stream', 'hi']);
     expect(stdout()).toContain('hello');
   });
+
+  test('a truncated BYOK reply warns, and usage tokens print (R2 L7)', async () => {
+    responder = (url) => {
+      if (url.includes('127.0.0.1:11434')) return openaiSseTruncated();
+      throw new Error(`unexpected ${url} - BYOK chat must not touch SpyCore`);
+    };
+    await runChat(['chat', '--provider', 'local', 'hi']);
+    expect(stdout()).toContain('cut ');
+    // Previously the cut-off text printed with no hint it was incomplete.
+    expect(stderr()).toMatch(/Response truncated/);
+    expect(stderr()).toContain('(10 in / 5 out tokens)');
+  });
+
+  test('a truncated BYOK reply carries usage + warnings in --json (R2 L7)', async () => {
+    responder = (url) => {
+      if (url.includes('127.0.0.1:11434')) return openaiSseTruncated();
+      throw new Error(`unexpected ${url} - BYOK chat must not touch SpyCore`);
+    };
+    await runChat(['--json', 'chat', '--provider', 'local', 'hi']);
+    const payload = JSON.parse(stdout()) as {
+      message: string;
+      usage?: { input: number; output: number };
+      warnings?: string[];
+    };
+    expect(payload.message).toContain('cut ');
+    expect(payload.usage).toEqual({ input: 10, output: 5 });
+    expect(payload.warnings?.join(' ')).toMatch(/Response truncated/);
+  });
 });
 
 describe('chat --new on the SpyCore path', () => {
@@ -206,5 +252,21 @@ describe('chat --new on the SpyCore path', () => {
     expect(requests.some((r) => r.url.endsWith('/conversations') && r.method === 'POST')).toBe(false);
     const stream = requests.find((r) => r.url.endsWith('/api/chat/stream'));
     expect(JSON.parse(String(stream?.body ?? '{}')).conversationId).toBe('cnv_old');
+  });
+
+  test('a conversation created without an id fails loudly instead of propagating undefined (R2 L10)', async () => {
+    responder = (url, init) => {
+      if (url.endsWith('/conversations') && init.method === 'POST') {
+        // Malformed server response: success envelope, no id.
+        return jsonResp(201, { success: true, data: { title: 'New', model: 'HERMES' } });
+      }
+      if (url.endsWith('/api/chat/stream')) return spycoreSse('hi there');
+      throw new Error(`unexpected ${init.method} ${url}`);
+    };
+    await expect(runChat(['chat', '--new', '--raw', 'Hi'])).rejects.toThrow(
+      /created a conversation without an id/,
+    );
+    // Nothing was stored or streamed with an undefined id.
+    expect(requests.some((r) => r.url.endsWith('/api/chat/stream'))).toBe(false);
   });
 });

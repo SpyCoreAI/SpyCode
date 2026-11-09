@@ -131,3 +131,37 @@ describe('SpyCoreProvider - native tool-use wire', () => {
     expect(body.tools).toHaveLength(1);
   });
 });
+
+describe('SpyCoreProvider - nativeTools map is pruned (R2 L11)', () => {
+  test('creating past the 32-session cap drops the oldest conversations', async () => {
+    let n = 0;
+    responder = () => {
+      n += 1;
+      return jsonResp({
+        success: true,
+        data: { id: `cnv_${n}`, capabilities: { nativeTools: true } },
+      });
+    };
+    const { SpyCoreProvider } = await import('../src/lib/providers/spycore.js');
+    const p = new SpyCoreProvider();
+    const ids: string[] = [];
+    for (let i = 0; i < 40; i += 1) {
+      ids.push(await p.createConversation({ model: 'styx' }));
+    }
+    // The 8 oldest were pruned; the newest 32 survive.
+    expect(p.supportsNativeTools(ids[0]!)).toBe(false);
+    expect(p.supportsNativeTools(ids[7]!)).toBe(false);
+    expect(p.supportsNativeTools(ids[8]!)).toBe(true);
+    expect(p.supportsNativeTools(ids[39]!)).toBe(true);
+  });
+
+  test('seedCapabilities also pays for the prune', async () => {
+    const { SpyCoreProvider } = await import('../src/lib/providers/spycore.js');
+    const p = new SpyCoreProvider();
+    for (let i = 0; i < 40; i += 1) {
+      p.seedCapabilities(`seed_${i}`, { nativeTools: true });
+    }
+    expect(p.supportsNativeTools('seed_0')).toBe(false);
+    expect(p.supportsNativeTools('seed_39')).toBe(true);
+  });
+});

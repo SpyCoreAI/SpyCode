@@ -852,10 +852,7 @@ export function registerAgentCommand(program: Command): void {
           const { createByokProvider } = await import('../lib/providers/factory.js');
           const { withUsageTracking, isFallbackEligibleError } = await import('../lib/byok-usage.js');
           const { getConfigStore } = await import('../lib/config.js');
-          const rawProvider = await createByokProvider(cfg);
-          // wrap with usage tracking (transparent, records `usage` events).
           const providerName = selection.sourceName ?? cfg.type;
-          provider = withUsageTracking(rawProvider, providerName);
           // pre-flight fallback check. If enabled, do a minimal real network
           // probe (createConversation is purely local in all adapters and
           // can never throw - the probe must hit the network via streamChat).
@@ -864,13 +861,25 @@ export function registerAgentCommand(program: Command): void {
           const fallbackEnabled = getConfigStore().get('providerFallback') === true;
           if (fallbackEnabled) {
             try {
-              const probeConvo = await provider.createConversation({ model: cfg.model });
+              // Construction is inside the fallback try: for Google OAuth it
+              // performs a live token refresh (up to 30s), and a revoked
+              // token / token-endpoint timeout / 5xx threw BEFORE the probe
+              // try was ever entered, so the run hard-failed despite
+              // providerFallback. Pure config errors (missing key) are not
+              // fallback-eligible, so they still rethrow as hard failures.
+              const rawProvider = await createByokProvider(cfg);
+              // The probe runs through the RAW provider, not the usage
+              // wrapper: the probe is not a real call, and recording it
+              // inflated `provider usage` by one phantom call + its tokens
+              // on every fallback-enabled run. The wrapper is applied only
+              // once the probe passes, for the real run.
+              const probeConvo = await rawProvider.createConversation({ model: cfg.model });
               let probeErr: string | null = null;
               // AbortController ensures the probe stream is actually closed on
               // timeout, not just abandoned by Promise.race.
               const probeAbort = new AbortController();
               const probePromise = (async () => {
-                for await (const ev of provider.streamChat({
+                for await (const ev of rawProvider.streamChat({
                   conversationId: probeConvo,
                   message: 'Reply with: OK',
                   model: cfg.model,
@@ -903,6 +912,8 @@ export function registerAgentCommand(program: Command): void {
               }
               // Probe succeeded or failed with non-eligible error - continue with BYOK.
               // (Non-eligible errors will surface naturally during the run.)
+              // wrap with usage tracking (transparent, records `usage` events).
+              provider = withUsageTracking(rawProvider, providerName);
             } catch (err) {
               if (isFallbackEligibleError(err)) {
                 const { warn } = await import('../lib/output.js');
@@ -915,6 +926,10 @@ export function registerAgentCommand(program: Command): void {
                 throw err;
               }
             }
+          } else {
+            const rawProvider = await createByokProvider(cfg);
+            // wrap with usage tracking (transparent, records `usage` events).
+            provider = withUsageTracking(rawProvider, providerName);
           }
           if (useByok) {
             routedVia = 'byok';

@@ -154,6 +154,13 @@ export function withUsageTracking(provider: Provider, providerName: string): Pro
  * Check if an error is a fallback-eligible BYOK failure.
  * Eligible: auth errors (401/403), rate limits (429), network errors, timeouts.
  * Not eligible: user errors, invalid requests (these won't succeed on SpyCore either).
+ *
+ * The matcher works on the error STRINGS the adapters actually emit, not the
+ * errno spellings: `connectionErrorMessage` rewrites ECONNREFUSED/ENOTFOUND
+ * into prose (`(connection refused)`, `Cannot resolve the model endpoint
+ * host`), and probe failures arrive as plain Errors whose message is the
+ * adapter's string (`Model endpoint returned HTTP 503.`), so the prose
+ * forms and the 5xx substrings are what can ever match here.
  */
 export function isFallbackEligibleError(err: unknown): boolean {
   if (!err || typeof err !== 'object') return false;
@@ -166,13 +173,26 @@ export function isFallbackEligibleError(err: unknown): boolean {
     msg.includes('401') ||
     msg.includes('403') ||
     msg.includes('429') ||
+    msg.includes('500') ||
+    msg.includes('502') ||
+    msg.includes('503') ||
+    msg.includes('504') ||
     msg.includes('rate limit') ||
     msg.includes('unauthorized') ||
     msg.includes('invalid api key') ||
+    msg.includes('invalid_grant') ||
+    msg.includes('invalid grant') ||
     msg.includes('authentication') ||
     msg.includes('econnrefused') ||
     msg.includes('enotfound') ||
     msg.includes('etimedout') ||
+    msg.includes('econnreset') ||
+    // Prose forms `connectionErrorMessage` actually emits for the errno
+    // spellings above - the spellings themselves never survive into the
+    // probe error string.
+    msg.includes('connection refused') ||
+    msg.includes('cannot resolve') ||
+    msg.includes('cannot reach') ||
     msg.includes('network') ||
     msg.includes('timeout') ||
     // The probe throws 'BYOK provider probe timed out after 15s' - "timed

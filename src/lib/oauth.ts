@@ -165,8 +165,11 @@ export async function runOAuthFlow(config: OAuthConfig): Promise<OAuthTokens> {
       }
 
       if (!code) {
+        clearTimeout(timeout);
         res.writeHead(400);
         res.end('Missing code');
+        closeServer();
+        reject(new Error('OAuth callback missing code'));
         return;
       }
 
@@ -207,6 +210,9 @@ async function exchangeCodeForTokens(
   verifier: string,
   redirectUri: string,
 ): Promise<OAuthTokens> {
+  // Same 30s bound as the refresh path: a hung token endpoint used to
+  // stall the OAuth flow until the outer 5-minute timeout fired, and the
+  // fetch itself was never aborted.
   const resp = await fetch(config.tokenUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -217,6 +223,7 @@ async function exchangeCodeForTokens(
       grant_type: 'authorization_code',
       redirect_uri: redirectUri,
     }).toString(),
+    signal: AbortSignal.timeout(OAUTH_FETCH_TIMEOUT_MS),
   });
 
   if (!resp.ok) {
@@ -287,6 +294,18 @@ export async function refreshAccessToken(
     expires_in: number;
     token_type: string;
   };
+
+  // An empty success payload used to flow straight through: an absent
+  // access_token left the Google provider sending requests with NO auth
+  // header (its constructor guard passes because the refresher is wired),
+  // which failed later as a misleading 400, and a missing expires_in made
+  // expiresAt NaN. Fail here, at the refresh, with the real cause.
+  if (typeof data.access_token !== 'string' || data.access_token.length === 0) {
+    throw new Error('Token refresh failed: no access token in response');
+  }
+  if (typeof data.expires_in !== 'number' || !Number.isFinite(data.expires_in)) {
+    throw new Error('Token refresh failed: no expiry (expires_in) in response');
+  }
 
   return {
     accessToken: data.access_token,

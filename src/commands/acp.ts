@@ -167,12 +167,10 @@ export function registerAcpCommand(program: Command): void {
 
       const endpoint = new JsonRpcEndpoint(process.stdin, process.stdout);
       // The options object is built as a variable (not a literal) so the
-      // per-run budget caps can ride along: AcpServerOptions does not
-      // declare budgetCaps yet, so a literal would fail the excess-property
-      // check. The server ignores the extra field until the lib batch wires
-      // it (see fix-log-4b1.md item 17): AcpServerOptions gains
-      // `budgetCaps?: BudgetCaps`, and the prompt handler passes a fresh
-      // `createBudget(this.opts.budgetCaps)` per prompt to runAgent.
+      // per-run budget caps can ride along: AcpServerOptions declares
+      // `budgetCaps?: BudgetCaps`, and the prompt handler honours it by
+      // passing a fresh `createBudget(this.opts.budgetCaps)` per prompt to
+      // runAgent - the caps are NOT dropped.
       const serverOpts = {
         endpoint,
         provider,

@@ -243,6 +243,18 @@ export function resolveProviderSelection(opts: {
   // built-ins below: `provider add Foo` must answer to `--provider foo`.
   const stored = opts.stored.find((p) => p.name.toLowerCase() === target.toLowerCase());
   if (stored) {
+    // A hand-edited / corrupted stored entry can carry an unknown type:
+    // without this the defaults lookup below yields undefined and the
+    // run crashes with a raw TypeError, before the factory's deliberate
+    // unknown-type guard is ever reached. Fail here with the same clean
+    // error the factory produces.
+    if (!isByokType(stored.type)) {
+      throw new SpycoreCliError(
+        `Unknown BYOK provider type: ${String(stored.type ?? '')}.`,
+        EXIT_USER_ERROR,
+        'A stored provider config lists one of: openai, anthropic, google. Re-save it with `spycore provider add`.',
+      );
+    }
     // A stored OAuth entry needs its client id to refresh: without the
     // stored id AND the env var, the factory would fall through to the
     // missing-key error, which is the wrong diagnosis for an OAuth config.

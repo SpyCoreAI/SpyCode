@@ -10,6 +10,7 @@ import { readSingleLineInput, readStdinPipe } from '../lib/prompt.js';
 import { fireHookEvent, loadHookSession } from '../lib/hooks.js';
 import {
   EXIT_AUTH_ERROR,
+  EXIT_SERVER_ERROR,
   EXIT_USER_ERROR,
   SpycoreCliError,
   isSpycoreCliError,
@@ -404,6 +405,22 @@ async function sendMessage(opts: SendOpts): Promise<{ conversationId: string; as
  * 3. --resume + lastConversationId in config
  * 4. otherwise: create a new conversation and remember its id
  */
+/**
+ * Same guard as SpyCoreProvider.createConversation: a server response
+ * without an id must fail here, not propagate as `conversationId:
+ * undefined` (dropped by JSON.stringify on the next stream call) and an
+ * `undefined` value into the config store.
+ */
+function assertConversationId(created: ConversationCreateResp): void {
+  if (typeof created?.id !== 'string' || created.id.length === 0) {
+    throw new SpycoreCliError(
+      'The server created a conversation without an id.',
+      EXIT_SERVER_ERROR,
+      'The server response was malformed - retry, and report it if it repeats.',
+    );
+  }
+}
+
 async function resolveConversationId(
   opts: ChatOpts,
   apiUrl: string | undefined,
@@ -414,6 +431,7 @@ async function resolveConversationId(
       apiUrlOverride: apiUrl,
       body: { model: model.toUpperCase() },
     });
+    assertConversationId(created);
     setLastConversationId(created.id);
     return created.id;
   }
@@ -453,6 +471,7 @@ async function resolveConversationId(
     apiUrlOverride: apiUrl,
     body: { model: model.toUpperCase() },
   });
+  assertConversationId(created);
   setLastConversationId(created.id);
   return created.id;
 }
@@ -558,6 +577,8 @@ async function runByokChat(
 
   const json = Boolean(parentOpts.json);
   let assistantText = '';
+  let usage: { input: number; output: number } | null = null;
+  const warnings: string[] = [];
   // --no-stream buffers the reply and prints it once at the end instead
   // of streaming it progressively (the SpyCore path does the same).
   const noStream = opts.stream === false;
@@ -571,6 +592,14 @@ async function runByokChat(
       const content = ev.text;
       assistantText += content;
       if (!json && !noStream) process.stdout.write(sanitizeForDisplay(content));
+    } else if (ev.type === 'warning') {
+      // A truncated reply used to print with no notice that it was cut
+      // off - surface it, same wording as the SpyCore path.
+      warnings.push(ev.message);
+      if (!json) process.stderr.write(`${chalk.yellow('!')} ${sanitizeForDisplay(ev.message)}\n`);
+    } else if (ev.type === 'usage') {
+      usage = { input: ev.input, output: ev.output };
+      if (!json) process.stderr.write(`${chalk.dim(`(${ev.input} in / ${ev.output} out tokens)`)}\n`);
     } else if (ev.type === 'error') {
       throw new SpycoreCliError(
         `BYOK provider error: ${ev.message}`,
@@ -581,7 +610,14 @@ async function runByokChat(
   }
 
   if (json) {
-    process.stdout.write(JSON.stringify({ provider: opts.provider, message: assistantText }) + '\n');
+    process.stdout.write(
+      JSON.stringify({
+        provider: opts.provider,
+        message: assistantText,
+        ...(usage ? { usage } : {}),
+        ...(warnings.length > 0 ? { warnings } : {}),
+      }) + '\n',
+    );
   } else if (noStream) {
     process.stdout.write(sanitizeForDisplay(assistantText));
     if (assistantText.length > 0 && !assistantText.endsWith('\n')) process.stdout.write('\n');

@@ -7,12 +7,14 @@ interface MockResp {
   body: { json: () => Promise<unknown> };
 }
 
-let responder: ((url: string, init: { method: string }) => MockResp) | null = null;
+let responder:
+  | ((url: string, init: { method: string; headers: Record<string, string> }) => MockResp)
+  | null = null;
 
 vi.mock('undici', () => ({
-  request: vi.fn(async (url: string, init: { method?: string } = {}) => {
+  request: vi.fn(async (url: string, init: { method?: string; headers?: Record<string, string> } = {}) => {
     if (!responder) throw new Error('test forgot to set responder');
-    return responder(url, { method: init.method ?? 'GET' });
+    return responder(url, { method: init.method ?? 'GET', headers: init.headers ?? {} });
   }),
 }));
 
@@ -91,6 +93,27 @@ describe('spycore logout', () => {
       throw new Error(`unexpected ${url}`);
     };
     await runCli([]);
+    expect(allOut()).toContain('Logged out');
+    expect(allOut()).not.toMatch(/revoke failed/i);
+    const { getToken } = await import('../src/lib/auth.js');
+    expect(await getToken()).toBeNull();
+  });
+
+  test('the server revoke carries the pre-clear token (R2 M3)', async () => {
+    let authHeader: string | undefined;
+    responder = (url, init) => {
+      if (url.includes('/auth/cli/logout')) {
+        authHeader = init.headers.authorization;
+        return jsonResp(200, { success: true, data: {} });
+      }
+      throw new Error(`unexpected ${url}`);
+    };
+    await runCli([]);
+    // The local copy is cleared BEFORE the revoke, so the bearer can only
+    // be there if logout passes the captured token explicitly. Without
+    // it the revoke goes out unauthenticated, the server 401s it, and the
+    // server-side session stays live while logout warns spuriously.
+    expect(authHeader).toBe('Bearer spycli_test_token');
     expect(allOut()).toContain('Logged out');
     expect(allOut()).not.toMatch(/revoke failed/i);
     const { getToken } = await import('../src/lib/auth.js');

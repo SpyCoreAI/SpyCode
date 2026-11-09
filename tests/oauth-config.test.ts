@@ -39,6 +39,70 @@ describe('googleOAuthConfig', () => {
   });
 });
 
+describe('refreshAccessToken validates the payload (R2 L1)', () => {
+  const cfg = {
+    clientId: 'id',
+    authUrl: 'https://example.com/auth',
+    tokenUrl: 'https://example.com/token',
+    scopes: [],
+    redirectPort: 0,
+  };
+
+  test('an empty success payload fails at the refresh, not as a later unauthenticated 400', async () => {
+    const { vi } = await import('vitest');
+    const { refreshAccessToken } = await import('../src/lib/oauth.js');
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({}),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      await expect(refreshAccessToken(cfg, 'refresh-token')).rejects.toThrow(
+        /no access token in response/,
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  test('a missing expires_in fails at the refresh instead of producing a NaN expiry', async () => {
+    const { vi } = await import('vitest');
+    const { refreshAccessToken } = await import('../src/lib/oauth.js');
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ access_token: 'new-access', token_type: 'Bearer' }),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      await expect(refreshAccessToken(cfg, 'refresh-token')).rejects.toThrow(
+        /no expiry \(expires_in\) in response/,
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  test('a complete payload still returns the tokens', async () => {
+    const { vi } = await import('vitest');
+    const { refreshAccessToken } = await import('../src/lib/oauth.js');
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ access_token: 'new-access', expires_in: 3600, token_type: 'Bearer' }),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const tokens = await refreshAccessToken(cfg, 'refresh-token');
+      expect(tokens.accessToken).toBe('new-access');
+      expect(tokens.refreshToken).toBe('refresh-token');
+      expect(Number.isFinite(tokens.expiresAt)).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
 describe('refreshAccessToken timeout (4c)', () => {
   test('a hung token endpoint fails after the timeout instead of hanging forever', async () => {
     const { vi } = await import('vitest');

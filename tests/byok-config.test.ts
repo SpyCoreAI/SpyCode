@@ -6,6 +6,7 @@ import {
   isLocalBaseURL,
   parseProviderKind,
   resolveByokConfig,
+  resolveProviderSelection,
 } from '../src/lib/providers/byok-config.js';
 
 describe('isByokType', () => {
@@ -155,5 +156,51 @@ describe('resolveByokConfig', () => {
         env: { ANTHROPIC_API_KEY: '   ' },
       }),
     ).toThrow('An API key is required');
+  });
+});
+
+describe('resolveProviderSelection - tampered stored type (R2 L9)', () => {
+  test('a hand-edited stored entry with an unknown type fails cleanly, not with a TypeError', () => {
+    expect(() =>
+      resolveProviderSelection({
+        providerFlag: 'tampered',
+        baseUrl: undefined,
+        model: undefined,
+        apiKeyEnv: undefined,
+        env: {},
+        stored: [
+          {
+            name: 'tampered',
+            type: 'mystery' as 'openai',
+            baseURL: 'https://example.com/v1',
+            model: 'm',
+          },
+        ],
+        defaultProvider: undefined,
+      }),
+    ).toThrow('Unknown BYOK provider type');
+  });
+
+  test('a tampered stored entry with an OAuth token fails the same way, before the factory', () => {
+    expect(() =>
+      resolveProviderSelection({
+        providerFlag: 'tampered',
+        baseUrl: undefined,
+        model: undefined,
+        apiKeyEnv: undefined,
+        env: {},
+        stored: [
+          {
+            name: 'tampered',
+            type: 'mystery' as 'openai',
+            baseURL: 'https://example.com/v1',
+            model: 'm',
+            oauthRefreshToken: 'rt-1',
+            oauthClientId: 'cid-1',
+          },
+        ],
+        defaultProvider: undefined,
+      }),
+    ).toThrow('Unknown BYOK provider type');
   });
 });

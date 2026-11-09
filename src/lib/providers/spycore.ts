@@ -11,6 +11,7 @@
  */
 import { api, streamRequest, type StreamEvent } from '../api.js';
 import { EXIT_SERVER_ERROR, SpycoreCliError } from '../errors.js';
+import { pruneByokSessions } from './history.js';
 import type {
   CreateConversationParams,
   Provider,
@@ -30,6 +31,14 @@ export class SpyCoreProvider implements Provider {
   readonly id = 'spycore' as const;
   /** nativeTools capability per conversation id, captured at createConversation. */
   private readonly nativeToolsByConversation = new Map<string, boolean>();
+  /**
+   * Last use per conversation, for the idle-session prune: every
+   * createConversation / seedCapabilities inserts into the map above and
+   * nothing ever deleted, so a long-lived `spycore acp` server (one
+   * conversation per session) grew it without bound. Same cap as the BYOK
+   * adapters (32 sessions, 1 h idle - see history.ts).
+   */
+  private readonly nativeToolsLastUsed = new Map<string, number>();
 
   async createConversation(params: CreateConversationParams): Promise<string> {
     const resp = await api.post<ConversationCreateResp>('/conversations', {
@@ -46,6 +55,8 @@ export class SpyCoreProvider implements Provider {
       );
     }
     this.nativeToolsByConversation.set(resp.id, resp.capabilities?.nativeTools === true);
+    this.nativeToolsLastUsed.set(resp.id, Date.now());
+    pruneByokSessions(this.nativeToolsByConversation, this.nativeToolsLastUsed);
     return resp.id;
   }
 
@@ -60,6 +71,8 @@ export class SpyCoreProvider implements Provider {
    */
   seedCapabilities(conversationId: string, caps: { nativeTools: boolean }): void {
     this.nativeToolsByConversation.set(conversationId, caps.nativeTools === true);
+    this.nativeToolsLastUsed.set(conversationId, Date.now());
+    pruneByokSessions(this.nativeToolsByConversation, this.nativeToolsLastUsed);
   }
 
   async *streamChat(params: StreamChatParams): AsyncIterable<ProviderEvent> {

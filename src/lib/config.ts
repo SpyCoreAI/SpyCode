@@ -2,7 +2,7 @@ import Conf from 'conf';
 import { chmodSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
-import { isByokType, type StoredProviderConfig } from './providers/byok-config.js';
+import { type StoredProviderConfig } from './providers/byok-config.js';
 import type { McpServerConfig } from './agent/mcp-config.js';
 // F16: keybinding-override validation. One-way edge (keybindings.ts imports
 // nothing), so no cycle: config -> ui/tui/keybindings only.
@@ -489,17 +489,21 @@ export function getStoredProviders(): StoredProviderConfig[] {
   if (!Array.isArray(raw)) return [];
   // Per-entry validation (the hook-approval store's pattern): the config
   // file is hand-editable, and one corrupt row used to crash every
-  // provider command with a raw TypeError - `p.type` outside BYOK_TYPES
-  // in keySource(), a non-string `name` in findStored() / selection
-  // resolution. Malformed rows are skipped, like the neighbouring stores.
+  // provider command with a raw TypeError - a non-string `name` in
+  // findStored() / selection resolution, an empty `baseURL`. Structurally
+  // unusable rows are skipped, like the neighbouring stores.
+  // An unknown `type` is deliberately NOT filtered here: it flows to
+  // resolveProviderSelection / keySource / the factory, which throw the
+  // clean `Unknown BYOK provider type` error (R2 L9) naming the bad value,
+  // so the user can find and fix their hand-edit instead of the entry
+  // silently vanishing from every list. Every BYOK_TYPE_DEFAULTS index
+  // site sits behind one of those guards.
   return raw.filter(
     (e): e is StoredProviderConfig =>
       !!e &&
       typeof e === 'object' &&
       typeof (e as StoredProviderConfig).name === 'string' &&
       (e as StoredProviderConfig).name.length > 0 &&
-      typeof (e as StoredProviderConfig).type === 'string' &&
-      isByokType((e as StoredProviderConfig).type) &&
       typeof (e as StoredProviderConfig).baseURL === 'string' &&
       (e as StoredProviderConfig).baseURL.length > 0,
   );

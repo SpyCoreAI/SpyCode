@@ -25,10 +25,16 @@ export function registerLogoutCommand(program: Command): void {
       // local token stayed valid and later commands still ran logged in.
       // The server revoke is best-effort after that: a failure warns but
       // never resurrects the local session.
+      //
+      // The revoke itself must still authenticate: clearToken() empties
+      // the store getToken() reads, so the call below carries the token
+      // captured above explicitly (authToken). Without it the revoke went
+      // out with no Authorization header, the server 401'd it on every
+      // logout, and the server-side session stayed live.
       await clearToken();
       let revokeError: string | null = null;
       try {
-        await api.post('/auth/cli/logout', { apiUrlOverride: parentOpts.apiUrl });
+        await api.post('/auth/cli/logout', { apiUrlOverride: parentOpts.apiUrl, authToken: token });
       } catch (err) {
         revokeError = err instanceof Error ? err.message : 'Server revoke failed';
       }

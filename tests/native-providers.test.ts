@@ -197,15 +197,15 @@ describe('resolveAnthropicMaxTokens', () => {
     expect(resolveAnthropicMaxTokens('claude-x')).toBe(8192);
   });
 
-  test('an explicit override wins when finite and positive', async () => {
+  test('the cap is purely the model-name heuristic - there is no override (R2 L12)', async () => {
+    // The provider's maxTokens option was dead in production (the factory
+    // never passed it, no flag or stored field set it), so the option and
+    // the resolver's override branch were removed rather than wired.
+    // resolveAnthropicMaxTokens now takes only the model.
     const { resolveAnthropicMaxTokens } = await import('../src/lib/providers/anthropic.js');
-    expect(resolveAnthropicMaxTokens('claude-3-haiku-20240307', 1000)).toBe(1000);
-    expect(resolveAnthropicMaxTokens('claude-sonnet-4-20250514', 32000)).toBe(32000);
-    // Non-positive / non-finite overrides are ignored, not trusted.
-    expect(resolveAnthropicMaxTokens('claude-3-haiku-20240307', 0)).toBe(4096);
-    expect(resolveAnthropicMaxTokens('claude-3-haiku-20240307', -5)).toBe(4096);
-    expect(resolveAnthropicMaxTokens('claude-3-haiku-20240307', Number.NaN)).toBe(4096);
-    expect(resolveAnthropicMaxTokens('claude-3-haiku-20240307', Number.POSITIVE_INFINITY)).toBe(4096);
+    expect(resolveAnthropicMaxTokens.length).toBe(1);
+    expect(resolveAnthropicMaxTokens('claude-3-haiku-20240307')).toBe(4096);
+    expect(resolveAnthropicMaxTokens('claude-sonnet-4-20250514')).toBe(8192);
   });
 
   test('the provider sends the derived cap in the request body', async () => {
@@ -330,6 +330,57 @@ describe('GoogleProvider', () => {
     const events = await collect(p.streamChat({ conversationId: id, message: 'hi', model: 'g-model' }));
     expect(events[0]?.type).toBe('error');
     expect(requests).toHaveLength(1);
+  });
+
+  test('a safety-blocked prompt surfaces as an error, not a silent empty turn (R2 M4)', async () => {
+    const p = await make();
+    // promptFeedback with a block reason, no candidates, no text.
+    responder = () =>
+      sseResp([`data: ${JSON.stringify({ promptFeedback: { blockReason: 'SAFETY' } })}\n\n`]);
+    const id = await p.createConversation({ model: 'g-model' });
+    const events = await collect(p.streamChat({ conversationId: id, message: 'hi', model: 'g-model' }));
+    expect(events).toEqual([
+      { type: 'error', message: expect.stringContaining('SAFETY') },
+    ]);
+  });
+
+  test('a candidate finishing SAFETY / RECITATION surfaces as an error, not an empty done (R2 M4)', async () => {
+    const p = await make();
+    for (const reason of ['SAFETY', 'RECITATION', 'BLOCKLIST', 'OTHER']) {
+      responder = () =>
+        sseResp([
+          `data: ${JSON.stringify({ candidates: [{ finishReason: reason }] })}\n\n`,
+        ]);
+      const id = await p.createConversation({ model: 'g-model' });
+      const events = await collect(p.streamChat({ conversationId: id, message: 'hi', model: 'g-model' }));
+      expect(events).toEqual([
+        { type: 'error', message: expect.stringContaining(reason) },
+      ]);
+    }
+    // Control: a normal finish still ends done, and MAX_TOKENS still warns.
+    responder = () =>
+      sseResp([
+        `data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: 'ok' }] }, finishReason: 'STOP' }] })}\n\n`,
+      ]);
+    const id = await p.createConversation({ model: 'g-model' });
+    expect(await collect(p.streamChat({ conversationId: id, message: 'hi', model: 'g-model' }))).toEqual([
+      { type: 'text', text: 'ok' },
+      { type: 'done' },
+    ]);
+  });
+
+  test('a model id with .. segments is rejected before any request (R2 L6)', async () => {
+    const p = await make();
+    const id = await p.createConversation({ model: 'a/../../b' });
+    await expect(
+      collect(p.streamChat({ conversationId: id, message: 'hi', model: 'a/../../b' })),
+    ).rejects.toThrow(/Invalid model id/);
+    expect(requests).toHaveLength(0);
+    const id2 = await p.createConversation({ model: 'models/../../v1beta/models/evil' });
+    await expect(
+      collect(p.streamChat({ conversationId: id2, message: 'hi', model: 'models/../../v1beta/models/evil' })),
+    ).rejects.toThrow(/Invalid model id/);
+    expect(requests).toHaveLength(0);
   });
 });
 
@@ -501,6 +552,21 @@ describe('provider command - native types', () => {
       const r = await runProvider(['add', reserved, '--type', 'openai', '--model', 'm']);
       expect(String((r.error as Error)?.message)).toMatch(/reserved/);
     }
+  });
+
+  test('a hand-edited stored entry with an unknown type fails cleanly on list, not with a TypeError (R2 L9)', async () => {
+    const { setStoredProviders } = await import('../src/lib/config.js');
+    setStoredProviders([
+      {
+        name: 'tampered',
+        type: 'mystery' as 'openai',
+        baseURL: 'https://example.com/v1',
+        model: 'm',
+      },
+    ]);
+    const list = await runProvider(['list']);
+    expect(String((list.error as Error)?.message)).toMatch(/Unknown BYOK provider type/);
+    expect(String((list.error as Error)?.message)).not.toMatch(/Cannot read properties of undefined/);
   });
 
   test('provider test works through the anthropic adapter', async () => {

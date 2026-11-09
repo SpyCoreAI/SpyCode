@@ -4,6 +4,7 @@ import {
   getByokUsage,
   isFallbackEligibleError,
 } from '../src/lib/byok-usage.js';
+import { connectionErrorMessage } from '../src/lib/providers/wire.js';
 import { __resetConfigForTests } from '../src/lib/config.js';
 
 describe('B2: BYOK usage tracking', () => {
@@ -69,6 +70,40 @@ describe('B4: fallback error detection', () => {
   test('detects server errors', () => {
     expect(isFallbackEligibleError({ code: 502 })).toBe(true);
     expect(isFallbackEligibleError({ code: 503 })).toBe(true);
+  });
+
+  test('detects the REAL adapter strings: connectionErrorMessage prose + HTTP 5xx (R2 M1)', () => {
+    // The matcher used to look for the errno spellings `econnrefused` /
+    // `enotfound`, but connectionErrorMessage rewrites those into prose
+    // that never contains them - so the two most common down-endpoint
+    // cases hard-failed instead of falling back. Feed the real strings.
+    const refused = Object.assign(new Error('x'), { code: 'ECONNREFUSED' });
+    expect(
+      isFallbackEligibleError(
+        new Error(connectionErrorMessage(refused, 'http://127.0.0.1:11434/v1/chat/completions')),
+      ),
+    ).toBe(true);
+    const dns = Object.assign(new Error('x'), { code: 'ENOTFOUND' });
+    expect(
+      isFallbackEligibleError(
+        new Error(connectionErrorMessage(dns, 'https://nope.invalid/v1/chat/completions')),
+      ),
+    ).toBe(true);
+    // Probe failures arrive as plain Errors carrying the adapter string.
+    expect(isFallbackEligibleError(new Error('Model endpoint returned HTTP 500.'))).toBe(true);
+    expect(isFallbackEligibleError(new Error('Model endpoint returned HTTP 502.'))).toBe(true);
+    expect(isFallbackEligibleError(new Error('Model endpoint returned HTTP 503.'))).toBe(true);
+    expect(isFallbackEligibleError(new Error('Model endpoint returned HTTP 504.'))).toBe(true);
+    // A revoked Google refresh token surfaces as invalid_grant.
+    expect(
+      isFallbackEligibleError(
+        new Error(
+          'Google OAuth token refresh failed: Token refresh failed (400): {"error":"invalid_grant"}',
+        ),
+      ),
+    ).toBe(true);
+    // Control: a 400 is a user error, not a down endpoint.
+    expect(isFallbackEligibleError(new Error('Model endpoint returned HTTP 400.'))).toBe(false);
   });
 
   test('does not flag user errors', () => {

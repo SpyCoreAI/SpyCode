@@ -726,8 +726,15 @@ describe('§12 the sink CATEGORIES - prompt, spinner, completion line', () => {
   // and undici's imported `request`, which collides with a local `request`
   // defined in src/lib/agent/ - the census's local-function set is global
   // by name). Add a pair ONLY after reviewing the path it opens.
+  //
+  // R2 L10 addition (reviewed 2026-11-09): `assertConversationId` receives
+  // the server's conversation-create response and reads ONLY its `id`
+  // field for a presence check, then throws a static error message. It
+  // never renders, logs, or forwards the value (or the id) anywhere - a
+  // validation guard in the same benign class as the boolean predicates.
   const PINNED_CARRIERS: ReadonlySet<string> = new Set([
     'src/commands/auth/login.ts :: openInBrowser',
+    'src/commands/chat.ts :: assertConversationId',
     'src/commands/chat.ts :: handleEvent',
     'src/commands/chat.ts :: sendMessage',
     'src/commands/chat.ts :: setLastConversationId',

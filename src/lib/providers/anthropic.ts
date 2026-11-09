@@ -42,16 +42,17 @@ const DEFAULT_MAX_TOKENS = 8192;
 const CLAUDE_3_MAX_TOKENS = 4096;
 
 /**
- * Resolve the max_tokens for a request: an explicit override wins, else
- * the model's known output cap (Claude 3 family: 4096), else the 8192
- * default. The old code sent 8192 unconditionally, so low-cap models
- * failed every request and newer large-budget models could never use a
- * bigger budget.
+ * Resolve the max_tokens for a request: the model's known output cap
+ * (Claude 3 family: 4096), else the 8192 default. The old code sent 8192
+ * unconditionally, so low-cap models failed every request and newer
+ * large-budget models could never use a bigger budget.
+ *
+ * There is deliberately no override parameter: the provider option that
+ * used to feed one was dead in production (the factory never passed it,
+ * no CLI flag or stored field set it), so it was removed rather than
+ * left misleading future work.
  */
-export function resolveAnthropicMaxTokens(model: string, override?: number | undefined): number {
-  if (override !== undefined && Number.isFinite(override) && override > 0) {
-    return Math.floor(override);
-  }
+export function resolveAnthropicMaxTokens(model: string): number {
   if (/claude-3[-_](haiku|sonnet|opus)|claude-instant/i.test(model)) return CLAUDE_3_MAX_TOKENS;
   return DEFAULT_MAX_TOKENS;
 }
@@ -85,18 +86,12 @@ export interface AnthropicProviderOptions {
   baseURL: string;
   /** Required - this endpoint has no keyless mode (resolution errors before here). */
   apiKey: string;
-  /**
-   * Per-request output cap. Defaults to the model's known cap (Claude 3
-   * family: 4096) or 8192 - see resolveAnthropicMaxTokens.
-   */
-  maxTokens?: number | undefined;
 }
 
 export class AnthropicProvider implements Provider {
   readonly id = 'anthropic' as const;
   private readonly baseURL: string;
   private readonly apiKey: string;
-  private readonly maxTokens: number | undefined;
   private readonly sessions = new Map<string, Session>();
   /** Last use per session, for the idle-session prune (see history.ts). */
   private readonly lastUsed = new Map<string, number>();
@@ -105,7 +100,6 @@ export class AnthropicProvider implements Provider {
   constructor(opts: AnthropicProviderOptions) {
     this.baseURL = opts.baseURL.replace(/\/+$/, '');
     this.apiKey = opts.apiKey;
-    this.maxTokens = opts.maxTokens;
   }
 
   createConversation(_params: CreateConversationParams): Promise<string> {
@@ -142,7 +136,7 @@ export class AnthropicProvider implements Provider {
     };
     const body = JSON.stringify({
       model: params.model,
-      max_tokens: resolveAnthropicMaxTokens(params.model, this.maxTokens),
+      max_tokens: resolveAnthropicMaxTokens(params.model),
       ...(session.system ? { system: session.system } : {}),
       messages: session.messages,
       stream: true,

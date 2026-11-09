@@ -48,7 +48,16 @@ interface GoogleStreamData {
   candidates?: GoogleCandidate[];
   usageMetadata?: GoogleUsageMetadata;
   error?: { message?: unknown };
+  /** Present when the prompt itself was refused (safety / recitation / …). */
+  promptFeedback?: { blockReason?: unknown };
 }
+
+/**
+ * Candidate finish reasons that mean the response was refused, not
+ * completed: without a signal the turn ends `done` with an empty reply,
+ * indistinguishable from a genuinely empty model response.
+ */
+const BLOCKED_FINISH_REASONS = new Set(['SAFETY', 'RECITATION', 'BLOCKLIST', 'OTHER']);
 
 interface Session {
   system: string | undefined;
@@ -138,6 +147,20 @@ export class GoogleProvider implements Provider {
       messages: [],
     };
     this.sessions.set(params.conversationId, session);
+    // Model ids may carry a path segment (`models/gemini-2.0-flash` is
+    // the resource name Google documents). encodeURIComponent leaves `.`
+    // unencoded and the URL parser normalizes dot-segments, so `..`
+    // segments would traverse out of /v1beta/models/ (`a/../../b` →
+    // /v1beta/b). Reject them outright, before the turn is recorded: no
+    // legitimate model id is a bare `.` or `..` segment.
+    const modelSegments = params.model.replace(/^models\//, '').split('/');
+    if (modelSegments.some((seg) => seg === '.' || seg === '..')) {
+      throw new SpycoreCliError(
+        `Invalid model id: ${params.model}`,
+        EXIT_USER_ERROR,
+        'A model id must not contain "." or ".." path segments.',
+      );
+    }
     if (params.system && params.system.length > 0) session.system = params.system;
     session.messages.push({ role: 'user', content: params.message });
     // Bound the replay (see history.ts): oldest pair first, so the
@@ -146,15 +169,10 @@ export class GoogleProvider implements Provider {
     trimHistoryMessages(session.messages);
     this.lastUsed.set(params.conversationId, Date.now());
 
-    // Model ids may carry a path segment (`models/gemini-2.0-flash` is
-    // the resource name Google documents). Encode per segment: a blanket
-    // encodeURIComponent turns the slash into %2F and the API 404s. A
-    // leading `models/` is stripped first - the URL already carries it.
-    const modelPath = params.model
-      .replace(/^models\//, '')
-      .split('/')
-      .map((seg) => encodeURIComponent(seg))
-      .join('/');
+    // Encode per segment: a blanket encodeURIComponent turns the slash
+    // into %2F and the API 404s. A leading `models/` is stripped first -
+    // the URL already carries it. Dot-segments were rejected above.
+    const modelPath = modelSegments.map((seg) => encodeURIComponent(seg)).join('/');
     const url = `${this.baseURL}/v1beta/models/${modelPath}:streamGenerateContent?alt=sse`;
     const buildHeaders = (): Record<string, string> => {
       const headers: Record<string, string> = {
@@ -296,6 +314,18 @@ export class GoogleProvider implements Provider {
           yield { type: 'error', message: `Model endpoint reported an error: ${msg}` };
           return;
         }
+        // A blocked prompt arrives as a 200 with no candidates and no
+        // text parts: without this the loop yields nothing and the turn
+        // ends `done` empty, with zero signal the request was refused.
+        const blockReason = chunk.promptFeedback?.blockReason;
+        if (typeof blockReason === 'string' && blockReason.length > 0) {
+          settleErroredTurn();
+          yield {
+            type: 'error',
+            message: `Model blocked the prompt (block reason: ${blockReason}). Try rephrasing the prompt.`,
+          };
+          return;
+        }
         const parts = chunk.candidates?.[0]?.content?.parts ?? [];
         const reason = chunk.candidates?.[0]?.finishReason;
         if (typeof reason === 'string' && reason.length > 0) finishReason = reason;
@@ -308,6 +338,17 @@ export class GoogleProvider implements Provider {
               return;
             }
           }
+        }
+        // A candidate that finishes blocked (SAFETY / RECITATION / …)
+        // likewise carries no usable text: fail loudly with the reason
+        // instead of ending the turn `done` empty.
+        if (typeof reason === 'string' && BLOCKED_FINISH_REASONS.has(reason)) {
+          settleErroredTurn();
+          yield {
+            type: 'error',
+            message: `Model blocked the response (finish reason: ${reason}). Try rephrasing the prompt.`,
+          };
+          return;
         }
         // usageMetadata grows as the stream progresses - the final chunk wins.
         const u = chunk.usageMetadata;

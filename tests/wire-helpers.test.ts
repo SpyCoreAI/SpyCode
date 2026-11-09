@@ -53,6 +53,19 @@ describe('connectionErrorMessage', () => {
       'Cannot reach the model endpoint at http://x: timeout of 5000ms exceeded',
     );
   });
+
+  test('userinfo credentials in the base URL never reach the message (R2 L5)', () => {
+    const refused = Object.assign(new Error('x'), { code: 'ECONNREFUSED' });
+    const msg = connectionErrorMessage(refused, 'https://user:s3cret@example.com:8443/v1');
+    expect(msg).toContain('example.com:8443/v1');
+    expect(msg).not.toContain('s3cret');
+    expect(msg).not.toContain('user:');
+    const dns = Object.assign(new Error('x'), { code: 'ENOTFOUND' });
+    const msg2 = connectionErrorMessage(dns, 'https://user:s3cret@example.com/v1');
+    expect(msg2).not.toContain('s3cret');
+    // A URL without userinfo is untouched.
+    expect(connectionErrorMessage(refused, 'http://localhost:11434')).toContain('http://localhost:11434');
+  });
 });
 
 describe('clip', () => {
@@ -100,5 +113,24 @@ describe('readErrorDetail', () => {
       },
     };
     expect(await readErrorDetail(body)).toBeUndefined();
+  });
+
+  test('a multi-MB error body is capped, not fully buffered (R2 L4)', async () => {
+    // Async-iterable body: the read must stop at the 1 MB bound instead
+    // of accumulating the whole body.
+    let chunksYielded = 0;
+    async function* huge(): AsyncGenerator<Buffer> {
+      for (let i = 0; i < 40; i += 1) {
+        chunksYielded += 1;
+        yield Buffer.alloc(64 * 1024, 'x');
+      }
+    }
+    const detail = await readErrorDetail(huge());
+    expect(detail).toBe(`${'x'.repeat(200)}…`);
+    expect(chunksYielded).toBeLessThan(40);
+    // .text() body: already buffered by the transport, but the parse/clip
+    // work must still be bounded to the cap.
+    const bigText = { text: async () => 'y'.repeat(2 * 1024 * 1024) };
+    expect(await readErrorDetail(bigText)).toBe(`${'y'.repeat(200)}…`);
   });
 });
