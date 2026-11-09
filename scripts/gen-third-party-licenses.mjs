@@ -48,7 +48,13 @@ import { fileURLToPath } from 'node:url';
 const CLI_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
 const OUT_FILE = join(CLI_DIR, 'THIRD-PARTY-LICENSES');
 
-const LICENSE_FILE_RE = /^(licen[sc]e|copying|notice|unlicense)(\.|$)/i;
+// A license filename is the bare stem, the stem plus an extension, or the
+// stem plus a hyphenated qualifier (R4-1): LICENSE-MIT, LICENSE-MIT.txt,
+// license-mit, license-cc0. The old `(\.|$)` after the stem never matched
+// the hyphenated form, so four packages were rendered with the false claim
+// "No license file was distributed with this package" - including type-fest,
+// whose (MIT OR CC0-1.0) disjunction then reproduced zero of two option texts.
+const LICENSE_FILE_RE = /^(licen[sc]e|copying|notice|unlicense)([.-]|$)/i;
 
 /**
  * Node-style upward node_modules walk. The resolved dir is realpath'd so that

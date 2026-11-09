@@ -148,11 +148,13 @@ registerUiPreviewCommand(program);
 registerMdPreviewCommand(program);
 
 // v1 platform stance (see SECURITY.md): macOS + Linux are supported; Windows
-// is supported via WSL. Native Windows is untested - the sandbox + process-
-// group semantics differ, so surface that once per invocation on stderr.
+// is supported via WSL. Native Windows is NOT untested - the full suite runs
+// on windows-latest in CI and the packed artifact gets a Windows smoke
+// install check - but sandbox + process-group semantics still differ, so
+// surface that once per invocation on stderr.
 if (process.platform === 'win32') {
   process.stderr.write(
-    'spycore: native Windows is untested in this release - use WSL. (macOS/Linux are the supported platforms.)\n',
+    'spycore: native Windows is tested in CI (full suite + pack smoke) but not yet supported in this release - use WSL. (macOS/Linux are the supported platforms.)\n',
   );
 }
 

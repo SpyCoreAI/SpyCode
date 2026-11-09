@@ -193,6 +193,22 @@ with_deadline() { # $1 = seconds, rest = command
   node -e 'const { spawn } = require("child_process"); const secs = Number(process.argv[1]); const cmd = process.argv[2]; const args = process.argv.slice(3); const child = spawn(cmd, args, { detached: true, stdio: "inherit" }); let timedOut = false; const timer = setTimeout(() => { timedOut = true; try { process.kill(-child.pid, "SIGKILL"); } catch (e) { try { child.kill("SIGKILL"); } catch (e2) {} } }, secs * 1000); child.on("error", (err) => { clearTimeout(timer); process.stderr.write("with_deadline: " + err.message + "\n"); process.exit(127); }); child.on("exit", (code, signal) => { clearTimeout(timer); if (timedOut) process.exit(124); if (signal) { const SIG = { SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGKILL: 9, SIGTERM: 15 }; process.exit(128 + (SIG[signal] || 15)); } process.exit(code === null ? 1 : code); });' -- "$_secs" "$@"
 }
 
+# Wait for a readiness line to appear in a log file, bounded. $1 = log file,
+# $2 = timeout in seconds. Returns 0 when the line appears, 1 on timeout.
+# Polling (not a fixed sleep) is the point: the stub prints `[stub] up` when
+# it is actually listening, and assuming a fixed delay is enough made a slow
+# bind fail all three smoke checks with messages blaming the product (R4-6).
+# The final grep covers the line landing during the last sleep.
+wait_for_stub() { # $1 = log file, $2 = timeout seconds
+  _w=0
+  while [ "$_w" -lt "$2" ]; do
+    if grep -qF '[stub] up' "$1" 2>/dev/null; then return 0; fi
+    sleep 1
+    _w=$((_w + 1))
+  done
+  grep -qF '[stub] up' "$1" 2>/dev/null
+}
+
 # ═══════════════════════════════════════════════════════════════════════════
 # THE PURE PREDICATES.
 #
@@ -207,6 +223,18 @@ with_deadline() { # $1 = seconds, rest = command
 # How many members a newline-separated list carries. An EMPTY list is 0.
 member_count() {
   if [ -z "$1" ]; then echo 0; else printf '%s\n' "$1" | wc -l | tr -d ' '; fi
+}
+
+# The stage-2 census: every member of the extracted tarball, one per line.
+# R4-5: this was `find . -type f`, which lists regular files ONLY - a symlink
+# member was invisible to the count, the leak filter, and both directions of
+# the `files` re-grounding. Symlinks are listed too (`-type l`), WITHOUT `-L`:
+# find never follows a link, so a symlink loop (a link to `.`, or a pair of
+# links to each other) is listed once and can never hang the census, and a
+# link to a directory is listed, never descended into. A dangling link is
+# still `-type l`, so it is listed even though its target is absent.
+list_members() { # $1 = package dir
+  ( cd "$1" && find . \( -type f -o -type l \) | sed 's|^\./||' | sort )
 }
 
 # Every entry point the MANIFEST declares - read from the manifest, never from a
@@ -392,6 +420,24 @@ self_test() {
 b
 c')" '3'
   st 'M2  ZERO members count as 0 (the shipped form said 1)' "$(member_count '')" '0'
+  # ── M-forms continued: the census must see SYMLINK members (R4-5) ───────
+  #  The shipped census was `find . -type f`, which lists regular files only:
+  # a symlink member was invisible to the count, the leak filter, and both
+  # directions of the re-grounding. The census lists `-type f` AND `-type l`,
+  # without `-L`, so it never follows a link.
+  mkdir -p "$T/members"
+  : >"$T/members/real.js"
+  ln -s real.js "$T/members/link.js"
+  ln -s nowhere "$T/members/dangling.js"
+  ln -s . "$T/members/loop"
+  st 'M3 a symlink member IS listed by the census' "$(list_members "$T/members")" 'dangling.js
+link.js
+loop
+real.js'
+  st 'M4  a DANGLING symlink member is still listed (it ships, even though its target does not)' \
+    "$(list_members "$T/members" | grep -c dangling.js)" '1'
+  st 'M5  a symlink LOOP (link -> .) is listed once and does NOT hang the census' \
+    "$(list_members "$T/members" | grep -c '^loop$')" '1'
 
   # ── L-forms: the source-leak filter ──────────────────────────────────────
   CLEAN='build/index.js
@@ -550,6 +596,24 @@ absent'
   st 'W4 a non-zero exit propagates through the deadline' "$_rc" '7'
   TIMEOUT_BIN="$_saved_timeout_bin"
 
+  # ── W-forms continued: the stub readiness wait (R4-6) ───────────────────
+  #  A fixed `sleep 1` assumed the stub is always up in a second; a slow bind
+  # then failed all three smoke checks with messages blaming the product. The
+  # wait polls for the stub's own `[stub] up` line, bounded.
+  : >"$T/stub.log"
+  ( sleep 2; printf '[stub] up\n' >>"$T/stub.log" ) &
+  _rc=0
+  wait_for_stub "$T/stub.log" 5 || _rc=$?
+  st 'W5 the readiness wait returns 0 when the stub comes up within the timeout' "$_rc" '0'
+  : >"$T/stub-never.log"
+  _rc=0
+  wait_for_stub "$T/stub-never.log" 2 || _rc=$?
+  st 'W6 the readiness wait FAILS (bounded) when the stub never comes up' "$_rc" '1'
+  printf '[stub] up\n' >"$T/stub-ready.log"
+  _rc=0
+  wait_for_stub "$T/stub-ready.log" 5 || _rc=$?
+  st 'W7 the readiness wait returns 0 at once when the line is already there' "$_rc" '0'
+
   # ── C-forms: the case counter itself ─────────────────────────────────────
   #  The counter is the mechanism that makes every case above falsifiable, so
   # it carries its own controls - otherwise the floor could be met by a counter
@@ -640,9 +704,9 @@ tar -xzf "$TARBALL" -C "$EXTRACT"
 PKGDIR="$EXTRACT/package"
 
 # ─────────────────────── 2. THE PACKED FILE SET ─────────────────────────────
-MEMBERS="$(cd "$PKGDIR" && find . -type f | sed 's|^\./||' | sort)"
+MEMBERS="$(list_members "$PKGDIR")"
 COUNT="$(member_count "$MEMBERS")"
-say "[pack-verify] tarball carries $COUNT files"
+say "[pack-verify] tarball carries $COUNT member(s)"
 if [ "$COUNT" -gt 0 ]; then ok "the tarball has $COUNT member(s)"; else bad "the tarball has NO members"; fi
 
 ENTRIES="$(entry_points "$PKGDIR")"
@@ -831,7 +895,18 @@ createServer((req, res) => {
 STUB
 node "$WORK/stub.mjs" >"$WORK/stub.log" 2>&1 &
 STUB_PID=$!
-sleep 1
+# R4-6: wait for the stub's own readiness line, bounded - a bare `sleep 1`
+# assumed one second is always enough, and on a slow bind all three smoke
+# checks then failed with messages blaming the product. A stub that never
+# comes up is a HARNESS failure, and it is said so here, before any smoke
+# check runs against a dead port.
+if ! wait_for_stub "$WORK/stub.log" 10; then
+  bad "stub server did not print '[stub] up' within 10s (harness failure - no smoke check ran; see $WORK/stub.log)"
+  kill "$STUB_PID" 2>/dev/null || true
+  STUB_PID=""
+  say "PACK-VERIFY FAIL (stage: stub readiness)"
+  exit 1
+fi
 
 SPYCORE_CONFIG_DIR="$WORK/config"
 export SPYCORE_CONFIG_DIR

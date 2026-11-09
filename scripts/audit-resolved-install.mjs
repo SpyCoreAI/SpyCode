@@ -18,17 +18,24 @@
  * fixed in a file the published artifact never reads. F-2c-25 measured that
  * gap directly and found it decides real cases in both directions:
  *
- *   · 13 of 18 override keys name packages that are not in the CLI's install
- *     closure at all - they are server/web/mobile exposures.
+ *   · At the time of that measurement the workspace carried 18 override keys;
+ *     13 of them named packages that are not in the CLI's install closure at
+ *     all - they are server/web/mobile exposures.
  *   · The CRITICAL `shell-quote` advisory, recorded as "reached by the
  *     PUBLISHED CLI through ink > react-devtools-core", is not reachable that
  *     way: `react-devtools-core` is an OPTIONAL PEER of ink, and a fresh
  *     install of the published package does not install it. Neither it nor
  *     `shell-quote` is present. The record's mechanism was wrong AND its
  *     control was inert; the conclusion was safe by luck.
- *   · The three keys that DO name packages in the closure - `fast-uri`,
+ *   · The three keys that then named packages in the closure - `fast-uri`,
  *     `form-data`, `ws` - all resolve at or above their security floor from
  *     the upstream ranges alone, with no override involved.
+ *
+ * That measurement is DATED (R4-3): `pnpm-workspace.yaml` now carries exactly
+ * 2 override keys - `fast-uri: 3.1.8` and `braces: 3.0.3` - and no `form-data`
+ * or `ws` override. Do not quote the 18-key figures above as the current
+ * workspace state; the instrument below re-derives from `package.json`, so
+ * its verdict never depends on this paragraph.
  *
  *  AND WHY A ONE-OFF MEASUREMENT IS NOT AN ANSWER. That result is DATED. A
  * caret range resolves differently tomorrow, with no commit here. The
@@ -84,7 +91,21 @@ export function verdictFrom(payload) {
   }
   const findings = [];
   for (const [name, info] of Object.entries(vulns)) {
-    const severity = info && typeof info === 'object' ? info.severity : undefined;
+    // R4-4: a per-entry value the verdict cannot read FAILS, exactly like a
+    // malformed payload at the top level. The old form read a string, a
+    // number, null, or an object without `severity` as `severity === undefined`
+    // and silently skipped it, so a payload whose EVERY entry was malformed
+    // verdicted ok:true - a clean pass over a payload the script cannot read,
+    // against this function's own "refuses a payload it cannot read" rule.
+    // A well-formed entry is an object carrying a string severity; anything
+    // else is a broken measurement, never a clean one.
+    if (info === null || typeof info !== 'object' || Array.isArray(info)) {
+      return { ok: false, reason: `vulnerability entry for \`${name}\` is not an object - the measurement failed`, findings: [] };
+    }
+    const severity = info.severity;
+    if (typeof severity !== 'string') {
+      return { ok: false, reason: `vulnerability entry for \`${name}\` has no readable severity - the measurement failed`, findings: [] };
+    }
     if (severity !== 'high' && severity !== 'critical') continue;
     const via = info && Array.isArray(info.via) ? info.via : [];
     const titles = via.filter((v) => v && typeof v === 'object').map((v) => `${v.title ?? '?'} (${v.url ?? '?'})`);
@@ -169,6 +190,26 @@ const SELF_TEST_CASES = [
     want: { ok: false, findings: 1 },
   },
   {
+    name: 'R4-4: a STRING per-entry value FAILS - it is not a clean zero',
+    payload: { vulnerabilities: { x: 'high' } },
+    want: { ok: false, findings: 0 },
+  },
+  {
+    name: 'R4-4: a NUMBER per-entry value FAILS - it is not a clean zero',
+    payload: { vulnerabilities: { x: 5 } },
+    want: { ok: false, findings: 0 },
+  },
+  {
+    name: 'R4-4: a NULL per-entry value FAILS - it is not a clean zero',
+    payload: { vulnerabilities: { x: null } },
+    want: { ok: false, findings: 0 },
+  },
+  {
+    name: 'R4-4: an OBJECT per-entry value with NO severity FAILS - it is not a clean zero',
+    payload: { vulnerabilities: { x: {} } },
+    want: { ok: false, findings: 0 },
+  },
+  {
     name: 'the published manifest carries ONLY prod + optional deps',
     manifest: { dependencies: { a: '^1' }, optionalDependencies: { b: '^2' }, devDependencies: { c: '^3' } },
     wantManifest: { deps: ['a'], opt: ['b'], hasDev: false },
@@ -210,7 +251,7 @@ function selfTest() {
   // three instruments reported PASS over zero executed assertions, because
   // nothing ratcheted the CASE count. This refuses to report success on an
   // empty run, and the floor is a literal so it cannot be silently lowered.
-  const FLOOR = 12;
+  const FLOOR = 16;
   if (ran < FLOOR) {
     console.error(`SELF-TEST INVALID - ${ran} cases ran, floor is ${FLOOR}. A green over an empty run is not a green.`);
     return 1;

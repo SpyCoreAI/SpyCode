@@ -10,10 +10,13 @@ import { describe, expect, test } from 'vitest';
  * lockfile and a set of `overrides` that the published tarball does not carry.
  * A user's `npm i -g @spycore/cli` resolves 15 caret ranges plus one optional
  * dependency, from the registry, with none of that applied. The two populations
- * are different, and the difference decided real cases: of the 18 override keys
- * in `pnpm-workspace.yaml`, 13 name packages that are not in the CLI's install
- * closure at all, and the one recorded as a CRITICAL reachable "by the
- * PUBLISHED CLI" is not present in a fresh install by any path.
+ * are different, and the difference decided real cases: at the time of the
+ * F-2c-25 measurement the workspace carried 18 override keys, 13 of which
+ * named packages that are not in the CLI's install closure at all, and the
+ * one recorded as a CRITICAL reachable "by the PUBLISHED CLI" is not present
+ * in a fresh install by any path. (R4-3: that measurement is dated -
+ * `pnpm-workspace.yaml` now carries exactly 2 override keys, `fast-uri` and
+ * `braces` - so do not quote the 18-key figures as the current workspace.)
  *
  * THE LIVE MEASUREMENT IS NOT RUN HERE, DELIBERATELY. It needs the registry,
  * and a test that silently passes when the network is down is worse than no
@@ -55,7 +58,7 @@ describe('audit-resolved-install - the published-manifest advisory instrument', 
     // three instruments printing PASS over zero executed assertions because
     // nothing ratcheted the case count. This asserts the number, not the word.
     const ran = Number(/SELF-TEST OK - (\d+) cases/.exec(out)?.[1] ?? '0');
-    expect(ran).toBeGreaterThanOrEqual(12);
+    expect(ran).toBeGreaterThanOrEqual(16);
   });
 
   /**
@@ -70,6 +73,21 @@ describe('audit-resolved-install - the published-manifest advisory instrument', 
     for (const malformed of [null, [], {}, { vulnerabilities: null }, { metadata: {} }, 'x', 7]) {
       const v = mod.verdictFrom(malformed);
       expect(v.ok, `must refuse ${JSON.stringify(malformed)}`).toBe(false);
+      expect(v.reason, `must SAY why it refused ${JSON.stringify(malformed)}`).not.toBeNull();
+    }
+    // R4-4: the same refusal, one level down. A MALFORMED PER-ENTRY value -
+    // a string, a number, null, an array, or an object with no readable
+    // severity - used to read as `severity === undefined` and be silently
+    // skipped, so a payload whose every entry was malformed verdicted clean.
+    for (const malformed of [
+      { vulnerabilities: { x: 'high' } },
+      { vulnerabilities: { x: 5 } },
+      { vulnerabilities: { x: null } },
+      { vulnerabilities: { x: [] } },
+      { vulnerabilities: { x: {} } },
+    ]) {
+      const v = mod.verdictFrom(malformed);
+      expect(v.ok, `must refuse per-entry malformed ${JSON.stringify(malformed)}`).toBe(false);
       expect(v.reason, `must SAY why it refused ${JSON.stringify(malformed)}`).not.toBeNull();
     }
     // …and the control: a well-formed clean payload is genuinely clean, so the
