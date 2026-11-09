@@ -26,7 +26,7 @@ import { fileURLToPath } from 'node:url';
 import { buildSubprocessEnv } from '../../spawn-env.js';
 import { releaseChildStdio } from '../../child-stdio.js';
 import { isObject } from '../../text.js';
-import { readClientVersion } from '../mcp-client.js';
+import { readClientVersion, sliceTailSafe } from '../mcp-client.js';
 import { LspFramer, encodeLspMessage } from './protocol.js';
 import {
   LspError,
@@ -46,6 +46,13 @@ export interface LspClientStartOptions {
   args: string[];
   /** Workspace root as a `file://` URI (sent as rootUri + workspaceFolders). */
   rootUri: string;
+  /**
+   * Working directory for the server child (the workspace root). Without it
+   * the child inherits the CLI process's cwd, so a relative server command
+   * resolves against the wrong directory when the agent runs with a cwd
+   * different from the workspace root.
+   */
+  cwd?: string | undefined;
   env?: NodeJS.ProcessEnv | undefined;
   initTimeoutMs?: number | undefined;
   requestTimeoutMs?: number | undefined;
@@ -93,7 +100,7 @@ export class LspClient {
     this.child.stdout.on('data', (chunk: Buffer) => this.onStdout(chunk));
     this.child.stderr.setEncoding('utf8');
     this.child.stderr.on('data', (chunk: string) => {
-      this.stderrTail = (this.stderrTail + chunk).slice(-STDERR_CAP_BYTES);
+      this.stderrTail = sliceTailSafe(this.stderrTail + chunk, STDERR_CAP_BYTES);
     });
     const onGone = (code: number | null, signal: NodeJS.Signals | null): void =>
       this.onChildExit(code, signal);
@@ -126,6 +133,9 @@ export class LspClient {
       // H-16: a language server is a third-party binary - it gets a
       // stripped env plus ONLY what was configured for it explicitly.
       env: buildSubprocessEnv(opts.env),
+      // The server runs in the workspace, not wherever the CLI was launched
+      // from: a relative server command resolves against the workspace root.
+      ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
       detached: true,
       stdio: ['pipe', 'pipe', 'pipe'],
     }) as ChildProcessWithoutNullStreams;
@@ -337,13 +347,25 @@ export class LspClient {
       if (!pending) return;
       this.pending.delete(msg.id as number);
       clearTimeout(pending.timer);
-      if ('error' in msg && isObject(msg.error)) {
-        const e = msg.error as { code?: unknown; message?: unknown };
-        pending.reject(
-          new LspError(
-            `language server error: ${typeof e.message === 'string' ? e.message : 'unknown'} (code ${typeof e.code === 'number' ? e.code : '?'})`,
-          ),
-        );
+      if ('error' in msg) {
+        // ANY error value rejects: a non-object error (`{id, error: "oops"}`)
+        // used to fall through to the success branch and resolve the pending
+        // request with `undefined`, so a failed request looked like a server
+        // that answered with nothing.
+        if (isObject(msg.error)) {
+          const e = msg.error as { code?: unknown; message?: unknown };
+          pending.reject(
+            new LspError(
+              `language server error: ${typeof e.message === 'string' ? e.message : 'unknown'} (code ${typeof e.code === 'number' ? e.code : '?'})`,
+            ),
+          );
+        } else {
+          // Code-point slice, so the 300-char cap cannot split a UTF-16
+          // surrogate pair.
+          const text = String(msg.error ?? 'unknown error');
+          const capped = text.length > 300 ? `${[...text].slice(0, 300).join('')}…` : text;
+          pending.reject(new LspError(`language server error: ${capped}`));
+        }
       } else {
         pending.resolve((msg as { result?: unknown }).result);
       }

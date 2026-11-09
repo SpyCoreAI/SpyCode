@@ -15,12 +15,12 @@
  * import (H-6). Like everything else that touches the model, the query is a
  * parameterised FTS5 MATCH - user text is never interpolated into SQL.
  */
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
 import { getConfigPath } from '../config.js';
 import { sanitizeForDisplay } from '../sanitize-display.js';
-import { optInt, registerTool, reqString, type ToolContext } from './tool-core.js';
+import { optInt, registerTool, reqString, ToolError, type ToolContext } from './tool-core.js';
 
 /**
  * `node:sqlite` is loaded through `createRequire`, not a static import:
@@ -140,6 +140,25 @@ export function __closeSessionIndexForTests(): void {
   dbPath = null;
 }
 
+/**
+ * Close the cached index handle. The module-level handle is otherwise never
+ * closed: the process held the SQLite file (and its -wal/-shm) open until
+ * killed, so a later process could see a locked or stale index. Registered
+ * on process exit; `openSessionIndex` reopens lazily afterwards, so a close
+ * is never a one-way door.
+ */
+export function closeSessionIndex(): void {
+  __closeSessionIndexForTests();
+}
+
+process.once('exit', () => {
+  try {
+    closeSessionIndex();
+  } catch {
+    /* best-effort on exit */
+  }
+});
+
 /** Split text into ~SESSION_CHUNK_CHARS chunks on line boundaries. */
 export function chunkText(text: string, chunkChars = SESSION_CHUNK_CHARS): string[] {
   const chunks: string[] = [];
@@ -181,10 +200,18 @@ export function indexRun(run: IndexedRun, path?: string): { chunks: number } {
   let transcript = '';
   try {
     if (run.logFile && existsSync(run.logFile)) {
-      const buf = readFileSync(run.logFile);
-      transcript = buf.includes(0)
-        ? ''
-        : buf.toString('utf8').slice(0, SESSION_INDEX_MAX_BYTES);
+      // Read at most the cap, never the whole file: a multi-gigabyte log
+      // used to be slurped into memory in full and only then sliced to the
+      // 500 KB cap. The NUL check runs on the capped bytes, as before.
+      const fd = openSync(run.logFile, 'r');
+      try {
+        const buf = Buffer.alloc(SESSION_INDEX_MAX_BYTES);
+        const n = readSync(fd, buf, 0, SESSION_INDEX_MAX_BYTES, 0);
+        const capped = buf.subarray(0, n);
+        transcript = capped.includes(0) ? '' : capped.toString('utf8');
+      } finally {
+        closeSync(fd);
+      }
     }
   } catch {
     transcript = '';
@@ -280,7 +307,7 @@ registerTool({
   },
   async execute(args, _ctx: ToolContext) {
     const query = reqString(args, 'query').trim();
-    if (query.length === 0) throw new Error('query must not be empty');
+    if (query.length === 0) throw new ToolError('query must not be empty');
     const limit = optInt(args, 'limit');
     const hits = searchSessions(query, limit !== undefined ? { limit } : {});
     if (hits.length === 0) {

@@ -91,6 +91,13 @@ export interface McpBridge {
 export interface SetupMcpOptions {
   cwd: string;
   signal?: AbortSignal | undefined;
+  /**
+   * Approval channel for MCP tool calls, used when the tool context at call
+   * time carries none (`ctx.requestApproval` wins when present - it is the
+   * live channel for the run; this is the bridge-setup fallback). It was
+   * previously declared but never read, so a reader assumed the bridge used
+   * the run's approval path while nothing actually wired it in.
+   */
   requestApproval?: RequestApproval | undefined;
   /** Per-server handshake timeout (default 10s). */
   perServerTimeoutMs?: number | undefined;
@@ -148,6 +155,9 @@ async function startServerClient(
     command: server.command ?? '',
     args: server.args ?? [],
     env: buildMinimalEnv(server.env, process.env),
+    // The child runs in the workspace, not wherever the CLI was launched
+    // from, so a relative server command resolves against the workspace.
+    cwd: opts.cwd,
     initTimeoutMs: initTimeout,
     ...(opts.callTimeoutMs !== undefined ? { requestTimeoutMs: opts.callTimeoutMs } : {}),
     // CL5: surface an overflow kill even when no request was in flight.
@@ -225,6 +235,11 @@ export async function setupMcpBridge(opts: SetupMcpOptions): Promise<McpBridge |
   // both sanitize to "a_b"). Without this, the second server's tools
   // silently overwrite the first's, routing calls to the wrong server.
   const seenPrefixes = new Set<string>();
+  // Servers whose tools were actually registered. A server skipped for a
+  // prefix collision still STARTED (its client is shut down with the rest),
+  // but it contributes no tools - counting it in serverCount overstated
+  // the bridge ("2 servers" for one usable one).
+  let registeredServers = 0;
   for (const { server, client, tools: serverTools } of live) {
     const prefix = `mcp__${sanitizeServerName(server.name)}__`;
     if (seenPrefixes.has(prefix)) {
@@ -234,9 +249,10 @@ export async function setupMcpBridge(opts: SetupMcpOptions): Promise<McpBridge |
       continue;
     }
     seenPrefixes.add(prefix);
+    registeredServers += 1;
     for (const t of serverTools) {
       const fullName = `${prefix}${t.name}`;
-      tools.set(fullName, makeWrapper(fullName, server.name, t, client, opts.callTimeoutMs));
+      tools.set(fullName, makeWrapper(fullName, server.name, t, client, opts.callTimeoutMs, opts.requestApproval));
       catalogEntries.push({ fullName, description: t.description, schema: t.inputSchema });
     }
   }
@@ -252,7 +268,7 @@ export async function setupMcpBridge(opts: SetupMcpOptions): Promise<McpBridge |
     tools,
     promptSection: buildMcpCatalog(catalogEntries),
     warnings,
-    serverCount: live.length,
+    serverCount: registeredServers,
     toolCount: tools.size,
     serverPids: clients.map((c) => c.pid).filter((p): p is number => p !== undefined),
     shutdown: async () => {
@@ -317,6 +333,7 @@ function makeWrapper(
   tool: McpToolDef,
   client: McpClientHandle,
   callTimeoutMs: number | undefined,
+  bridgeApproval?: RequestApproval | undefined,
 ): ToolDefinition {
   return {
     name: fullName,
@@ -339,7 +356,10 @@ function makeWrapper(
         fullName,
         args,
       };
-      const outcome = await resolveApproval(ctx.requestApproval, request);
+      const outcome = await resolveApproval(
+        ctx.requestApproval ?? bridgeApproval,
+        request,
+      );
       if (!outcome.approved) {
         return {
           ok: false,

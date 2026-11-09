@@ -245,7 +245,18 @@ export class McpHttpClient {
       'content-type': 'application/json',
       accept: 'application/json, text/event-stream',
     };
-    if (this.sessionId !== null) headers['mcp-session-id'] = this.sessionId;
+    if (this.sessionId !== null) {
+      headers['mcp-session-id'] = this.sessionId;
+    } else {
+      // A configured `mcp-session-id` header must never stand in for the
+      // negotiated session: with no session established it would pin the
+      // client to a caller-chosen id (or leak a stale one). Drop every
+      // spelling of it (header names are case-insensitive) until a session
+      // exists; the negotiated id above then wins.
+      for (const k of Object.keys(headers)) {
+        if (k.toLowerCase() === 'mcp-session-id') delete headers[k];
+      }
+    }
     if (this.protocolVersionValue !== null) headers['mcp-protocol-version'] = this.protocolVersionValue;
     return headers;
   }
@@ -287,7 +298,16 @@ export class McpHttpClient {
     if (this.closed || this.failedForSession) throw this.failFast();
     const allowReinit = opts.allowReinit !== false;
     const id = this.nextId++;
-    const payload = JSON.stringify({ jsonrpc: '2.0', id, method, params });
+    // stringify INSIDE the guarded region: circular `tools/call` arguments
+    // throw a raw TypeError out of JSON.stringify, and the stdio client wraps
+    // its own stringify in McpError - an unwrapped one here would surface as
+    // an unclassified crash instead of a per-call MCP failure.
+    let payload: string;
+    try {
+      payload = JSON.stringify({ jsonrpc: '2.0', id, method, params });
+    } catch {
+      throw new McpError(`request "${method}" failed: arguments are not JSON-serializable (circular structure)`);
+    }
 
     const controller = new AbortController();
     this.inflight.add(controller);
@@ -398,16 +418,27 @@ export class McpHttpClient {
   /** Fire-and-forget JSON-RPC error reply to a server-initiated request. */
   private postErrorReply(id: number | string, code: number, message: string): void {
     const body = JSON.stringify({ jsonrpc: '2.0', id, error: { code, message } });
+    // Tracked like every other in-flight request: an untracked fire-and-
+    // forget POST could not be cancelled by kill(), so an abort left it
+    // running past teardown.
+    const controller = new AbortController();
+    this.inflight.add(controller);
+    const timer = setTimeout(() => controller.abort(), HTTP_CONNECT_TIMEOUT_MS);
     request(this.url, {
       method: 'POST',
       headers: this.buildHeaders(),
       body,
+      signal: controller.signal,
       headersTimeout: HTTP_CONNECT_TIMEOUT_MS,
       bodyTimeout: HTTP_CONNECT_TIMEOUT_MS,
     })
       .then((r) => drainQuietly(r.body))
       .catch(() => {
         /* best-effort */
+      })
+      .finally(() => {
+        clearTimeout(timer);
+        this.inflight.delete(controller);
       });
   }
 

@@ -31,8 +31,7 @@ import {
 import { delimiter, extname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { DEFAULT_LSP_INIT_TIMEOUT_MS, LspClient } from './client.js';
-import { isLspEnabled, loadLspConfig, type LspServerOverride } from './config.js';
-import { isWorkspaceTrusted } from '../../config.js';
+import { effectiveLspOverrides, isLspEnabled, type LspServerOverride } from './config.js';
 import {
   LspError,
   type LanguageServerStatus,
@@ -239,32 +238,44 @@ function resolveServerCommand(
   );
 }
 
-/** Bounded recursive file enumeration for one server spec (deterministic order). */
+/**
+ * Bounded file enumeration for one server spec (deterministic order).
+ *
+ * Iterative, not recursive: a pathological deep tree used to stack-overflow
+ * the recursive walk. An explicit stack makes the depth bounded only by
+ * `maxFiles` (which caps the output) and the heap, never by the call stack.
+ * Directories are pushed in reverse sorted order so popping yields them in
+ * sorted order, matching the old walk's output.
+ */
 function listCandidateFiles(cwd: string, spec: BuiltinServerSpec, maxFiles: number): string[] {
   const out: string[] = [];
-  const walk = (dir: string): void => {
-    if (out.length >= maxFiles) return;
+  const stack: string[] = [cwd];
+  while (stack.length > 0) {
+    if (out.length >= maxFiles) return out;
+    const dir = stack.pop() as string;
     let entries: Dirent<string>[];
     try {
       entries = readdirSync(dir, { withFileTypes: true });
     } catch {
-      return;
+      continue;
     }
     entries.sort((a, b) => a.name.localeCompare(b.name));
+    const subdirs: string[] = [];
     for (const e of entries) {
-      if (out.length >= maxFiles) return;
+      if (out.length >= maxFiles) return out;
       const full = join(dir, e.name);
       if (e.isDirectory()) {
         // isDirectory() is false for symlinks (no d_type follow), so symlinked
         // trees are never descended into — no loop risk.
         if (SKIP_DIRS.has(e.name) || e.name.startsWith('.')) continue;
-        walk(full);
+        subdirs.push(full);
       } else if (e.isFile() && spec.extensions.includes(extname(e.name).toLowerCase())) {
         out.push(full);
       }
     }
-  };
-  walk(cwd);
+    // Reverse so the next pop visits the first-sorted subdirectory first.
+    for (let i = subdirs.length - 1; i >= 0; i -= 1) stack.push(subdirs[i] as string);
+  }
   return out;
 }
 
@@ -331,12 +342,13 @@ export class LspManager {
     this.servers.set(language, managed);
     try {
       // SECURITY: custom server commands from .spycore/lsp.json are only
-      // honored in a trusted workspace. In an untrusted workspace (e.g. LSP
-      // enabled via SPYCODE_LSP=1 in a cloned repo), fall back to the default
-      // command so a malicious config cannot spawn arbitrary processes.
-      const override = isWorkspaceTrusted(this.cwd)
-        ? loadLspConfig(this.cwd).servers?.[language]
-        : undefined;
+      // honored in a trusted workspace. The trust gate is single-sourced in
+      // `effectiveLspOverrides` (config.ts): in an untrusted workspace
+      // (e.g. LSP enabled via SPYCODE_LSP=1 in a cloned repo) it returns no
+      // overrides, so the default command is used and a malicious config
+      // cannot spawn arbitrary processes. No second inline trust check lives
+      // here - the gate cannot drift between the two sites.
+      const override = effectiveLspOverrides(this.cwd)[language];
       const { command, args } = resolveServerCommand(spec, override);
       managed.command = command;
       managed.args = args;
@@ -344,6 +356,7 @@ export class LspManager {
         command,
         args,
         rootUri: pathToFileURL(this.cwd).href,
+        cwd: this.cwd,
         ...(opts?.initTimeoutMs !== undefined ? { initTimeoutMs: opts.initTimeoutMs } : {}),
         onExit: () => this.onServerExit(language, managed),
       });

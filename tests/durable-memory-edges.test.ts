@@ -33,10 +33,10 @@ const memPath = (): string => join(memDir(), 'MEMORY.md');
 const userPath = (): string => join(memDir(), 'USER.md');
 
 describe('durable-memory readers and writers', () => {
-  test('NUL bytes and unreadable files read as empty', () => {
+  test('NUL bytes are stripped; unreadable files read as empty', () => {
     mkdirSync(memDir(), { recursive: true });
     writeFileSync(memPath(), 'has\0nul');
-    expect(readDurableFile('memory', cfgDir)).toBe('');
+    expect(readDurableFile('memory', cfgDir)).toBe('hasnul');
     rmSync(memPath());
     mkdirSync(memPath());
     expect(readDurableFile('memory', cfgDir)).toBe('');

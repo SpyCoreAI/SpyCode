@@ -30,7 +30,7 @@ import { releaseChildStdio } from '../child-stdio.js';
 import { isObject } from '../text.js';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative, sep } from 'node:path';
 
 export const MCP_PROTOCOL_VERSION = '2025-06-18';
 
@@ -103,6 +103,14 @@ export interface McpClientStartOptions {
   command: string;
   args: string[];
   env: NodeJS.ProcessEnv;
+  /**
+   * Working directory for the server child. Without it the child inherits
+   * the CLI process's cwd, so a relative server command (e.g.
+   * `./scripts/mcp-server`) resolves against the wrong directory when the
+   * agent runs with a cwd different from the workspace root. The bridge
+   * passes the workspace root; `mcp test` callers should do the same.
+   */
+  cwd?: string | undefined;
   initTimeoutMs?: number;
   requestTimeoutMs?: number;
   /**
@@ -182,7 +190,7 @@ export class McpStdioClient {
     this.child.stdout.on('data', (chunk: string) => this.onStdout(chunk));
     this.child.stderr.setEncoding('utf8');
     this.child.stderr.on('data', (chunk: string) => {
-      this.stderrTail = (this.stderrTail + chunk).slice(-STDERR_CAP_BYTES);
+      this.stderrTail = sliceTailSafe(this.stderrTail + chunk, STDERR_CAP_BYTES);
     });
     const onGone = (): void => this.onExit();
     this.child.on('close', onGone);
@@ -216,6 +224,9 @@ export class McpStdioClient {
       // H-16: an MCP server is a third-party binary - it gets a stripped
       // env plus ONLY what the user configured for it explicitly.
       env: buildSubprocessEnv(opts.env),
+      // The server runs IN the workspace, not wherever the CLI was launched
+      // from: a relative command resolves against the workspace root.
+      ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
       detached: true,
       stdio: ['pipe', 'pipe', 'pipe'],
     }) as ChildProcessWithoutNullStreams;
@@ -474,6 +485,10 @@ export class McpStdioClient {
   /** Immediate, best-effort teardown for abort/Ctrl+C - SIGTERM then SIGKILL. */
   kill(): void {
     this.closed = true;
+    // A killed client is no longer live: `shutdownAllMcpClients` must not
+    // try to shut it down again, and a stale entry would keep the process
+    // group (and its pipes) referenced past the kill.
+    liveMcpClients.delete(this);
     try {
       this.child.stdin.end();
     } catch {
@@ -516,20 +531,44 @@ export class McpStdioClient {
 }
 
 /**
+ * Keep the last `maxChars` code units of `s` without splitting a UTF-16
+ * surrogate pair at the cut: a code-unit slice can sever a pair, leaving a
+ * lone low surrogate at the front (which renders as U+FFFD and breaks
+ * downstream slicing). Exported for the LSP client, which caps its stderr
+ * tail the same way.
+ */
+export function sliceTailSafe(s: string, maxChars: number): string {
+  if (s.length <= maxChars) return s;
+  const cut = s.slice(-maxChars);
+  const first = cut.charCodeAt(0);
+  return first >= 0xdc00 && first <= 0xdfff ? cut.slice(1) : cut;
+}
+
+/**
  * Read the CLI's own version for `clientInfo.version`, walking up from this
  * module to the package.json (depth differs between the bundled build and the
  * unbundled test run). Falls back to '0.0.0'.
  * Exported for the remote (streamable HTTP) client - same clientInfo dialect.
  */
 export function readClientVersion(): string {
-  let dir = dirname(fileURLToPath(import.meta.url));
+  const moduleFile = fileURLToPath(import.meta.url);
+  let dir = dirname(moduleFile);
   for (let i = 0; i < 6; i += 1) {
     try {
       const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as {
         name?: string;
         version?: string;
       };
-      if (pkg.name === '@spycore/cli' && typeof pkg.version === 'string') return pkg.version;
+      if (pkg.name === '@spycore/cli' && typeof pkg.version === 'string') {
+        // The candidate must be THIS package's root, not a same-named
+        // package.json in a monorepo parent: this module lives at
+        // <root>/src/... in a source/test run and <root>/dist/... in the
+        // bundled build. Any other first segment means the match belongs
+        // to an ancestor that merely contains this checkout - keep walking
+        // (and fall back to '0.0.0') rather than report its version.
+        const firstSeg = relative(dir, moduleFile).split(sep)[0];
+        if (firstSeg === 'src' || firstSeg === 'dist') return pkg.version;
+      }
     } catch {
       /* keep walking toward the package root */
     }

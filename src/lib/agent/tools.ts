@@ -375,7 +375,10 @@ function toToolDecl(t: ToolDefinition): ToolDecl {
  * mode (plan phase) the mutating built-ins and all MCP tools are excluded - the
  * same `!mutating` predicate `describeToolsForPrompt` uses, so the model is
  * offered exactly what it could call. A name that can't satisfy the server's
- * charset is dropped (it would 400 the whole request) rather than sent.
+ * charset is dropped (it would 400 the whole request) rather than sent - and
+ * the drop is REPORTED through `onInvalidName` when the caller supplies it,
+ * so a dropped tool is never silent. `openRunSession` in run-session.ts
+ * forwards it to an `mcp_notice`.
  */
 export function buildToolDeclarations(opts: {
   readOnlyOnly?: boolean;
@@ -385,6 +388,8 @@ export function buildToolDeclarations(opts: {
   delegateEnabled?: boolean;
   /** H-5: the per-surface toolset gate (disabled toolsets / whitelist). */
   toolsets?: ToolsetFilter;
+  /** Called once per dropped declaration, with the tool name. */
+  onInvalidName?: ((name: string) => void) | undefined;
 } = {}): ToolDecl[] {
   const out: ToolDecl[] = [];
   const builtins = selectTools(opts);
@@ -395,7 +400,11 @@ export function buildToolDeclarations(opts: {
       out.push(toToolDecl(t));
     }
   }
-  return out.filter((d) => NATIVE_TOOL_NAME_RE.test(d.name));
+  return out.filter((d) => {
+    const ok = NATIVE_TOOL_NAME_RE.test(d.name);
+    if (!ok) opts.onInvalidName?.(d.name);
+    return ok;
+  });
 }
 
 /** A short, identity-safe label of a call's primary argument, for the UI. */

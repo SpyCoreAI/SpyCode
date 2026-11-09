@@ -29,8 +29,9 @@
  * Writes are atomic (temp file + rename), like the rest of the CLI's disk
  * state. This module self-registers the `memory` tool on import (H-6).
  */
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { randomBytes } from 'node:crypto';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { dirname, join, basename } from 'node:path';
 import { getConfigPath } from '../config.js';
 import { redactFreeText } from '../redact.js';
 import { APPROVAL_ANTI_SPAM_TEXT, resolveApproval } from './approval.js';
@@ -61,13 +62,22 @@ function filePath(file: 'memory' | 'user', configDir?: string): string {
   return join(durableMemoryDir(configDir), file === 'memory' ? DURABLE_MEMORY_FILE : DURABLE_USER_FILE);
 }
 
-/** Read one durable file; missing/unreadable ⇒ ''. Never throws. */
+/**
+ * Read one durable file; missing/unreadable ⇒ ''. Never throws.
+ *
+ * A file containing NUL bytes is NOT empty: NULs are stripped and the rest
+ * is returned. The old behavior returned `''` for any NUL-containing file,
+ * and the next append then wrote back only the new entry - silently
+ * discarding the whole file. (A NUL cannot come from the memory tool, which
+ * writes clean text; it can come from a stray binary write or a corrupt
+ * disk, and losing the file over it is the worse outcome.)
+ */
 export function readDurableFile(file: 'memory' | 'user', configDir?: string): string {
   try {
     const p = filePath(file, configDir);
     if (!existsSync(p)) return '';
     const raw = readFileSync(p, 'utf8');
-    return raw.includes('\u0000') ? '' : raw;
+    return raw.includes('\u0000') ? raw.replace(/\u0000/g, '') : raw;
   } catch {
     return '';
   }
@@ -118,9 +128,45 @@ export function renderDurableMemoryBlock(snap: DurableMemorySnapshot): string {
 /** Atomic write (temp + rename) at 0600 - secrets-adjacent content. */
 function writeDurableFileAtomic(path: string, content: string): void {
   mkdirSync(dirname(path), { recursive: true });
-  const tmp = `${path}.tmp-${process.pid}`;
-  writeFileSync(tmp, content, { encoding: 'utf8', mode: 0o600 });
-  renameSync(tmp, path);
+  // Random temp name: a fixed `${path}.tmp-${pid}` name is guessable, so
+  // another local process can plant the temp file (or a stale one from a
+  // crashed run can linger and be mistaken for fresh). The mode is applied
+  // AFTER the write as well as at creation: `writeFileSync`'s `mode` only
+  // sets permissions when it creates the file, so a temp file that already
+  // existed (planted, or left by a crash) would keep its old mode.
+  const tmp = `${path}.tmp-${process.pid}-${randomBytes(8).toString('hex')}`;
+  try {
+    writeFileSync(tmp, content, { encoding: 'utf8', mode: 0o600 });
+    chmodSync(tmp, 0o600);
+    renameSync(tmp, path);
+  } catch (err) {
+    try {
+      if (existsSync(tmp)) unlinkSync(tmp);
+    } catch {
+      /* ignore cleanup failure */
+    }
+    throw err;
+  }
+  // Stale temp files from crashed runs (same basename, older than an hour)
+  // are removed best-effort so they cannot accumulate - or be mistaken for
+  // a live write by a later run.
+  try {
+    const dir = dirname(path);
+    const base = basename(path);
+    const tmpName = basename(tmp);
+    const cutoff = Date.now() - 60 * 60 * 1000;
+    for (const f of readdirSync(dir)) {
+      if (!f.startsWith(`${base}.tmp-`) || f === tmpName) continue;
+      const fp = join(dir, f);
+      try {
+        if (statSync(fp).mtimeMs < cutoff) unlinkSync(fp);
+      } catch {
+        /* ignore */
+      }
+    }
+  } catch {
+    /* best-effort cleanup only */
+  }
 }
 
 /**

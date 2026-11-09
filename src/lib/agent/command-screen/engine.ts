@@ -17,7 +17,6 @@ import {
   DEVICE_WRITE_VERBS,
   DOWNLOADERS,
   FORCE_FLAG,
-  INTERPRETER_CODE_FLAGS,
   INTERPRETERS,
   MAX_SCREEN_DEPTH,
   RECURSIVE_FLAG,
@@ -37,6 +36,26 @@ import {
   continuationTails,
   splitArgs,
 } from './shell-args.js';
+
+/**
+ * `|` and its stderr variant `|&` are both pipe terminators. The parser
+ * only ever yields `|` (its `SHELL_OPERATORS` table has no `|&` entry), so
+ * today this is future-proofing - but every rule that stops at a pipe must
+ * stop at the same two terminators, never at a literal `|` alone.
+ */
+export function isPipeTerminator(t: string | null): boolean {
+  return t === '|' || t === '|&';
+}
+
+/**
+ * Classic fork bomb (`NAME(){ NAME|NAME& };NAME`), any function name.
+ * The old check matched only the literal `:(){:|:&};:` - renaming the
+ * function (`foo(){foo|foo&};foo`) sailed through. Backreferences match the
+ * SHAPE: same name in the definition, both pipe operands, and the call.
+ * POSIX function names are `[A-Za-z_][A-Za-z0-9_]*`; `:` is a builtin name
+ * used by the classic spelling, so it is allowed too.
+ */
+const FORK_BOMB_RE = /([A-Za-z_:][A-Za-z0-9_:]*)\(\)\s*\{\s*\1\s*\|\s*\1\s*&\s*\}\s*;\s*\1/;
 
 /**
  * F-4 - A POSITIONAL PROPERTY TESTED BY A SCAN OVER ALL OPERANDS
@@ -225,7 +244,7 @@ function deviceWriteTargets(name: string, args: string[]): string[] {
 export function screenShell(command: string, depth: number, restoreContinuations = true, nested = false): string | null {
   // The fork bomb is a whitespace-insensitive SHAPE, not a command word - the
   // only rule that is genuinely about raw text.
-  if (command.replace(/\s+/g, '').includes(':(){:|:&};:')) return 'fork bomb';
+  if (FORK_BOMB_RE.test(command.replace(/\s+/g, ''))) return 'fork bomb';
 
   const parsed = parseShell(command);
   const hit = screenCommands(parsed.commands, depth, nested);
@@ -544,7 +563,7 @@ function screenArgv(
       // dangerous operand two stages back. Also handle xargs -I/--replace:
       // the placeholder is substituted at runtime from stdin, so the
       // operand list is empty but the upstream content is what gets deleted.
-      const piped = operands.length === 0 && i > 0 && (commands[i - 1] as SimpleCommand).terminator === '|';
+      const piped = operands.length === 0 && i > 0 && isPipeTerminator((commands[i - 1] as SimpleCommand).terminator);
       let targets: string[] = operands;
       if (piped) {
         targets = [];
@@ -562,7 +581,7 @@ function screenArgv(
             targets.push(unescaped);
             targets.push(op); // also check the raw form
           }
-          if (stage.terminator !== '|') break;
+          if (!isPipeTerminator(stage.terminator)) break;
         }
         // If xargs uses placeholder substitution, ANY upstream content is
         // dangerous (it gets substituted into the rm command)
@@ -621,7 +640,7 @@ function screenArgv(
     }
 
     // ── a network download piped into a shell: remote code execution ──
-    if (DOWNLOADERS.has(name) && cmd.terminator === '|') {
+    if (DOWNLOADERS.has(name) && isPipeTerminator(cmd.terminator)) {
       for (let j = i + 1; j < commands.length; j += 1) {
         const stage = commands[j] as SimpleCommand;
         // F-2c-40 - the SAME candidate reading as the main loop. This rule
@@ -639,15 +658,30 @@ function screenArgv(
         ) {
           return 'pipe a network download into a shell';
         }
-        if (stage.terminator !== '|') break;
+        // A wordless stage is the `&` half of a `|&` split (the conservative
+        // reading: `curl x |& sh` becomes [curl] | [] & [sh]) or an empty
+        // pipeline segment - neither carries a command, so the scan continues
+        // past it instead of stopping at the non-pipe terminator. Any other
+        // terminator ends the pipeline.
+        if (
+          stage.words.length === 0 &&
+          stage.redirects.length === 0 &&
+          (stage.terminator === '&' || stage.terminator === '|')
+        ) {
+          continue;
+        }
+        if (!isPipeTerminator(stage.terminator)) break;
       }
     }
 
-    // ── find … -delete / -exec rm … aimed at / ~ or a system directory ──
+    // ── find … -delete / -exec / -execdir rm … aimed at / ~ or a system directory ──
     if (name === 'find') {
-      const destroys = args.includes('-delete') || (args.includes('-exec') && args.some((a) => osFold(commandBasename(a)) === 'rm'));
+      const destroys =
+        args.includes('-delete') ||
+        ((args.includes('-exec') || args.includes('-execdir')) &&
+          args.some((a) => osFold(commandBasename(a)) === 'rm'));
       if (destroys && operands.some((o) => dangerousTarget(o) !== null)) {
-        return 'find -delete/-exec rm on / ~ or a system directory';
+        return 'find -delete/-exec/-execdir rm on / ~ or a system directory';
       }
     }
 
@@ -675,7 +709,7 @@ function screenArgv(
           const hit = screenNested(rawInner, depth);
           if (hit) return hit;
         }
-      } else if (i > 0 && (commands[i - 1] as SimpleCommand).terminator === '|') {
+      } else if (i > 0 && isPipeTerminator((commands[i - 1] as SimpleCommand).terminator)) {
         // F-2c-25 - a BARE shell reading its script from a pipe.
         // `printf "rm -rf /" | sh` executes the upstream text; the DOWNLOADERS
         // rule only covers curl/wget/fetch, so this had no rule at all while
@@ -790,10 +824,10 @@ function screenArgv(
     //
     // F-2c-42 - THE CODE-FLAG TABLE IS NO LONGER LOAD-BEARING.
     //
-    // `interpreterPayload` located the payload with `INTERPRETER_CODE_FLAGS.has(a)`
-    // - an EXACT token match - while its twin `shellPayload`, declared fifteen
-    // lines below in this same file, is cluster-aware and its own comment records
-    // that the one-spelling version cost 112 + 56 shapes. So `python3 -Bc "…"`,
+    // `interpreterPayload` (now deleted) located the payload with
+    // `INTERPRETER_CODE_FLAGS.has(a)` - an EXACT token match - while its twin
+    // `shellPayload`, declared in this same file, is cluster-aware and its own
+    // comment records that the one-spelling version cost 112 + 56 shapes. So `python3 -Bc "…"`,
     // `perl -we "…"` and `ruby -we "…"` skipped this arm entirely and nothing
     // else in `screenCommands` looks at an interpreter's operands. Measured:
     // **802 shapes the published 0.6.0 refuses ran at HEAD.**
@@ -913,11 +947,6 @@ function shellPayload(args: string[]): string | undefined {
   return undefined;
 }
 
-function interpreterPayload(args: string[]): string | undefined {
-  const ci = args.findIndex((a) => INTERPRETER_CODE_FLAGS.has(a));
-  if (ci === -1) return undefined;
-  return args[ci + 1];
-}
 
 /**
  * Candidate commands read out of a payload in a language this screen does not
@@ -940,13 +969,38 @@ function foreignCodeCommands(payload: string): SimpleCommand[] {
   // The mask is U+0001: it is in none of the splitter classes and cannot
   // occur in a shell command line, so masking can neither create a token
   // boundary nor destroy one. A SPACE would have been read by the splitter.
+  // The masker is depth-aware: `${A:-${B}}` nests, and the flat
+  // `/\$\{[^}]*\}/` regex stopped at the INNER `}`, shredding the word.
+  // An unbalanced `${` (no closer) is left unmasked, as before.
   const MASK = '\u0001';
   const spans: string[] = [];
-  const masked = payload.replace(/\$\{[^}]*\}/g, (m) => `${MASK}${spans.push(m) - 1}${MASK}`);
+  let masked = '';
+  for (let i = 0; i < payload.length;) {
+    if (payload[i] === '$' && payload[i + 1] === '{') {
+      let depth = 0;
+      let j = i + 1;
+      for (; j < payload.length; j += 1) {
+        if (payload[j] === '{') depth += 1;
+        else if (payload[j] === '}') {
+          depth -= 1;
+          if (depth === 0) break;
+        }
+      }
+      if (j < payload.length) {
+        spans.push(payload.slice(i, j + 1));
+        masked += `${MASK}${spans.length - 1}${MASK}`;
+        i = j + 1;
+        continue;
+      }
+    }
+    masked += payload[i] as string;
+    i += 1;
+  }
+  const unmask = (t: string): string =>
+    t.replace(/\u0001(\d+)\u0001/g, (_, k: string) => spans[Number(k)] as string);
   const tokens = masked
     .split(/[\s()[\]{},;'"`]+/)
-    .filter((t) => t.length > 0)
-    .map((t) => t.replace(/\u0001(\d+)\u0001/g, (_, k: string) => spans[Number(k)] as string));
+    .filter((t) => t.length > 0);
   // F-2c-42 - AND THE CONSERVATIVE READING, BECAUSE A TOKEN LIST HAS NO
   // REDIRECTIONS AND THREE RULES ONLY EXIST INSIDE ONE.
   //
@@ -975,14 +1029,23 @@ function foreignCodeCommands(payload: string): SimpleCommand[] {
   // **all 86 shapes that survived the two fixes above were exactly these
   // cores.** F-2c-30 measured 24 shapes on this cause in the carrier arm and
   // F-2c-40 measured 9 in the conservative arm; this is the third site.
+  //
+  // `|&` (stderr pipe) is a stage boundary too: `curl … |& sh` split only on
+  // `|` left `|&` glued to its neighbours (`x|&sh` is one token here) and
+  // the whole payload stayed one command. The split runs on the MASKED
+  // tokens, so a `|` inside a `${…}` span - protected by the mask - cannot
+  // become a boundary.
   const stages: string[][] = [[]];
   for (const t of tokens) {
-    if (t === '|') stages.push([]);
-    else (stages[stages.length - 1] as string[]).push(t);
+    const parts = t.split(/(\|&|\|)/);
+    for (const p of parts) {
+      if (p === '|' || p === '|&') stages.push([]);
+      else if (p.length > 0) (stages[stages.length - 1] as string[]).push(p);
+    }
   }
   const stageCmd = (toks: string[], k: number): SimpleCommand => ({
     assignments: [],
-    words: toks.map(word),
+    words: toks.map((v) => word(unmask(v))),
     redirects: [],
     redirectOps: [],
     terminator: k < stages.length - 1 ? '|' : null,

@@ -9,7 +9,9 @@
  */
 
 import { readdirSync, statSync, readFileSync, lstatSync, realpathSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { join, relative, extname, basename, resolve, sep } from 'node:path';
+import { loadSecretGuardSync } from './secrets.js';
 
 export interface RepoMapEntry {
   path: string;
@@ -52,6 +54,29 @@ export function buildRepoMap(
 ): RepoMapEntry {
   const root: RepoMapEntry = { path: '.', type: 'dir', children: [] };
   let totalTokens = 0;
+  // This reader loads file CONTENTS for token estimation, so it consults
+  // the same secret guard as the file tools: a credential file (e.g.
+  // credentials.json) must never have its contents read here - not even
+  // for a size estimate, and even though the map surfaces no content.
+  // The guard is sync (this walk is sync) and carries the `.spycoreignore`
+  // layer. A secret DIRECTORY is probed the same way builtin-tools does
+  // (`isSecret(join(dir, '__probe__'))`) so a whole secret tree is pruned.
+  const isSecret = loadSecretGuardSync(rootDir);
+  // `.gitignore` respect, via globby's sync predicate (the same matcher
+  // `gitignoreCheckFor` in tool-core.ts uses). Loaded through `createRequire`
+  // because globby is ESM-only and this module is sync - the same precedent
+  // as session-search.ts loading `node:sqlite`. If globby cannot load, the
+  // predicate degrades to "ignore nothing" (the old behavior); the secret
+  // guard above still applies, so the degradation is about visibility, never
+  // about credential safety.
+  let isGitIgnored: (abs: string) => boolean = () => false;
+  try {
+    const { isGitIgnoredSync } = createRequire(import.meta.url)('globby') as typeof import('globby');
+    const ignored = isGitIgnoredSync({ cwd: rootDir });
+    isGitIgnored = (abs: string): boolean => ignored(abs);
+  } catch {
+    /* gitignore unavailable - fall back to no gitignore filtering */
+  }
   // Track visited real paths to prevent symlink loops.
   const visited = new Set<string>();
   const rootReal = (() => {
@@ -73,7 +98,10 @@ export function buildRepoMap(
     }
     for (const name of names) {
       if (totalTokens >= maxTokens) break;
-      if (SKIP_DIRS.has(name)) continue;
+      // Case-insensitive: `Node_Modules` is skipped on macOS/Windows just
+      // like `node_modules` - the old exact match let a differently-cased
+      // tree into the map (and its contents into token estimation).
+      if (SKIP_DIRS.has(name.toLowerCase())) continue;
       const full = join(dir, name);
       const rel = relative(rootDir, full);
       // Use lstatSync (not statSync) to detect symlinks without following.
@@ -88,6 +116,9 @@ export function buildRepoMap(
         continue;
       }
       if (lstat.isDirectory()) {
+        // Secret and gitignored directories are pruned whole: descending
+        // into them would read the contents the guards exist to protect.
+        if (isSecret(join(full, '__probe__')) || isGitIgnored(full)) continue;
         // Resolve real path and check containment + visited.
         let real: string;
         try {
@@ -108,6 +139,9 @@ export function buildRepoMap(
         entry.children!.push(child);
         walk(full, child, depth + 1);
       } else if (lstat.isFile()) {
+        // Never read a secret or gitignored file's contents, even for a
+        // token estimate.
+        if (isSecret(full) || isGitIgnored(full)) continue;
         const ext = extname(name).toLowerCase();
         if (!CODE_EXTS.has(ext)) continue;
         // Skip very large files.

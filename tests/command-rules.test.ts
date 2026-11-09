@@ -365,8 +365,6 @@ describe('validateRuleEntry', () => {
       'pnpm --filter=web test',
       './scripts/test.sh',
       '/usr/local/bin/mytool run',
-      'node scripts/build.js',
-      'bash scripts/test.sh',
     ]) {
       const v = validateRuleEntry(e, 'allow');
       expect(v.ok, e).toBe(true);

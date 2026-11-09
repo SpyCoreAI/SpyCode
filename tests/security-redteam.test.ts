@@ -587,7 +587,10 @@ describe('F. json policy, packaging, wire-pins', () => {
   test('WIRE-PIN: sanitization is display-only - model + server payloads carry raw bytes', async () => {
     // A planted file full of escapes: the MODEL must receive the true bytes
     // (toolResults content), while the display path sanitizes.
-    const hostileFile = `data ${OSC_TITLE}${CSI_RESTYLE} raw\r\n`;
+    // The \r sits MID-LINE on purpose: read_file strips only line-final CRs
+    // (CRLF -> LF), so a line-final \r would never reach the model; the pin
+    // is that a raw \r byte still does.
+    const hostileFile = `data ${OSC_TITLE}${CSI_RESTYLE} raw\rmiddle\n`;
     writeFileSync(join(workDir, 'hostile.bin.txt'), hostileFile);
 
     class WireProvider implements Provider {

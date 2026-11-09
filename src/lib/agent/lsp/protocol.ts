@@ -61,6 +61,12 @@ export class LspFramer {
       if (this.buf.length < bodyStart + length) return out; // need more bytes
       out.push(this.buf.subarray(bodyStart, bodyStart + length).toString('utf8'));
       this.buf = this.buf.subarray(bodyStart + length);
+      // A subarray keeps the whole concatenated backing store alive: after a
+      // large message the remainder (a few bytes of the next message) would
+      // pin tens of megabytes. Copy the remainder out once it is a small
+      // fraction of its backing store; a genuinely large partial body keeps
+      // its own buffer, which is data still owed, not waste.
+      this.buf = compactBuffer(this.buf);
       if (this.buf.length === 0) return out;
     }
   }
@@ -76,6 +82,20 @@ function findHeaderEnd(buf: Buffer): number {
   const crlf = buf.indexOf('\r\n\r\n');
   if (crlf !== -1) return crlf;
   return buf.indexOf('\n\n');
+}
+
+/**
+ * Copy `buf` out of its backing store when the slice is a small fraction of
+ * it. A `Buffer.subarray` view keeps the entire backing store alive, so a
+ * remainder of a few bytes after a 64 MB message would pin the whole 64 MB.
+ * Below the threshold the copy costs more than it saves, and a large partial
+ * body is genuinely retained data, not waste - so only copy when the backing
+ * store is more than 4x the live slice.
+ */
+function compactBuffer(buf: Buffer): Buffer {
+  if (buf.length === 0) return Buffer.alloc(0);
+  const backing = buf.buffer.byteLength;
+  return backing > buf.length * 4 ? Buffer.from(buf) : buf;
 }
 
 function headerTerminatorLength(buf: Buffer, at: number): number {

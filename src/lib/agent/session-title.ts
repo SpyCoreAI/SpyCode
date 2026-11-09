@@ -32,7 +32,7 @@ export function buildSessionTitlePrompt(task: string): {
 } {
   return {
     system: `You write ultra-short titles for agent work sessions. Reply with ONLY the title: at most ${SESSION_TITLE_MAX_WORDS} words, plain words, no quotation marks, no trailing punctuation, no markdown, no emoji.`,
-    message: `Write a title for this session:\n\n${task.trim().slice(0, 2000)}`,
+    message: `Write a title for this session:\n\n${[...task.trim()].slice(0, 2000).join('')}`,
   };
 }
 
@@ -61,8 +61,11 @@ export function cleanSessionTitle(raw: string): string | null {
   const words = line.split(/\s+/).filter((w) => w.length > 0);
   if (words.length === 0) return null;
   const clipped = words.slice(0, SESSION_TITLE_MAX_WORDS).join(' ');
+  // Slice by code point, not UTF-16 code unit: `.slice` on a string can cut
+  // a surrogate pair in half, leaving a lone surrogate (rendered as U+FFFD)
+  // at the end of the title.
   return clipped.length > SESSION_TITLE_MAX_CHARS
-    ? `${clipped.slice(0, SESSION_TITLE_MAX_CHARS - 1)}…`
+    ? `${[...clipped].slice(0, SESSION_TITLE_MAX_CHARS - 1).join('')}…`
     : clipped;
 }
 

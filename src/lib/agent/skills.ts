@@ -35,6 +35,31 @@ export interface DiscoveredSkill {
 export const SKILLS_CATALOG_CAP = 4096;
 /** Cap on a single catalog description line. */
 const DESCRIPTION_CAP = 160;
+/**
+ * Cap on one skill body as returned by `load_skill`. A skill file is
+ * repository-supplied content; without a cap a multi-megabyte SKILL.md rides
+ * into the conversation whole and crowds the wire cap. Bodies over the cap
+ * are cut with an explicit marker (see `capSkillBody`) - never silently.
+ * Applied at the `load_skill` call site (builtin-tools.ts).
+ */
+export const LOAD_SKILL_BODY_CAP = 20_000;
+
+/**
+ * Cut a skill body to LOAD_SKILL_BODY_CAP, marking the cut in-band. Returns
+ * the body unchanged when it fits. The cut is surrogate-safe: it never
+ * splits a UTF-16 surrogate pair.
+ */
+export function capSkillBody(body: string): { body: string; truncated: boolean } {
+  if (body.length <= LOAD_SKILL_BODY_CAP) return { body, truncated: false };
+  let end = LOAD_SKILL_BODY_CAP;
+  const last = body.charCodeAt(end - 1);
+  const next = body.charCodeAt(end);
+  if (last >= 0xd800 && last <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) end -= 1;
+  return {
+    body: `${body.slice(0, end)}\n\n[skill body truncated at ${LOAD_SKILL_BODY_CAP} characters - the remainder was not loaded]`,
+    truncated: true,
+  };
+}
 
 export function userSkillsDir(): string {
   return join(dirname(getConfigPath()), 'skills');

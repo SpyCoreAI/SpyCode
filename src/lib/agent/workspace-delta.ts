@@ -238,7 +238,10 @@ async function listPresent(root: string): Promise<ReadonlySet<string> | null> {
       followSymbolicLinks: false,
       suppressErrors: true,
     });
-    return new Set(files);
+    // Same cap as `listWorkspace`: a tree over DELTA_MAX_FILES returns null
+    // and the caller journals no creates, rather than materialising an
+    // unbounded set that the snapshot pass refused to build.
+    return files.length > DELTA_MAX_FILES ? null : new Set(files);
   } catch {
     return null; // the caller must then journal no creates - fail closed
   }
@@ -398,7 +401,13 @@ export async function closePause(
   const rebased: string[] = [];
   /** Retain no more than the snapshot's own budget allows. */
   let budget = DELTA_MAX_BYTES;
-  for (const e of before.entries.values()) budget -= e.content?.length ?? 0;
+  // Bytes, not characters: the cap is `DELTA_MAX_BYTES` and the capture
+  // below deducts `buf.byteLength`, so deducting `.length` (UTF-16 code
+  // units) here under-counted retained UTF-8 text by up to 3x and let the
+  // rebase retain past the cap.
+  for (const e of before.entries.values()) {
+    budget -= e.content === null ? 0 : Buffer.byteLength(e.content, 'utf8');
+  }
 
   /** Read one path into an entry under the snapshot's own capture rules. */
   const capture = async (abs: string): Promise<Entry | null> => {
@@ -637,5 +646,8 @@ export function uncapturedNotice(uncaptured: readonly string[]): string | null {
 /** Relative display path, used by the callers' notices. */
 export function relDisplay(root: string, abs: string): string {
   const rel = relative(root, abs);
-  return rel.length === 0 || rel.startsWith(`..${sep}`) ? abs : rel;
+  // `rel` is exactly `..` for the parent directory itself - the `..${sep}`
+  // check missed it, so the parent rendered as a bare `..` instead of its
+  // absolute path (indistinguishable from "some parent").
+  return rel.length === 0 || rel === '..' || rel.startsWith(`..${sep}`) ? abs : rel;
 }

@@ -35,8 +35,9 @@
  * - Failure isolation: unparseable config and invalid entries degrade to
  * notices; the session never dies from a bad rule.
  */
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { randomBytes } from 'node:crypto';
 import {
   approveProjectCommandRule,
   getConfigPath,
@@ -378,8 +379,19 @@ export function validateRuleEntry(raw: unknown, kind: RuleKind): EntryValidation
   }
   if (kind === 'allow') {
     const base = baseName(first).toLowerCase();
-    const isShellOrInterp = SHELLS.has(base) || INTERPRETERS.has(base);
-    if (tokens.length === 1 && (isShellOrInterp || RUNNERS.has(base))) {
+    // A shell or interpreter executes a SCRIPT FILE (or inline code) whose
+    // contents may change between approval and execution: `bash script.sh`
+    // auto-approved today runs whatever script.sh holds at run time, not
+    // what it held when the rule was written. No argument spelling is safe
+    // - flags were already rejected, and a bare script operand is exactly
+    // the remaining hole - so the whole first-token class is refused.
+    if (SHELLS.has(base) || INTERPRETERS.has(base)) {
+      return {
+        ok: false,
+        reason: `"${base}" runs a script file or inline code whose contents may change after approval - allowlist the underlying command instead`,
+      };
+    }
+    if (tokens.length === 1 && RUNNERS.has(base)) {
       return { ok: false, reason: `a bare "${base}" would auto-approve arbitrary code execution` };
     }
     if (RUNNERS.has(base)) {
@@ -387,16 +399,6 @@ export function validateRuleEntry(raw: unknown, kind: RuleKind): EntryValidation
         ok: false,
         reason: `starts with a command runner ("${base}") - allowlist the underlying command instead`,
       };
-    }
-    if (isShellOrInterp) {
-      for (const t of tokens.slice(1)) {
-        if (t.startsWith('-')) {
-          return {
-            ok: false,
-            reason: `flags on a shell/interpreter ("${t}") cannot be auto-approved - allowlist a plain script form instead`,
-          };
-        }
-      }
     }
   }
   return { ok: true, tokens, entry };
@@ -590,19 +592,137 @@ export function deriveAlwaysAllowEntry(command: string): string | null {
  * Append an allow entry to the USER command-rules file (never project scope)
  * and return the live rule. Throws on a validation failure - callers gate on
  * deriveAlwaysAllowEntry first.
+ *
+ * The write is atomic (temp+rename) under a lock file, and it round-trips
+ * the existing document: unknown top-level keys and non-string entries are
+ * preserved verbatim instead of being silently dropped by the loader's
+ * string-only filter, and a malformed file (invalid JSON, non-object, or a
+ * non-array `allow`) is refused rather than overwritten.
  */
 export function appendUserAllowRule(entry: string): CommandRule {
   const v = validateRuleEntry(entry, 'allow');
   if (!v.ok) throw new Error(`invalid allow entry: ${v.reason}`);
   const path = userCommandRulesPath();
-  const notices: string[] = [];
-  const current = readRuleFile(path, 'the global command-rules.json', notices);
-  const allow = current.allow.filter((e): e is string => typeof e === 'string');
-  if (!allow.includes(v.entry)) allow.push(v.entry);
-  const deny = current.deny.filter((e): e is string => typeof e === 'string');
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, `${JSON.stringify({ allow, deny }, null, 2)}\n`, 'utf8');
-  return { entry: v.entry, tokens: v.tokens, kind: 'allow', scope: 'user' };
+  const release = acquireRulesLock(path);
+  try {
+    let doc: Record<string, unknown> = {};
+    if (existsSync(path)) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(readFileSync(path, 'utf8'));
+      } catch {
+        throw new Error('command-rules.json is not valid JSON - refusing to overwrite it');
+      }
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error('command-rules.json must be an object with "allow"/"deny" arrays - refusing to overwrite it');
+      }
+      doc = parsed as Record<string, unknown>;
+    }
+    if (doc.allow !== undefined && !Array.isArray(doc.allow)) {
+      throw new Error('"allow" in command-rules.json is not an array - refusing to overwrite it');
+    }
+    if (doc.deny !== undefined && !Array.isArray(doc.deny)) {
+      throw new Error('"deny" in command-rules.json is not an array - refusing to overwrite it');
+    }
+    const allow: unknown[] = [...((doc.allow as unknown[] | undefined) ?? [])];
+    if (!allow.includes(v.entry)) allow.push(v.entry);
+    // `deny` defaults to [] on a fresh file, matching the shape the loader
+    // and the round-trip tests expect; a present array is preserved verbatim.
+    const deny: unknown[] = [...((doc.deny as unknown[] | undefined) ?? [])];
+    doc = { ...doc, allow, deny };
+    const tmp = join(
+      dirname(path),
+      `.command-rules.json.${process.pid}-${randomBytes(8).toString('hex')}.tmp`,
+    );
+    try {
+      writeFileSync(tmp, `${JSON.stringify(doc, null, 2)}\n`, 'utf8');
+      renameSync(tmp, path);
+    } catch (err) {
+      try {
+        if (existsSync(tmp)) unlinkSync(tmp);
+      } catch {
+        /* ignore cleanup failure */
+      }
+      throw err;
+    }
+    return { entry: v.entry, tokens: v.tokens, kind: 'allow', scope: 'user' };
+  } finally {
+    release();
+  }
+}
+
+/**
+ * Exclusive lock for the user command-rules file: a `mkdir`-style
+ * create-exclusive lock file (`<path>.lock`) holding the owner's pid.
+ * Two CLI processes appending at once used to read-modify-write the same
+ * file unlocked, so one append silently lost the other. A stale lock (older
+ * than 30 s, or owned by a dead pid) is removed; otherwise acquisition
+ * waits up to 5 s, then throws rather than proceeding unlocked.
+ *
+ * Twin of `acquireTodosLock` in todo.ts - no shared lock helper exists in
+ * the repo, so the two are kept identical in shape, each pointing at the
+ * other.
+ */
+const RULES_LOCK_TIMEOUT_MS = 5_000;
+const RULES_LOCK_STALE_MS = 30_000;
+
+function acquireRulesLock(path: string): () => void {
+  const lockPath = `${path}.lock`;
+  const deadline = Date.now() + RULES_LOCK_TIMEOUT_MS;
+  for (;;) {
+    try {
+      const fd = openSync(lockPath, 'wx');
+      try {
+        writeSync(fd, `${process.pid}\n`);
+      } catch {
+        /* the pid is advisory - the lock is the file itself */
+      }
+      return () => {
+        try {
+          closeSync(fd);
+        } catch {
+          /* ignore */
+        }
+        try {
+          unlinkSync(lockPath);
+        } catch {
+          /* ignore - a stale lock is reaped by the next acquirer */
+        }
+      };
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      let stale = false;
+      try {
+        const st = statSync(lockPath);
+        stale = Date.now() - st.mtimeMs > RULES_LOCK_STALE_MS;
+        if (!stale) {
+          const owner = Number.parseInt(readFileSync(lockPath, 'utf8').trim(), 10);
+          if (Number.isInteger(owner) && owner > 0) {
+            try {
+              process.kill(owner, 0);
+            } catch {
+              stale = true; // owner pid is dead
+            }
+          }
+        }
+      } catch {
+        /* lock vanished mid-check - retry */
+      }
+      if (stale) {
+        try {
+          unlinkSync(lockPath);
+        } catch {
+          /* someone else reaped it - retry */
+        }
+        continue;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(`timed out waiting for the command-rules lock (${lockPath})`);
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+    }
+  }
 }
 
 // ─────────────────────── read-only inspection ───────────────────────

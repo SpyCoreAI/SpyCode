@@ -11,8 +11,9 @@
  * On a name collision the PROJECT entry wins. With zero servers configured the
  * merged list is empty and the agent run spawns nothing (no behaviour change).
  */
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { randomBytes } from 'node:crypto';
 import { getStoredMcpServers, setStoredMcpServers } from '../config.js';
 // redact.ts imports nothing, so this cannot form a cycle with config.ts.
 import { redactFreeText, redactUrlCredentials } from '../redact.js';
@@ -331,7 +332,25 @@ export function writeProjectMcpServers(cwd: string, servers: McpServerConfig[]):
   const file = projectMcpPath(cwd);
   mkdirSync(join(cwd, '.spycore'), { recursive: true });
   const body: ProjectMcpFile = { servers };
-  writeFileSync(file, `${JSON.stringify(body, null, 2)}\n`, 'utf8');
+  // Atomic temp+rename at 0600, like the checkpoint journals: mcp.json may
+  // hold literal secret header values, so a world-readable file (the process
+  // umask) and a torn write (a crash mid-writeFileSync) are both live risks.
+  // The temp name carries random bytes, not a predictable pid/counter pair.
+  const tmp = join(
+    join(cwd, '.spycore'),
+    `.mcp.json.${process.pid}-${randomBytes(8).toString('hex')}.tmp`,
+  );
+  try {
+    writeFileSync(tmp, `${JSON.stringify(body, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+    renameSync(tmp, file);
+  } catch (err) {
+    try {
+      if (existsSync(tmp)) unlinkSync(tmp);
+    } catch {
+      /* ignore cleanup failure */
+    }
+    throw err;
+  }
 }
 
 // ─────────────────────── load / merge / mutate ───────────────────────

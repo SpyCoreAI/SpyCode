@@ -46,8 +46,13 @@ function parseOverride(raw: unknown): LspServerOverride | null {
     return null;
   }
   const override: LspServerOverride = { command: raw.command };
-  if (Array.isArray(raw.args) && raw.args.every((a) => typeof a === 'string')) {
-    override.args = raw.args as string[];
+  if (Array.isArray(raw.args)) {
+    // Keep the well-formed args and drop only the bad ones: a single
+    // non-string arg used to discard the whole array (e.g. `--stdio`),
+    // leaving the server to spawn in the wrong mode and hang until the
+    // init timeout.
+    const args = raw.args.filter((a): a is string => typeof a === 'string');
+    if (args.length > 0) override.args = args;
   }
   return override;
 }
@@ -93,6 +98,26 @@ export function isLspEnabled(cwd: string): boolean {
   // SECURITY (BLOCKING): the project config file can override server commands
   // (arbitrary process spawn). A cloned repo's .spycore/lsp.json must not
   // execute until the user trusts the workspace - same gate as MCP's
-  // resolveTrustedServers. Env-var opt-in (explicit user action) bypasses.
+  // resolveTrustedServers. Env-var opt-in (explicit user action) bypasses
+  // the ENABLE gate only: it never bypasses the OVERRIDE gate, which lives
+  // in exactly one place - `effectiveLspOverrides` below - so a global env
+  // var plus an untrusted clone can start the DEFAULT servers but never a
+  // repo-supplied command from lsp.json.
   return isWorkspaceTrusted(cwd);
+}
+
+/**
+ * THE single source of the LSP override trust gate: repo-supplied server
+ * commands from `.spycore/lsp.json` apply ONLY in a trusted workspace.
+ * Every consumer of overrides - `LspManager.startServer` today, any future
+ * override path - must go through this function (or `loadLspConfig` plus
+ * this check), never through a second inline trust test. The two checks
+ * this replaces (`isLspEnabled`'s env bypass and `startServer`'s re-check)
+ * could drift apart; one function cannot disagree with itself.
+ */
+export function effectiveLspOverrides(
+  cwd: string,
+): Partial<Record<LspLanguageId, LspServerOverride>> {
+  if (!isWorkspaceTrusted(cwd)) return {};
+  return loadLspConfig(cwd).servers ?? {};
 }

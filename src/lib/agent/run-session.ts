@@ -125,6 +125,14 @@ export async function openRunSession({
         webEnabled,
         delegateEnabled,
         toolsets,
+        // 4a2 item 18: a dropped declaration is never silent - report it as
+        // an mcp_notice so the run log shows which tool was dropped and why.
+        onInvalidName: (name) =>
+          emit({
+            type: 'mcp_notice',
+            level: 'warn',
+            text: `Tool "${name}" was dropped: invalid name for native tool use.`,
+          }),
       })
     : undefined;
 

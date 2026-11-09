@@ -193,7 +193,7 @@ export function dangerousTarget(value: string): string | null {
       // does not (`/uſr`, `/Uſerſ`, `/Syﬆem`). Adding a reading can only
       // ever ADD refusals - no target refused today becomes allowed.
       for (const lc of [candidate.toLowerCase(), osFold(candidate)]) {
-        const key = `${mayConcludeTree ? '1' : '0'} ${lc}`;
+        const key = `${mayConcludeTree ? '1' : '0'}\x00${lc}`;
         if (seen.has(key)) continue;
         seen.add(key);
         if (ROOT_OR_TILDE.has(lc)) return 'on / ~ or $HOME';

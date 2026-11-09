@@ -31,6 +31,7 @@
  */
 import { createHash, randomBytes } from 'node:crypto';
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -145,6 +146,31 @@ export function getResumeState(session: CheckpointSession): ResumeState | null {
   if (r.providerKind !== 'spycore' && r.providerKind !== 'byok') return null;
   if (typeof r.model !== 'string' || typeof r.nativeTools !== 'boolean') return null;
   if (!r.budget || typeof r.budget !== 'object') return null;
+  // Numeric fields must be finite numbers >= 0: a hand-edited journal with
+  // e.g. `tokensUsed: "lots"` or `turnsUsed: -1` used to pass validation and
+  // then poison budget arithmetic (NaN propagates silently; a negative turn
+  // count extends the run past its cap). Caps are optional when present.
+  const nonNegFinite = (n: unknown): n is number =>
+    typeof n === 'number' && Number.isFinite(n) && n >= 0;
+  if (
+    !nonNegFinite(r.budget.tokensUsed) ||
+    !nonNegFinite(r.budget.turnsUsed) ||
+    !nonNegFinite(r.budget.elapsedMs)
+  ) {
+    return null;
+  }
+  if (r.budget.caps !== undefined) {
+    if (typeof r.budget.caps !== 'object' || r.budget.caps === null) return null;
+    for (const v of [r.budget.caps.maxTokens, r.budget.caps.maxTimeMs, r.budget.caps.maxTurns]) {
+      if (v !== undefined && !nonNegFinite(v)) return null;
+    }
+  }
+  if (!nonNegFinite(r.turnsCompleted) || !nonNegFinite(r.maxTurns)) return null;
+  if (typeof r.planMode !== 'boolean') return null;
+  if (r.approvedPlan !== null && typeof r.approvedPlan !== 'string') return null;
+  if (!Array.isArray(r.loadedSkills) || r.loadedSkills.some((s) => typeof s !== 'string')) return null;
+  if (r.gitHead !== null && typeof r.gitHead !== 'string') return null;
+  if (typeof r.updatedAt !== 'string') return null;
   return r;
 }
 
@@ -180,6 +206,24 @@ function checkpointsRoot(): string {
  */
 const JOURNAL_FILE_MODE = 0o600;
 const JOURNAL_DIR_MODE = 0o700;
+
+/**
+ * Tighten a journal directory (and the `checkpoints/` root above it) to
+ * 0o700. `mkdirSync(…, { recursive: true, mode })` applies the mode ONLY to
+ * directories it creates: a directory that already exists - created before
+ * the 0o700 rule, or by an older CLI - keeps whatever the umask gave it,
+ * leaving an owner-only journal inside a world-readable directory. Called
+ * on every journal write; best-effort, never fatal.
+ */
+function tightenJournalDir(dir: string): void {
+  for (const d of [checkpointsRoot(), dir]) {
+    try {
+      chmodSync(d, JOURNAL_DIR_MODE);
+    } catch {
+      /* best-effort - the journal write must not break the run */
+    }
+  }
+}
 /**
  * The per-cwd journal directory, keyed by a hash of the cwd.
  *
@@ -269,6 +313,7 @@ export function saveSession(input: { cwd: string; task: string; changes: Recorde
   try {
     const dir = checkpointDirFor(input.cwd);
     mkdirSync(dir, { recursive: true, mode: JOURNAL_DIR_MODE });
+    tightenJournalDir(dir);
     const id = nextSessionId();
     const session: CheckpointSession = {
       id,
@@ -368,6 +413,7 @@ function makeRecorder(
     try {
       const dir = checkpointDirFor(cwd);
       mkdirSync(dir, { recursive: true, mode: JOURNAL_DIR_MODE });
+      tightenJournalDir(dir);
       const session: CheckpointSession = {
         id,
         cwd,
@@ -488,7 +534,28 @@ function parseSession(file: string): CheckpointSession | null {
   try {
     const data = JSON.parse(readFileSync(file, 'utf8')) as CheckpointSession;
     if (!data || typeof data !== 'object' || !Array.isArray(data.changes)) return null;
-    return data;
+    // Validate every change entry: a hand-edited or corrupt journal with a
+    // non-string `path`/`before` used to reach `planRewind`, where
+    // `sha256(before)` or `currentSha(path)` threw on the bad type. Invalid
+    // entries are dropped - the session survives with the valid ones - and
+    // an entry whose `afterSha` is absent or is not the sha of its `after`
+    // is repaired, so the rewind guard compares against the true content
+    // hash instead of trusting a value the journal merely asserts.
+    const changes: FileChange[] = [];
+    for (const c of data.changes as unknown[]) {
+      if (!c || typeof c !== 'object') continue;
+      const ch = c as Partial<FileChange>;
+      if (typeof ch.path !== 'string') continue;
+      if (ch.op !== 'create' && ch.op !== 'modify' && ch.op !== 'delete') continue;
+      if (ch.before !== null && typeof ch.before !== 'string') continue;
+      if (typeof ch.after !== 'string') continue;
+      const afterSha =
+        typeof ch.afterSha === 'string' && ch.afterSha === sha256(ch.after)
+          ? ch.afterSha
+          : sha256(ch.after);
+      changes.push({ path: ch.path, op: ch.op, before: ch.before, after: ch.after, afterSha });
+    }
+    return { ...data, changes };
   } catch {
     return null;
   }
@@ -585,6 +652,10 @@ export function branchSession(cwd: string, sourceId: string): string | null {
     const tmp = `${dest}.tmp`;
     writeFileSync(tmp, JSON.stringify(session, null, 2), { encoding: 'utf-8', mode: JOURNAL_FILE_MODE });
     renameSync(tmp, dest);
+    // A branch is a new session: it counts toward the per-cwd cap, so prune
+    // here like every other writer, or branches alone could grow the
+    // directory past MAX_SESSIONS_PER_CWD without any save ever pruning it.
+    pruneSessions(dir);
     return newId;
   } catch {
     return null;
@@ -746,6 +817,18 @@ export function applyRewind(steps: RestoreStep[], cwd: string): { restored: numb
         // DIRECTORIES too - and a `mkdir -p` down a path is exactly where a
         // symlinked segment turns a bounded write into an unbounded one.
         mkdirSync(dirname(step.change.path), { recursive: true });
+        // TOCTOU: the containment check above ran BEFORE the mkdir, when
+        // the parent directories may not have existed at all - a symlinked
+        // segment swapped in between the check and the write would redirect
+        // this write outside the workspace. Re-check containment AND the
+        // leaf symlink immediately before the write; a failed re-check
+        // skips the step. (The mkdir itself can create empty directories
+        // through a pre-existing symlink - no content is written there,
+        // and the file write below is what the guard protects.)
+        if (!inside(step.change.path) || leafIsSymlink(step.change.path)) {
+          skipped += 1;
+          continue;
+        }
         writeFileSync(step.change.path, step.change.before ?? '', 'utf8');
       } else {
         writeFileSync(step.change.path, step.change.before ?? '', 'utf8');
@@ -859,6 +942,13 @@ export function applyRedo(steps: RestoreStep[], cwd: string): { restored: number
       } else if (step.change.op === 'create') {
         // Redo of a create: recreate with `after` content.
         mkdirSync(dirname(step.change.path), { recursive: true });
+        // TOCTOU, same as applyRewind's delete arm: re-check containment
+        // and the leaf symlink after the mkdir, immediately before the
+        // write.
+        if (!inside(step.change.path) || leafIsSymlink(step.change.path)) {
+          skipped += 1;
+          continue;
+        }
         writeFileSync(step.change.path, step.change.after, 'utf8');
       } else {
         // Redo of a modify: write the `after` content.

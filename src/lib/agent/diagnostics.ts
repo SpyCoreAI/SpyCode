@@ -102,7 +102,10 @@ export function formatDiagnostics(result: DiagnosticsResult): string {
   const diags = result.diagnostics;
   if (diags.length === 0) return 'No TypeScript errors.';
   const lines = diags.slice(0, 50).map(
-    (d) => `${d.file}:${d.line}:${d.column} [TS${d.code}] ${d.message}`,
+    // A code of 0 means "no code" (a codeless diagnostic): TS codes are
+    // >= 1000, so `[TS0]` was never a real code - it was a rendering of
+    // "unknown" as if it were a code. Omit the bracket for codeless entries.
+    (d) => (d.code === 0 ? `${d.file}:${d.line}:${d.column} ${d.message}` : `${d.file}:${d.line}:${d.column} [TS${d.code}] ${d.message}`),
   );
   if (diags.length > 50) {
     lines.push(`... and ${diags.length - 50} more`);

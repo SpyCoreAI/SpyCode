@@ -111,6 +111,8 @@ export interface ParsedShell {
   boundExceeded: boolean;
 }
 
+import { osFold } from '../os-fold.js';
+
 /**
  * Operators that end one command and begin another. Longest-match first.
  *
@@ -157,13 +159,162 @@ const EXPANSION_SOURCE = /\$\([^)]*\)|`[^`]*`|\$\{[^}]*\}|\$[A-Za-z_][A-Za-z0-9_
  * Callers that match whole words must re-split on whitespace after this
  * (see `unconfidentDenyWords` in command-rules.ts) - a space inside the
  * returned string is a word boundary, not part of a word.
+ *
+ * The IFS replacement lives inside the scanner below (not as a regex
+ * pre-pass): a regex cannot tell an escaped `\${IFS}` - literal text, not
+ * whitespace - from a real one, and replacing the escaped spelling would
+ * manufacture the `rm -rf` reading out of a word that is literally
+ * `rm${IFS}-rf`.
  */
-const IFS_EXPANSION = /\$\{IFS\}|\$IFS(?![A-Za-z0-9_])/g;
+const VAR_NAME_RE = /[A-Za-z0-9_]/;
 
+/** Skip a backtick-quoted span starting at `start` (after the opening backtick); -1 if unterminated. */
+function scanBacktick(v: string, start: number): number {
+  for (let j = start; j < v.length; j += 1) {
+    if (v[j] === '\\' && j + 1 < v.length) {
+      j += 1;
+      continue;
+    }
+    if (v[j] === '`') return j;
+  }
+  return -1;
+}
+
+/**
+ * Index of the closer matching the opener at `start - 1` (depth 1 on entry),
+ * or -1 if the input ends first. Depth-aware: `$(echo $(date))` and
+ * `${A:-${B}}` nest, and the flat `[^)]*` / `[^}]*` regexes stopped at the
+ * INNER closer, leaving the rest of the expansion in the word. Nested
+ * expansions of either kind are skipped as units, so a `)` inside
+ * `$(echo ${X})` never closes the outer `$(`, and quoted spans inside an
+ * expansion are skipped whole, so a `)` inside `$(echo ')')` never closes
+ * it either. A backslash escapes the next character throughout.
+ */
+function scanBalanced(v: string, start: number, open: string, close: string): number {
+  let depth = 1;
+  let i = start;
+  while (i < v.length) {
+    const c = v[i] as string;
+    if (c === '\\' && i + 1 < v.length) {
+      i += 2;
+      continue;
+    }
+    if (c === '$' && v[i + 1] === '(') {
+      const end = scanBalanced(v, i + 2, '(', ')');
+      if (end === -1) return -1;
+      i = end + 1;
+      continue;
+    }
+    if (c === '$' && v[i + 1] === '{') {
+      const end = scanBalanced(v, i + 2, '{', '}');
+      if (end === -1) return -1;
+      i = end + 1;
+      continue;
+    }
+    if (c === '`') {
+      const end = scanBacktick(v, i + 1);
+      if (end === -1) return -1;
+      i = end + 1;
+      continue;
+    }
+    if (c === "'") {
+      const end = v.indexOf("'", i + 1);
+      if (end === -1) return -1;
+      i = end + 1;
+      continue;
+    }
+    if (c === '"') {
+      let j = i + 1;
+      let closed = false;
+      while (j < v.length) {
+        if (v[j] === '\\') {
+          j += 2;
+          continue;
+        }
+        if (v[j] === '"') {
+          closed = true;
+          break;
+        }
+        j += 1;
+      }
+      if (!closed) return -1;
+      i = j + 1;
+      continue;
+    }
+    if (c === open) depth += 1;
+    else if (c === close) {
+      depth -= 1;
+      if (depth === 0) return i;
+    }
+    i += 1;
+  }
+  return -1;
+}
+
+/**
+ * Remove expansions depth-aware (see `scanBalanced`): `$(echo $(date))`,
+ * `${A:-${B}}`, `$(echo ${X})` and `${X:-$(date)}` are each removed whole.
+ * An unterminated expansion is kept VERBATIM (opener and the rest of the
+ * word): a real shell reports a syntax error for it, so its payload cannot
+ * execute as a bare command, and the 0.6.0 regexes left it untouched too.
+ * Dropping only the opener would expose e.g. `$(rm -rf /` as bare `rm -rf /`
+ * and refuse a shape the published release allows (R-CLI-3 inert cell).
+ * Keeping it verbatim hides nothing else: a `; rm -rf /` after the opener
+ * is still screened as its own command. An escaped `\$(`, `\${` or backtick
+ * is literal text and is kept verbatim, so it can never manufacture a
+ * stripped reading.
+ */
 export function stripExpansions(v: string): string {
-  return v
-    .replace(IFS_EXPANSION, ' ')
-    .replace(new RegExp(EXPANSION_SOURCE.source, 'g'), '');
+  let out = '';
+  let i = 0;
+  while (i < v.length) {
+    const c = v[i] as string;
+    if (c === '\\' && i + 1 < v.length) {
+      out += c;
+      out += v[i + 1] as string;
+      i += 2;
+      continue;
+    }
+    if (c === '$' && v[i + 1] === '(') {
+      const end = scanBalanced(v, i + 2, '(', ')');
+      if (end === -1) { out += v.slice(i); break; }
+      i = end + 1;
+      continue;
+    }
+    if (c === '$' && v[i + 1] === '{') {
+      // `${IFS}` is whitespace, not nothing (see above) - exact match only.
+      if (v.startsWith('IFS}', i + 2)) {
+        out += ' ';
+        i += 6;
+        continue;
+      }
+      const end = scanBalanced(v, i + 2, '{', '}');
+      if (end === -1) { out += v.slice(i); break; }
+      i = end + 1;
+      continue;
+    }
+    if (c === '`') {
+      const end = scanBacktick(v, i + 1);
+      if (end === -1) { out += v.slice(i); break; }
+      i = end + 1;
+      continue;
+    }
+    if (c === '$' && /[A-Za-z_]/.test(v[i + 1] ?? '')) {
+      // `$IFS` (not followed by a name character) is whitespace too.
+      if (v.startsWith('IFS', i + 1) && !VAR_NAME_RE.test(v[i + 4] ?? '')) {
+        out += ' ';
+        i += 4;
+        continue;
+      }
+      let j = i + 1;
+      while (j < v.length && VAR_NAME_RE.test(v[j] as string)) j += 1;
+      i = j;
+      continue;
+    }
+    out += c;
+    i += 1;
+  }
+  return out;
 }
 
 /** Does this word contain an expansion at all? (Non-global: `.test` is safe.) */
@@ -1289,7 +1440,7 @@ export function effectiveWords(cmd: SimpleCommand): ShellWord[] {
   for (let guard = 0; guard < bound; guard += 1) {
     const first = words[0];
     if (first === undefined) return words;
-    const name = commandBasename(first.value).toLowerCase();
+    const name = osFold(commandBasename(first.value));
     // A leading shell reserved word is not the command; drop it and re-read.
     if (SHELL_RESERVED.has(name)) {
       words = words.slice(1);
@@ -1351,7 +1502,7 @@ export function effectiveWords(cmd: SimpleCommand): ShellWord[] {
  */
 export function candidateArgvs(cmd: SimpleCommand): ShellWord[][] {
   const primary = effectiveWords(cmd);
-  const key = (ws: ShellWord[]): string => ws.map((w) => w.value).join(' ');
+  const key = (ws: ShellWord[]): string => ws.map((w) => w.value).join('\x00');
   const out: ShellWord[][] = [primary];
   const seen = new Set<string>([key(primary)]);
   const offer = (ws: ShellWord[]): void => {
@@ -1420,7 +1571,7 @@ export function candidateArgvs(cmd: SimpleCommand): ShellWord[][] {
   // A wrapper's words are the only place a packed command line stands in
   // COMMAND position. Both benign rows are pinned in `PACKED_WORD_BENIGN`.
   const packHead = cmd.words[0];
-  if (packHead !== undefined && COMMAND_WRAPPERS.has(commandBasename(packHead.value).toLowerCase())) {
+  if (packHead !== undefined && COMMAND_WRAPPERS.has(osFold(commandBasename(packHead.value)))) {
     for (const w of cmd.words.slice(1)) {
       if (!/\s/.test(w.value)) continue;
       const parts = w.value.trim().split(/\s+/).filter((p) => p.length > 0);

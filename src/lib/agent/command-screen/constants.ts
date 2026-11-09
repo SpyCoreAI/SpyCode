@@ -28,10 +28,10 @@ export const MAX_SCREEN_DEPTH = 3;
  * A name present in one of a package's two spellings of the same set and
  * missing from the other is the drift class this arc keeps re-filing.
  */
-export const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'csh', 'tcsh', 'fish']);
+export const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'csh', 'tcsh', 'fish', 'ash', 'mksh', 'pwsh']);
 
 /** Downloaders whose output piped into a shell is remote code execution. */
-export const DOWNLOADERS = new Set(['curl', 'wget', 'fetch']);
+export const DOWNLOADERS = new Set(['curl', 'wget', 'fetch', 'aria2c', 'axel', 'httpie', 'http', 'https']);
 
 /**
  * F-2c-30 - THE CARRIER CLASS: A COMMAND WHOSE OPERAND IS ITSELF A COMMAND.
@@ -568,9 +568,23 @@ export const DEVICE_WRITE_VERBS: ReadonlyMap<string, DeviceWriteVerb> = new Map(
   ['asr', { role: 'archive', flag: '--target', archiveFlags: ['--target'], valueOptions: ['--buffers', '--buffersize', '--csumbuffers', '--csumbuffersize', '--source', '--config'] }],
 ]);
 
-export const RECURSIVE_FLAG = (f: string): boolean => /^-[a-z]*r/i.test(f) || f === '--recursive';
+/**
+ * A short-option cluster is recursive / forceful only when it is a bundle of
+ * the screened verbs' REAL short flags and contains the letter. The old
+ * `/^-[a-z]*r/i` matched ANY cluster containing the letter, so `rm -force /`
+ * (which getopt rejects: `-o` is not an rm flag) was refused as `rm -rf`,
+ * and `rm -recursive` counted as recursive. The alphabet below is the union
+ * of the short flags of rm (d f i I r R v), chmod (c f R v), chown and chgrp
+ * (c f h H L P R v); a cluster with a letter outside it cannot execute as
+ * recursive/force - the command errors first. Long forms stay exact.
+ */
+const SHORT_CLUSTER_RE = /^-[cdfhHiILPRrv]+$/;
 
-export const FORCE_FLAG = (f: string): boolean => /^-[a-z]*f/i.test(f) || f === '--force';
+export const RECURSIVE_FLAG = (f: string): boolean =>
+  f === '--recursive' || (SHORT_CLUSTER_RE.test(f) && /[rR]/.test(f));
+
+export const FORCE_FLAG = (f: string): boolean =>
+  f === '--force' || (SHORT_CLUSTER_RE.test(f) && f.includes('f'));
 
 /**
  * The operators that SEPARATE commands, derived from `SHELL_OPERATORS` by
@@ -602,7 +616,7 @@ export const FALLBACK_REDIRECTS = new Set(['>', '>>', '<', '<<', '2>', '&>', '>&
  */
 export const INTERPRETERS = new Set([
   'python', 'python2', 'python3', 'perl', 'ruby', 'node', 'php', 'bun', 'deno',
-  'awk', 'gawk', 'mawk', 'nawk',
+  'awk', 'gawk', 'mawk', 'nawk', 'osascript', 'lua', 'Rscript', 'julia', 'pwsh',
 ]);
 
 /** The flags those programs use for "the next argument is the program". */

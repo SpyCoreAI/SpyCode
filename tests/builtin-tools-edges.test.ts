@@ -36,6 +36,17 @@ vi.mock('undici', () => ({
   }),
 }));
 
+// writeAtomic's temp name is random (crypto.randomBytes); this file pins it
+// to a fixed value so the cleanup-failure test below can pre-create the exact
+// temp path. All other crypto exports pass through untouched.
+vi.mock('node:crypto', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:crypto')>();
+  return {
+    ...actual,
+    randomBytes: ((size: number) => Buffer.alloc(size, 0xaa)) as unknown as typeof actual.randomBytes,
+  };
+});
+
 let workDir: string;
 
 beforeEach(async () => {
@@ -66,12 +77,13 @@ const fp = (name: string): string => join(workDir, name);
 const run = (name: string, args: unknown, extra: Partial<ToolContext> = {}) =>
   dispatchTool(name, args, ctx(extra));
 
-// MUST stay the first writeAtomic caller in this file: the atomic-write temp
-// name embeds a per-module counter, and this test pre-creates the exact temp
-// path (counter 1) as a directory so the write fails and the cleanup unlink
-// fails too, covering the inner-catch arm of writeAtomic.
+// The atomic-write temp name is random (crypto.randomBytes), pinned to
+// 0xaa bytes by the node:crypto mock at the top of this file, so this test
+// pre-creates the exact temp path (all-a hex) as a directory: the write
+// fails and the cleanup unlink fails too, covering the inner-catch arm of
+// writeAtomic.
 test('writeAtomic cleanup failure is swallowed into a tool error', async () => {
-  mkdirSync(fp(`.f.txt.spycore-${process.pid}-1.tmp`));
+  mkdirSync(fp(`.f.txt.spycore-${process.pid}-aaaaaaaaaaaaaaaa.tmp`));
   const res = await run('write_file', { path: 'f.txt', content: 'hello' });
   expect(res.ok).toBe(false);
 });
@@ -181,12 +193,13 @@ describe('grep', () => {
     expect(res.summary).toContain('(scan capped)');
   });
 
-  test('oversize files are skipped', async () => {
+  test('oversize files are skipped and surfaced', async () => {
     const buf = Buffer.alloc(2 * 1024 * 1024 + 100, 'z');
     writeFileSync(fp('huge.txt'), Buffer.concat([buf, Buffer.from('\nneedle\n')]));
     const res = await run('grep', { pattern: 'needle', path: 'huge.txt' });
     expect(res.ok).toBe(true);
-    expect(res.content).toBe('(no matches)');
+    expect(res.content).toBe('(no matches)\n[skipped 1 file over the 2 MB grep size cap (not searched): huge.txt]');
+    expect(res.summary).toContain('(1 file skipped over 2 MB)');
   });
 
   test('long matching lines are trimmed with an ellipsis', async () => {

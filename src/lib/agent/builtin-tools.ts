@@ -31,13 +31,15 @@ import {
   relative,
 } from 'node:path';
 import { spawn } from 'node:child_process';
+import { StringDecoder } from 'node:string_decoder';
+import { randomBytes } from 'node:crypto';
 import { loadSecretGuard } from './secrets.js';
 import { redactFreeText } from '../redact.js';
 import { matchesCatastrophic } from './command-screen.js';
 import { findInvisibleUnicode, invisibleUnicodeNotice } from './command-screen.js';
 import { buildSubprocessEnv } from '../spawn-env.js';
 import { computeFileDiff } from './diff.js';
-import { parseSkillFile } from './skills.js';
+import { capSkillBody, parseSkillFile } from './skills.js';
 import { recordSkillLoad } from './skill-curator.js';
 import { releaseChildStdio, STDIO_DRAIN_MS } from '../child-stdio.js';
 import { sanitizeForDisplay } from '../sanitize-display.js';
@@ -112,7 +114,9 @@ export const readFileTool: ToolDefinition = {
     if (looksBinary(buf)) {
       return { ok: true, summary: 'binary file skipped', content: `[binary file ${rel} (${fmtBytes(st.size)}) - not shown]` };
     }
-    const lines = buf.toString('utf8').split('\n');
+    // Strip a trailing CR per line: a CRLF file's lines otherwise carry a
+    // stray `\r` into every result (and into any downstream edit match).
+    const lines = buf.toString('utf8').split('\n').map((l) => (l.endsWith('\r') ? l.slice(0, -1) : l));
     const totalLines = lines.length;
     const offset = optInt(args, 'offset');
     const limit = optInt(args, 'limit');
@@ -124,9 +128,21 @@ export const readFileTool: ToolDefinition = {
     // the model in the result header. So even when dispatch char-caps the
     // content, the model still learns the file's true length and can re-read
     // a window with offset/limit. (Char-capping is centralized in dispatch.)
-    const summary = sliced
-      ? `lines ${start + 1}-${start + slice.length} of ${totalLines}`
-      : `${totalLines} line${totalLines === 1 ? '' : 's'}`;
+    //
+    // An offset past EOF used to report a nonsense range ("lines 101-100 of
+    // 50"): an empty slice has no first line, so say so instead of printing
+    // a backwards range.
+    let summary: string;
+    if (!sliced) {
+      summary = `${totalLines} line${totalLines === 1 ? '' : 's'}`;
+    } else if (slice.length === 0) {
+      summary =
+        start >= totalLines
+          ? `offset ${offset} is past the end of the file (${totalLines} line${totalLines === 1 ? '' : 's'})`
+          : `no lines returned for offset ${offset ?? 1}${limit !== undefined ? `, limit ${limit}` : ''} (${totalLines} line${totalLines === 1 ? '' : 's'} total)`;
+    } else {
+      summary = `lines ${start + 1}-${start + slice.length} of ${totalLines}`;
+    }
     return { ok: true, summary, content: slice.join('\n') };
   },
 };
@@ -279,6 +295,9 @@ export const grepTool: ToolDefinition = {
     let totalMatches = 0;
     let bytes = 0;
     let capped = false;
+    // Files skipped for size are SURFACED, not silent: a match in a skipped
+    // file used to be indistinguishable from "no match in the tree".
+    const oversizeSkipped: string[] = [];
     for (const f of files) {
       if (ctx.signal?.aborted || capped) break;
       const abs = join(ctx.cwd, f);
@@ -289,7 +308,11 @@ export const grepTool: ToolDefinition = {
       } catch {
         continue;
       }
-      if (!st.isFile() || st.size > 2 * 1024 * 1024) continue;
+      if (!st.isFile()) continue;
+      if (st.size > 2 * 1024 * 1024) {
+        oversizeSkipped.push(f);
+        continue;
+      }
       let buf: Buffer;
       try {
         buf = readFileSync(abs);
@@ -324,8 +347,14 @@ export const grepTool: ToolDefinition = {
     } else if (totalMatches > surfaced.length) {
       content += `\n[+${totalMatches - surfaced.length} more matches]`;
     }
+    if (oversizeSkipped.length > 0) {
+      const shown = oversizeSkipped.slice(0, 5).join(', ');
+      const more = oversizeSkipped.length > 5 ? ` (+${oversizeSkipped.length - 5} more)` : '';
+      content += `\n[skipped ${oversizeSkipped.length} file${oversizeSkipped.length === 1 ? '' : 's'} over the 2 MB grep size cap (not searched): ${shown}${more}]`;
+    }
     let summary = `${totalMatches} match${totalMatches === 1 ? '' : 'es'} in ${filesWithMatch.size} file${filesWithMatch.size === 1 ? '' : 's'}`;
     if (capped) summary += ' (scan capped)';
+    if (oversizeSkipped.length > 0) summary += ` (${oversizeSkipped.length} file${oversizeSkipped.length === 1 ? '' : 's'} skipped over 2 MB)`;
     return { ok: true, summary, content };
   },
 };
@@ -635,7 +664,9 @@ export const loadSkillTool: ToolDefinition = {
     } catch {
       throw new ToolError(`skill "${name}" could not be read - it may have been removed`);
     }
-    const { body } = parseSkillFile(raw, name);
+    // 4a2 item 1: the body is repository-supplied content - cap it before it
+    // rides into the conversation (capSkillBody marks the cut in-band).
+    const { body } = capSkillBody(parseSkillFile(raw, name).body);
     ctx.loadedSkills?.add(name);
     // H-13: usage telemetry for the skill curator - best-effort, never
     // throws into the tool.
@@ -828,7 +859,12 @@ export const fetchUrlTool: ToolDefinition = {
     let data: { url?: unknown; title?: unknown; text?: unknown };
     try {
       data = await api.post('/chat/fetch-url', {
-        body: { url: url.slice(0, 2048) },
+        // No client-side truncation: cutting the URL at 2048 chars can
+        // silently change the DESTINATION (a truncated query string is a
+        // different page, or a different resource entirely). If the URL is
+        // too long the server refuses it - which is visible, unlike a quiet
+        // fetch of the wrong page.
+        body: { url },
         apiUrlOverride: ctx.apiUrlOverride,
       });
     } catch (err) {
@@ -851,14 +887,14 @@ registerTool(fetchUrlTool);
 
 // ─────────────────────── mutating tools ───────────────────────
 
-let tmpCounter = 0;
-
 /** Write `content` to `abs` atomically: temp file in the same dir + rename. */
 function writeAtomic(abs: string, content: string): void {
   const dir = dirname(abs);
   mkdirSync(dir, { recursive: true });
-  tmpCounter += 1;
-  const tmp = join(dir, `.${basename(abs)}.spycore-${process.pid}-${tmpCounter}.tmp`);
+  // Random temp name: a pid+counter name in the target directory is
+  // predictable, so another local process (or a second CLI run) can guess
+  // it and plant or swap the temp file before the rename.
+  const tmp = join(dir, `.${basename(abs)}.spycore-${process.pid}-${randomBytes(8).toString('hex')}.tmp`);
   try {
     writeFileSync(tmp, content, 'utf8');
     renameSync(tmp, abs);
@@ -1053,7 +1089,18 @@ export const editFileTool: ToolDefinition = {
     const buf = readFileSync(abs);
     if (looksBinary(buf)) throw new ToolError(`"${rel}" appears to be binary; refusing to edit`);
     const current = buf.toString('utf8');
-    const count = current.split(oldStr).length - 1;
+    // Overlapping occurrences count: `split` counts only non-overlapping
+    // ones, so "aaa" with old_str "aa" reported 1 occurrence and the edit
+    // was allowed even though the string occurs twice. Advance by one
+    // character, not by the match length.
+    let count = 0;
+    let from = 0;
+    for (;;) {
+      const at = current.indexOf(oldStr, from);
+      if (at === -1) break;
+      count += 1;
+      from = at + 1;
+    }
     if (count === 0) {
       throw new ToolError(`old_str was not found in ${rel}; it must occur exactly once`);
     }
@@ -1074,6 +1121,24 @@ registerTool(editFileTool);
 export const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
 const SIGTERM_GRACE_MS = 2_000;
 const MAX_CAPTURE_BYTES = 1024 * 1024; // memory guard on captured output
+
+/**
+ * Longest prefix of `s` whose UTF-8 encoding is at most `maxBytes` bytes.
+ * Iterates by code point, so the cut never splits a UTF-16 surrogate pair
+ * (or a multi-byte character): the old `slice(0, MAX_CAPTURE_BYTES)` cut by
+ * UTF-16 code units and could sever a character mid-sequence.
+ */
+function truncateUtf8Bytes(s: string, maxBytes: number): string {
+  let bytes = 0;
+  let out = '';
+  for (const ch of s) {
+    const n = Buffer.byteLength(ch, 'utf8');
+    if (bytes + n > maxBytes) break;
+    bytes += n;
+    out += ch;
+  }
+  return out;
+}
 
 export interface CommandRun {
   combined: string;
@@ -1123,18 +1188,28 @@ export function runShellCommand(
       env: buildSubprocessEnv(),
     });
     let combined = '';
+    let combinedBytes = 0;
     let capped = false;
     let timedOut = false;
     let settled = false;
     let killTimer: ReturnType<typeof setTimeout> | null = null;
     let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
     let drainTimer: ReturnType<typeof setTimeout> | null = null;
+    // A streaming UTF-8 decoder: decoding each chunk on its own splits a
+    // multi-byte character that straddles a chunk boundary into replacement
+    // characters, and the old `combined.length` cap counted UTF-16 code
+    // units, not bytes - a 1 MB cap in code units is up to 3 MB of UTF-8
+    // bytes on disk. Bytes are counted from the raw chunks; the decoder
+    // holds an incomplete trailing sequence until its next chunk arrives.
+    const decoder = new StringDecoder('utf8');
 
     const capture = (buf: Buffer): void => {
       if (capped) return;
-      combined += buf.toString('utf8');
-      if (combined.length > MAX_CAPTURE_BYTES) {
-        combined = `${combined.slice(0, MAX_CAPTURE_BYTES)}\n[output capped at ${fmtBytes(MAX_CAPTURE_BYTES)}]`;
+      combinedBytes += buf.byteLength;
+      combined += decoder.write(buf);
+      if (combinedBytes > MAX_CAPTURE_BYTES) {
+        combined = truncateUtf8Bytes(combined, MAX_CAPTURE_BYTES);
+        combined = `${combined}\n[output capped at ${fmtBytes(MAX_CAPTURE_BYTES)}]`;
         capped = true;
       }
     };
@@ -1176,6 +1251,9 @@ export function runShellCommand(
     const done = (exitCode: number | null, sig: NodeJS.Signals | null): void => {
       if (settled) return;
       settled = true;
+      // Flush the streaming decoder: a multi-byte character split across
+      // the last two chunks is only complete once the stream ends.
+      if (!capped) combined += decoder.end();
       if (timeoutTimer) clearTimeout(timeoutTimer);
       if (killTimer) clearTimeout(killTimer);
       if (drainTimer) clearTimeout(drainTimer);

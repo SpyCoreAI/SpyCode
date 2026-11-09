@@ -136,19 +136,63 @@ export function braceLost(p: ParsedShell): boolean {
  */
 export function balancedTail(tail: string): boolean {
   let round = 0;
-  let sq = false;
-  let dq = false;
+  // Quote state, checked FIRST: in POSIX a backslash is literal inside
+  // `'…'`, so the old scanner - which checked the backslash before the
+  // quote - let `\'` inside `'…'` escape the quote and flip the state for
+  // the rest of the tail. `$'…'` is a distinct state: its backslash DOES
+  // escape, so `\'` there does not close the string. `$"…"` behaves like
+  // `"…"` (backslash escapes, including a newline).
+  let quote: 'single' | 'dollar-single' | 'double' | null = null;
   for (let i = 0; i < tail.length; i += 1) {
-    const c = tail[i];
-    if (c === '\\') { i += 1; continue; }
-    if (sq) { if (c === "'") sq = false; continue; }
-    if (dq) { if (c === '"') dq = false; continue; }
-    if (c === "'") { sq = true; continue; }
-    if (c === '"') { dq = true; continue; }
-    if (c === '(') { round += 1; continue; }
-    if (c === ')') { round -= 1; if (round < 0) return false; continue; }
+    const c = tail[i] as string;
+    if (quote === 'single') {
+      // Inside `'…'` NOTHING is special - not even a backslash.
+      if (c === "'") quote = null;
+      continue;
+    }
+    if (quote === 'dollar-single' || quote === 'double') {
+      // Inside `$'…'` and `"…"` a backslash escapes the next character.
+      if (c === '\\') {
+        i += 1;
+        continue;
+      }
+      if (quote === 'dollar-single' && c === "'") quote = null;
+      else if (quote === 'double' && c === '"') quote = null;
+      continue;
+    }
+    if (c === '\\') {
+      i += 1;
+      continue;
+    }
+    if (c === "'") {
+      quote = 'single';
+      continue;
+    }
+    if (c === '"') {
+      quote = 'double';
+      continue;
+    }
+    if (c === '$' && tail[i + 1] === "'") {
+      quote = 'dollar-single';
+      i += 1;
+      continue;
+    }
+    if (c === '$' && tail[i + 1] === '"') {
+      quote = 'double';
+      i += 1;
+      continue;
+    }
+    if (c === '(') {
+      round += 1;
+      continue;
+    }
+    if (c === ')') {
+      round -= 1;
+      if (round < 0) return false;
+      continue;
+    }
   }
-  return round === 0 && !sq && !dq;
+  return round === 0 && quote === null;
 }
 
 /**
@@ -212,20 +256,37 @@ export function balancedTail(tail: string): boolean {
  */
 export function continuationTails(command: string): string[] {
   const out: string[] = [];
-  // THREE STATES, NOT ONE. `unquoted` → the pair is REMOVED and the words
+  // FOUR STATES, NOT ONE. `unquoted` → the pair is REMOVED and the words
   // are GLUED, which is the only reading this function exists to produce;
-  // `'…'` and `"…"` → no join the restoration may act on. The backslash
-  // escape is consumed in the unquoted and double-quoted states, so a `\'`
-  // cannot open a span and a `\\`+LF is not mistaken for a `\`+LF.
-  let quote: "'" | '"' | null = null;
+  // `'…'`, `$'…'` and `"…"` → no join the restoration may act on. The
+  // backslash escape is consumed in the unquoted, `$'…'` and double-quoted
+  // states, so a `\'` cannot open a span and a `\\`+LF is not mistaken for a
+  // `\`+LF. Inside `'…'` a backslash is literal - the `\'` there is two
+  // characters, not an escape, and the quote still closes at the `'`.
+  let quote: 'single' | 'dollar-single' | 'double' | null = null;
   for (let i = 0; i < command.length; i += 1) {
     const c = command[i] as string;
-    if (quote === "'") {
+    if (quote === 'single') {
       // Inside `'…'` NOTHING is special - not even a backslash.
       if (c === "'") quote = null;
       continue;
     }
-    if (quote === '"') {
+    if (quote === 'dollar-single') {
+      // Inside `$'…'` a backslash DOES escape: `\'` is a literal quote, not
+      // the end of the string, and a backslash-newline is consumed here, so
+      // no tail is produced for it - the string stays one argument and
+      // nothing new becomes a command. The old scanner had no such state:
+      // its naive `'` toggle fired on the `'` of `$'` and then on the `\'`,
+      // closing the string at the escaped quote and restoring tails from
+      // inside what the shell still treats as one quoted argument.
+      if (c === '\\' && i + 1 < command.length) {
+        i += 1;
+        continue;
+      }
+      if (c === "'") quote = null;
+      continue;
+    }
+    if (quote === 'double') {
       // Inside `"…"` a backslash escapes the next character, INCLUDING a
       // newline - which POSIX removes while the string stays ONE argument, so
       // nothing new becomes a command and there is nothing to restore.
@@ -246,8 +307,22 @@ export function continuationTails(command: string): string[] {
       i += 1;
       continue;
     }
-    if (c === "'" || c === '"') {
-      quote = c;
+    if (c === "'") {
+      quote = 'single';
+      continue;
+    }
+    if (c === '"') {
+      quote = 'double';
+      continue;
+    }
+    if (c === '$' && command[i + 1] === "'") {
+      quote = 'dollar-single';
+      i += 1;
+      continue;
+    }
+    if (c === '$' && command[i + 1] === '"') {
+      quote = 'double';
+      i += 1;
       continue;
     }
   }
@@ -285,11 +360,23 @@ function textMayExecOperands(command: string): boolean {
  */
 function glueContinuations(command: string): string {
   let out = '';
-  let sq = false;
+  // The same four quote states as `continuationTails`: inside `$'…'` a
+  // backslash escapes the next character, so `\'` does not close the string
+  // - the old single-`sq` toggle closed it at the escaped quote and then
+  // glued `\`+LF pairs from inside what the shell still treats as one
+  // quoted argument.
+  let quote: 'single' | 'dollar-single' | null = null;
   for (let i = 0; i < command.length; i += 1) {
     const c = command[i] as string;
-    if (sq) { out += c; if (c === "'") sq = false; continue; }
-    if (c === "'") { sq = true; out += c; continue; }
+    if (quote === 'single') { out += c; if (c === "'") quote = null; continue; }
+    if (quote === 'dollar-single') {
+      out += c;
+      if (c === '\\' && i + 1 < command.length) { out += command[i + 1] as string; i += 1; continue; }
+      if (c === "'") quote = null;
+      continue;
+    }
+    if (c === "'") { quote = 'single'; out += c; continue; }
+    if (c === '$' && command[i + 1] === "'") { quote = 'dollar-single'; out += c; out += "'"; i += 1; continue; }
     // R-CLI-5 - THE ESCAPE-CONSUMPTION RULE ITS TWO SIBLING
     // READERS ALREADY HAVE. POSIX removes a backslash-newline pair; it does NOT
     // remove one whose backslash is itself escaped. `a\\`+LF is a LITERAL
