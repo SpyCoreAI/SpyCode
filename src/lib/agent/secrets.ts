@@ -308,7 +308,12 @@ async function loadIgnorePred(cwd: string): Promise<SecretGuard> {
   if (!existsSync(join(cwd, '.spycoreignore'))) return NO_IGNORE;
   try {
     const { isIgnoredByIgnoreFilesSync } = await import('globby');
-    const pred = isIgnoredByIgnoreFilesSync('.spycoreignore', { cwd });
+    // followSymbolicLinks: false - same hazard as repo-map.ts: the ignore
+    // scan follows symlinks by default with no cycle protection, so a
+    // symlink escaping the tree makes the predicate build descend forever
+    // and OOM the caller. A .spycoreignore inside a symlinked dir does not
+    // govern this tree.
+    const pred = isIgnoredByIgnoreFilesSync('.spycoreignore', { cwd, followSymbolicLinks: false });
     return (abs) => {
       try {
         return pred(abs);

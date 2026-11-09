@@ -304,7 +304,11 @@ export async function scanRepo(cwd: string): Promise<RepoScan> {
   const { isGitIgnoredSync, globby } = await import('globby');
   let ignored: (p: string) => boolean;
   try {
-    ignored = isGitIgnoredSync({ cwd });
+    // followSymbolicLinks: false - same hazard as repo-map.ts: globby's
+    // `**/.gitignore` scan follows symlinks by default with no cycle
+    // protection, so a symlink escaping the tree makes the predicate build
+    // descend forever and OOM the caller.
+    ignored = isGitIgnoredSync({ cwd, followSymbolicLinks: false });
   } catch {
     ignored = () => false;
   }

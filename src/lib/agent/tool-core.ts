@@ -535,7 +535,12 @@ export async function gitignoreCheckFor(ctx: ToolContext): Promise<(abs: string)
   let check = ctx.guardMemo?.gitignoreCheck;
   if (!check) {
     const { isGitIgnoredSync } = await import('globby');
-    const ignored = isGitIgnoredSync({ cwd: ctx.cwd });
+    // followSymbolicLinks: false - same hazard as repo-map.ts: globby's
+    // `**/.gitignore` scan follows symlinks by default with no cycle
+    // protection, so a symlink escaping the tree makes the predicate build
+    // descend forever and OOM the agent. Consumers never follow symlinked
+    // directories, so a .gitignore inside one is unreachable anyway.
+    const ignored = isGitIgnoredSync({ cwd: ctx.cwd, followSymbolicLinks: false });
     check = (abs: string): boolean => ignored(abs);
     (ctx.guardMemo ??= {}).gitignoreCheck = check;
   }

@@ -72,7 +72,14 @@ export function buildRepoMap(
   let isGitIgnored: (abs: string) => boolean = () => false;
   try {
     const { isGitIgnoredSync } = createRequire(import.meta.url)('globby') as typeof import('globby');
-    const ignored = isGitIgnoredSync({ cwd: rootDir });
+    // followSymbolicLinks: false - globby's `**/.gitignore` scan follows
+    // symlinks by default and its walker has no cycle protection, so a
+    // symlink escaping the tree (e.g. a link to the parent/tmp dir) makes
+    // the scan descend forever and OOM the worker. The walk below refuses
+    // symlinked directories (lstat check), so the scan must not follow
+    // them either; a .gitignore inside a symlinked dir is unreachable to
+    // the walk anyway.
+    const ignored = isGitIgnoredSync({ cwd: rootDir, followSymbolicLinks: false });
     isGitIgnored = (abs: string): boolean => ignored(abs);
   } catch {
     /* gitignore unavailable - fall back to no gitignore filtering */
