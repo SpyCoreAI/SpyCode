@@ -280,3 +280,25 @@ describe('guideStatus - /guide (no arg)', () => {
     expect(status.lines).toBeGreaterThan(20);
   });
 });
+
+describe('readGuideForContext capped read (4c)', () => {
+  test('a guide past the 1 MiB cap returns truncated=true with bounded text', async () => {
+    const { readGuideForContext } = await import('../src/lib/codebase-guide.js');
+    const dir = tempProject();
+    writeFileSync(join(dir, 'CODEBASE_GUIDE.md'), `# Guide\n\n${'g'.repeat(1_200_000)}\n`, 'utf8');
+    const r = readGuideForContext(dir);
+    expect(r.exists).toBe(true);
+    expect(r.truncated).toBe(true);
+    expect(r.text.length).toBeLessThanOrEqual(1_048_576);
+  });
+
+  test('a small guide is unaffected and reports truncated=false', async () => {
+    const { readGuideForContext } = await import('../src/lib/codebase-guide.js');
+    const dir = tempProject();
+    writeFileSync(join(dir, 'CODEBASE_GUIDE.md'), '# Guide\n\nShort.\n', 'utf8');
+    const r = readGuideForContext(dir);
+    expect(r.exists).toBe(true);
+    expect(r.truncated).toBe(false);
+    expect(r.text).toContain('Short.');
+  });
+});

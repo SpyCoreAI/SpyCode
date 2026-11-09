@@ -30,6 +30,29 @@ export const GIT_DIFF_MAX_CHARS = 24_000;
 const STAT_MAX_CHARS = 4_000;
 const LOG_MAX_CHARS = 1_000;
 
+/**
+ * Cap on accumulated model text in one turn: a runaway server/model must
+ * not grow memory without bound. Far above any commit/PR/branch text
+ * (hundreds of chars), so a legitimate turn never trips it.
+ */
+export const GENERATE_MAX_TEXT_CHARS = 256_000;
+
+/**
+ * Append one model-text chunk, enforcing GENERATE_MAX_TEXT_CHARS.
+ * Exported for tests; collectTurn is the only production caller.
+ */
+export function appendCappedText(current: string, addition: string): string {
+  const next = current + addition;
+  if (next.length > GENERATE_MAX_TEXT_CHARS) {
+    throw new SpycoreCliError(
+      `Generation exceeded the ${GENERATE_MAX_TEXT_CHARS.toLocaleString('en-US')}-character output limit.`,
+      EXIT_USER_ERROR,
+      'The model kept generating without stopping. Try again, or write the text yourself.',
+    );
+  }
+  return next;
+}
+
 /** Marker appended when a block is cut - the model must know it saw a prefix. */
 export const TRUNCATION_MARKER = '[... truncated: diff exceeds the prompt budget ...]';
 
@@ -220,7 +243,7 @@ async function collectTurn(
       | undefined;
     if (!data || typeof data !== 'object') continue;
     if (data.type === 'text') {
-      text += String(data.content ?? '');
+      text = appendCappedText(text, String(data.content ?? ''));
     } else if (data.type === 'error') {
       const message_ = String(data.message ?? 'Generation failed');
       const lower = message_.toLowerCase();

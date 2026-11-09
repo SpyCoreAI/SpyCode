@@ -2,6 +2,7 @@ import { Command, Option } from 'commander';
 import { resolveProviderSelection } from '../lib/providers/byok-config.js';
 import { getConfigStore, getStoredProviders, getDefaultProviderName } from '../lib/config.js';
 import { EXIT_USER_ERROR, SpycoreCliError } from '../lib/errors.js';
+import { parseStrictIntFlag } from '../lib/numeric-flags.js';
 import { toBudgetCaps } from '../lib/agent/budget.js';
 import { DEFAULT_MAX_TURNS, MAX_TURNS_CAP, MIN_TURNS } from '../lib/agent/loop.js';
 import type { Provider } from '../lib/providers/types.js';
@@ -18,39 +19,6 @@ interface AcpCmdOpts {
   maxTurns?: string;
   maxTokens?: string;
   maxTime?: string;
-}
-
-/**
- * Strict positive-integer flag parsing, same rule as agent.ts: an
- * unparseable or out-of-range value is an error, never a silent
- * fallback to the default. (Shared home would be numeric-flags.ts;
- * duplicated here until that helper gains a strict mode.)
- */
-function parseStrictIntFlag(
-  raw: string | undefined,
-  flag: string,
-  min: number,
-  max: number,
-  defaultValue: number,
-): number {
-  if (raw === undefined) return defaultValue;
-  const trimmed = raw.trim();
-  if (!/^\d+$/.test(trimmed)) {
-    throw new SpycoreCliError(
-      `Invalid --${flag}: "${raw}" is not a positive integer.`,
-      EXIT_USER_ERROR,
-      `Pass --${flag} <n> with ${min} <= n <= ${max}.`,
-    );
-  }
-  const n = Number(trimmed);
-  if (!Number.isSafeInteger(n) || n < min || n > max) {
-    throw new SpycoreCliError(
-      `Invalid --${flag}: "${raw}" is outside ${min}–${max}.`,
-      EXIT_USER_ERROR,
-      `Pass --${flag} <n> with ${min} <= n <= ${max}.`,
-    );
-  }
-  return n;
 }
 
 /** Strict positive-number parsing for --max-time (fractional seconds allowed). */

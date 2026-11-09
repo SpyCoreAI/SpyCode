@@ -32,6 +32,13 @@ export const DERIVED_NAME_CAP = 40;
 /** Validation floor: the generated body must have at least this many non-empty lines. */
 export const MIN_BODY_LINES = 20;
 
+/**
+ * Cap on accumulated model text in one generation turn: a runaway
+ * server/model must not grow memory without bound. Far above a SKILL.md
+ * (target 100-400 lines), so a legitimate turn never trips it.
+ */
+export const SKILL_GEN_MAX_TEXT_CHARS = 256_000;
+
 const NAME_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 /**
@@ -235,8 +242,15 @@ async function streamText(
     apiUrlOverride: session.apiUrlOverride,
     signal: session.signal,
   })) {
-    if (ev.type === 'text') text += ev.text;
-    else if (ev.type === 'error') throw new SpycoreCliError(ev.message, EXIT_USER_ERROR);
+    if (ev.type === 'text') {
+      text += ev.text;
+      if (text.length > SKILL_GEN_MAX_TEXT_CHARS) {
+        throw new SpycoreCliError(
+          `Generation exceeded the ${SKILL_GEN_MAX_TEXT_CHARS.toLocaleString('en-US')}-character output limit.`,
+          EXIT_USER_ERROR,
+        );
+      }
+    } else if (ev.type === 'error') throw new SpycoreCliError(ev.message, EXIT_USER_ERROR);
     else if (ev.type === 'done') break;
   }
   return text;

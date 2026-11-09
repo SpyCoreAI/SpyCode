@@ -8,7 +8,8 @@
  * Format: { [providerName]: { calls: number, inputTokens: number, outputTokens: number, lastUsed: string } }
  */
 
-import { readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { readFileSync, unlinkSync, writeFileSync, mkdirSync, renameSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { getConfigPath } from './config.js';
 import type { Provider } from './providers/types.js';
@@ -26,12 +27,39 @@ function usageFilePath(): string {
   return join(dirname(getConfigPath()), 'byok-usage.json');
 }
 
+/**
+ * Validate + sanitize one stored entry. A corrupt file used to flow
+ * straight into `recordByokUsage`'s arithmetic, where a string `calls`
+ * concatenated (`"3" + 1 === "31"`) and a non-number token count summed
+ * to NaN and poisoned every later read. Non-finite numbers become 0 and
+ * a non-string timestamp becomes the epoch - the entry survives, the
+ * poison does not. Non-object entries are dropped.
+ */
+function sanitizeEntry(entry: unknown): ByokUsageEntry | null {
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
+  const e = entry as Record<string, unknown>;
+  const num = (v: unknown): number =>
+    typeof v === 'number' && Number.isFinite(v) ? v : 0;
+  return {
+    calls: num(e.calls),
+    inputTokens: num(e.inputTokens),
+    outputTokens: num(e.outputTokens),
+    lastUsed:
+      typeof e.lastUsed === 'string' ? e.lastUsed : new Date(0).toISOString(),
+  };
+}
+
 function loadUsage(): ByokUsageMap {
   try {
     const raw = readFileSync(usageFilePath(), 'utf-8');
     const parsed = JSON.parse(raw) as unknown;
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      return parsed as ByokUsageMap;
+      const out: ByokUsageMap = {};
+      for (const [name, entry] of Object.entries(parsed as Record<string, unknown>)) {
+        const clean = sanitizeEntry(entry);
+        if (clean) out[name] = clean;
+      }
+      return out;
     }
     return {};
   } catch {
@@ -42,10 +70,22 @@ function loadUsage(): ByokUsageMap {
 function saveUsage(map: ByokUsageMap): void {
   const path = usageFilePath();
   mkdirSync(dirname(path), { recursive: true });
-  // Write atomically via temp+rename to avoid corruption on crash.
-  const tmp = `${path}.tmp`;
-  writeFileSync(tmp, JSON.stringify(map, null, 2), 'utf-8');
-  renameSync(tmp, path);
+  // Write atomically via temp+rename to avoid corruption on crash. The
+  // temp name is unique per process (pid + random): the old fixed
+  // `${path}.tmp` let two concurrent CLI processes overwrite each other's
+  // in-flight write and corrupt the usage file.
+  const tmp = `${path}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
+  try {
+    writeFileSync(tmp, JSON.stringify(map, null, 2), 'utf-8');
+    renameSync(tmp, path);
+  } catch (err) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      /* stale temp is harmless - the rename never happened */
+    }
+    throw err;
+  }
 }
 
 /**
@@ -59,6 +99,10 @@ export function recordByokUsage(
 ): void {
   try {
     const map = loadUsage();
+    // Non-finite token counts (NaN/Infinity from a broken provider event)
+    // must not poison the stored sums.
+    const inT = Number.isFinite(inputTokens) ? inputTokens : 0;
+    const outT = Number.isFinite(outputTokens) ? outputTokens : 0;
     const existing = map[providerName] ?? {
       calls: 0,
       inputTokens: 0,
@@ -67,8 +111,8 @@ export function recordByokUsage(
     };
     map[providerName] = {
       calls: existing.calls + 1,
-      inputTokens: existing.inputTokens + inputTokens,
-      outputTokens: existing.outputTokens + outputTokens,
+      inputTokens: existing.inputTokens + inT,
+      outputTokens: existing.outputTokens + outT,
       lastUsed: new Date().toISOString(),
     };
     saveUsage(map);

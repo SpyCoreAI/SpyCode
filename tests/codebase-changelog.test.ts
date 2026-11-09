@@ -256,3 +256,16 @@ describe('appendChangelogEntry - newest-first prepend', () => {
     expect(existsSync(join(dir, CHANGELOG_FILE))).toBe(false);
   });
 });
+
+describe('readRecentChangelog capped read (4c)', () => {
+  test('a changelog past the 1 MiB cap returns truncated=true with bounded text', () => {
+    const dir = tempProject();
+    const head = '# Codebase Changelog\n\n## 2026-03-03\n- newest entry\n\n';
+    writeFileSync(join(dir, CHANGELOG_FILE), head + 'x'.repeat(1_200_000), 'utf8');
+    const r = readRecentChangelog(dir, { maxEntries: 10 });
+    expect(r.exists).toBe(true);
+    expect(r.truncated).toBe(true);
+    expect(r.text.length).toBeLessThanOrEqual(1_048_576);
+    expect(r.text).toContain('newest entry');
+  });
+});

@@ -182,3 +182,15 @@ describe('createExclusiveTempWriteStream', () => {
     }
   });
 });
+
+describe('relativeTime future timestamps', () => {
+  const ahead = (ms: number): string => new Date(Date.now() + ms).toISOString();
+
+  test('future timestamps read "in …", never a negative "… ago"', () => {
+    expect(relativeTime(ahead(5_000))).toBe('in 5s');
+    expect(relativeTime(ahead(90_000))).toBe('in 1m');
+    expect(relativeTime(ahead(2 * 3_600_000))).toBe('in 2h');
+    expect(relativeTime(ahead(3 * 86_400_000))).toBe('in 3d');
+    expect(relativeTime(ahead(400 * 86_400_000))).toBe('in 1y');
+  });
+});

@@ -22,10 +22,13 @@
  * targets the end-user's repo - nothing here ever writes into the CLI's own
  * source tree.
  */
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { scanRepo, type RepoScan } from './repo-scan.js';
+import { countFileLines, readFilePrefix, scanRepo, type RepoScan } from './repo-scan.js';
 import { loadSecretGuardSync } from './agent/secrets.js';
+
+/** Cap on bytes read from CODEBASE_GUIDE.md: only the head is ever rendered. */
+const GUIDE_READ_CAP_BYTES = 1_048_576;
 
 /** The tool-generated architecture reference at the user's project root. */
 export const GUIDE_FILE = 'CODEBASE_GUIDE.md';
@@ -380,14 +383,8 @@ export interface GuideStatus {
 export function guideStatus(cwd: string): GuideStatus {
   const path = join(resolve(cwd), GUIDE_FILE);
   if (!existsSync(path)) return { exists: false, path, lines: 0 };
-  let lines = 0;
-  try {
-    const content = readFileSync(path, 'utf8');
-    lines = content.length === 0 ? 0 : content.replace(/\n$/, '').split('\n').length;
-  } catch {
-    /* leave lines at 0 */
-  }
-  return { exists: true, path, lines };
+  const lines = countFileLines(path);
+  return { exists: true, path, lines: lines ?? 0 };
 }
 
 export interface GuideContext {
@@ -417,14 +414,21 @@ export function readGuideForContext(
   if (loadSecretGuardSync(resolve(cwd))(path)) {
     return { exists: true, path, text: '', truncated: false };
   }
-  let content = '';
+  // Capped read: a multi-MB guide must not be loaded whole just to be
+  // char-capped afterwards. `truncated` reports the byte cap as well as
+  // the char cap.
+  let size = 0;
   try {
-    content = readFileSync(path, 'utf8');
+    size = statSync(path).size;
   } catch {
     return { exists: true, path, text: '', truncated: false };
   }
+  const content = readFilePrefix(path, GUIDE_READ_CAP_BYTES);
+  if (content === null) {
+    return { exists: true, path, text: '', truncated: false };
+  }
   let text = content.replace(/\s+$/, '');
-  let truncated = false;
+  let truncated = size > GUIDE_READ_CAP_BYTES;
   if (opts.maxChars !== undefined && text.length > opts.maxChars) {
     const marker = '\n\n<!-- … truncated to fit -->';
     const room = Math.max(0, opts.maxChars - marker.length);

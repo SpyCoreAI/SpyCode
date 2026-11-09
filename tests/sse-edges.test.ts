@@ -310,3 +310,44 @@ describe('streamRequest edges', () => {
     expect(rest.length).toBeGreaterThanOrEqual(2);
   });
 });
+
+describe('readCappedJson', () => {
+  test('parses a small streamed body', async () => {
+    const { readCappedJson } = await import('../src/lib/sse.js');
+    async function* gen(): AsyncGenerator<Buffer> {
+      yield Buffer.from('{"error":', 'utf8');
+      yield Buffer.from('"boom"}', 'utf8');
+    }
+    await expect(readCappedJson(gen())).resolves.toEqual({ error: 'boom' });
+  });
+
+  test('returns null past the 1 MiB cap', async () => {
+    const { readCappedJson } = await import('../src/lib/sse.js');
+    async function* gen(): AsyncGenerator<Buffer> {
+      yield Buffer.alloc(600_000, 0x61);
+      yield Buffer.alloc(600_000, 0x61);
+    }
+    await expect(readCappedJson(gen())).resolves.toBeNull();
+  });
+
+  test('falls back to .json() for non-streaming bodies', async () => {
+    const { readCappedJson } = await import('../src/lib/sse.js');
+    await expect(readCappedJson({ json: async () => ({ ok: true }) })).resolves.toEqual({
+      ok: true,
+    });
+    await expect(readCappedJson({ json: async () => { throw new Error('bad'); } })).resolves.toBeNull();
+  });
+});
+
+describe('parseSSEStream drains many events in order', () => {
+  test('500 events in one chunk all arrive, in order', async () => {
+    const { parseSSEStream } = await import('../src/lib/sse.js');
+    const chunk = Array.from({ length: 500 }, (_, i) => `data: {"n":${i}}\n\n`).join('');
+    const events: unknown[] = [];
+    for await (const e of parseSSEStream(Readable.from([Buffer.from(chunk, 'utf8')]) as never)) {
+      events.push(e);
+    }
+    expect(events).toHaveLength(500);
+    expect((events[499] as { data: { n: number } }).data.n).toBe(499);
+  });
+});

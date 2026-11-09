@@ -84,24 +84,42 @@ function spdx(pkg) {
   return 'UNKNOWN';
 }
 
-function findLicenseText(dir) {
+/**
+ * A declared license is disjunctive when the licensee may choose any one of
+ * the listed licenses (SPDX `OR`). The notice must then reproduce EVERY
+ * option, not just one of them: picking the shortest-named file (e.g. rc's
+ * LICENSE.BSD) silently dropped the MIT and Apache-2.0 texts the licensee
+ * could have chosen instead.
+ */
+function isDisjunctive(license) {
+  return /\bOR\b/.test(license);
+}
+
+/**
+ * All license files in the package dir, shortest filename first (the same
+ * order the old single-file picker used, so the first entry is unchanged).
+ * Each entry is { file, text }; unreadable entries are skipped.
+ */
+function findLicenseTexts(dir) {
   let names;
   try {
     names = readdirSync(dir);
   } catch {
-    return null;
+    return [];
   }
-  const file = names
+  return names
     .filter((n) => LICENSE_FILE_RE.test(n))
-    .sort((a, b) => a.length - b.length || a.localeCompare(b))[0];
-  if (!file) return null;
-  const full = join(dir, file);
-  try {
-    if (!statSync(full).isFile()) return null;
-    return readFileSync(full, 'utf8').replace(/\r\n/g, '\n').trim();
-  } catch {
-    return null;
-  }
+    .sort((a, b) => a.length - b.length || a.localeCompare(b))
+    .map((file) => {
+      const full = join(dir, file);
+      try {
+        if (!statSync(full).isFile()) return null;
+        return { file, text: readFileSync(full, 'utf8').replace(/\r\n/g, '\n').trim() };
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
 }
 
 function homepageOf(pkg) {
@@ -127,7 +145,7 @@ const roots = [
   ...Object.keys(cliPkg.optionalDependencies ?? {}),
 ].sort();
 
-const collected = new Map(); // key `name@version` → { name, version, license, homepage, text }
+const collected = new Map(); // key `name@version` → { name, version, license, homepage, texts }
 const missing = [];
 
 function visit(dep, fromDir) {
@@ -139,12 +157,17 @@ function visit(dep, fromDir) {
   const pkg = readJson(join(dir, 'package.json'));
   const key = `${pkg.name}@${pkg.version}`;
   if (collected.has(key)) return;
+  const license = spdx(pkg);
+  const allTexts = findLicenseTexts(dir);
+  // Disjunctive license: reproduce every option. Otherwise the old
+  // shortest-file-wins behaviour is preserved exactly.
+  const texts = isDisjunctive(license) ? allTexts : allTexts.slice(0, 1);
   collected.set(key, {
     name: pkg.name,
     version: pkg.version,
-    license: spdx(pkg),
+    license,
     homepage: homepageOf(pkg),
-    text: findLicenseText(dir),
+    texts,
   });
   for (const child of Object.keys(pkg.dependencies ?? {})) visit(child, dir);
 }
@@ -197,10 +220,16 @@ const blocks = entries.map((e) => {
   ];
   if (e.homepage) lines.push(`Homepage: ${e.homepage}`);
   lines.push('');
-  lines.push(
-    e.text ??
+  if (e.texts.length === 0) {
+    lines.push(
       `(No license file was distributed with this package. Its declared SPDX license is ${e.license}.)`,
-  );
+    );
+  } else if (e.texts.length === 1) {
+    lines.push(e.texts[0].text);
+  } else {
+    // Disjunctive license: every option, each labelled with its file.
+    lines.push(e.texts.map((t) => `License file: ${t.file}\n\n${t.text}`).join('\n\n'));
+  }
   return lines.join('\n');
 });
 

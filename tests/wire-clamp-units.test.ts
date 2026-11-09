@@ -130,3 +130,27 @@ describe('clampWireAssembly', () => {
     expect(out.wire.length).toBeLessThanOrEqual(80);
   });
 });
+
+describe('last-resort cut never silently drops a part', () => {
+  test('keep <= 0 leaves an explicit omission marker, never an empty part', () => {
+    // Fixed-only assembly over the cap: the trim-order loop cannot touch
+    // it, so the last-resort branch runs with keep <= 0.
+    const out = clampWireAssembly(
+      [{ kind: 'fixed', label: 'core', body: 'x'.repeat(100) }],
+      40,
+    );
+    expect(out.wire.length).toBeLessThanOrEqual(40);
+    expect(out.clamped).toBe(true);
+    expect(out.texts[0]).toContain('[core omitted to fit the message limit]');
+  });
+
+  test('a marker too wide for the room is truncated, still visibly a marker', () => {
+    const out = clampWireAssembly(
+      [{ kind: 'fixed', label: 'core', body: 'x'.repeat(100) }],
+      10,
+    );
+    expect(out.wire.length).toBeLessThanOrEqual(10);
+    expect(out.clamped).toBe(true);
+    expect(out.wire).toContain('[core');
+  });
+});

@@ -115,8 +115,24 @@ export async function runOAuthFlow(config: OAuthConfig): Promise<OAuthTokens> {
 
   return new Promise((resolve, reject) => {
     let server: Server | null = null;
+    // server.close() only stops accepting NEW connections: a browser
+    // keep-alive connection would hold the CLI process after it. Drain
+    // every close site through here so closeAllConnections() always runs
+    // first and no path can leave a live socket behind.
+    const closeServer = (): void => {
+      try {
+        server?.closeAllConnections();
+      } catch {
+        /* already closing - close() below still runs */
+      }
+      try {
+        server?.close();
+      } catch {
+        /* already closing */
+      }
+    };
     const timeout = setTimeout(() => {
-      server?.close();
+      closeServer();
       reject(new Error('OAuth flow timed out after 5 minutes.'));
     }, 5 * 60 * 1000);
 
@@ -136,7 +152,7 @@ export async function runOAuthFlow(config: OAuthConfig): Promise<OAuthTokens> {
         clearTimeout(timeout);
         res.writeHead(200, { 'Content-Type': 'text/html' });
         res.end('<h1>Authorization failed</h1><p>You can close this window.</p>');
-        server?.close();
+        closeServer();
         reject(new Error(`OAuth error: ${error}`));
         return;
       }
@@ -145,7 +161,7 @@ export async function runOAuthFlow(config: OAuthConfig): Promise<OAuthTokens> {
         clearTimeout(timeout);
         res.writeHead(400);
         res.end('Invalid state');
-        server?.close();
+        closeServer();
         reject(new Error('OAuth state mismatch - possible CSRF attack.'));
         return;
       }
@@ -161,13 +177,13 @@ export async function runOAuthFlow(config: OAuthConfig): Promise<OAuthTokens> {
         clearTimeout(timeout);
         res.writeHead(200, { 'Content-Type': 'text/html' });
         res.end('<h1>Success!</h1><p>You can close this window and return to the terminal.</p>');
-        server?.close();
+        closeServer();
         resolve(tokens);
       } catch (err) {
         clearTimeout(timeout);
         res.writeHead(500);
         res.end('Token exchange failed');
-        server?.close();
+        closeServer();
         reject(err);
       }
     });
@@ -230,19 +246,36 @@ async function exchangeCodeForTokens(
 }
 
 /** Refresh an access token using the refresh token. */
+export const OAUTH_FETCH_TIMEOUT_MS = 30_000;
+
 export async function refreshAccessToken(
   config: OAuthConfig,
   refreshToken: string,
+  opts: { timeoutMs?: number } = {},
 ): Promise<OAuthTokens> {
-  const resp = await fetch(config.tokenUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      client_id: config.clientId,
-      refresh_token: refreshToken,
-      grant_type: 'refresh_token',
-    }).toString(),
-  });
+  const timeoutMs = opts.timeoutMs ?? OAUTH_FETCH_TIMEOUT_MS;
+  let resp: Response;
+  try {
+    // A hung token endpoint used to hang provider construction forever -
+    // the fetch had no timeout at all.
+    resp = await fetch(config.tokenUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: config.clientId,
+        refresh_token: refreshToken,
+        grant_type: 'refresh_token',
+      }).toString(),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (err) {
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw new Error(
+        `Token refresh timed out after ${timeoutMs / 1000}s.`,
+      );
+    }
+    throw err;
+  }
 
   if (!resp.ok) {
     const text = await resp.text();

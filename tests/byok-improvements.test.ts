@@ -78,3 +78,42 @@ describe('B4: fallback error detection', () => {
     expect(isFallbackEligibleError('string error')).toBe(false);
   });
 });
+
+describe('B2b: BYOK usage file validation (4c)', () => {
+  beforeEach(() => {
+    process.env.SPYCORE_TEST_CWD = `/tmp/byok-usage-test-${Date.now()}-${Math.random()}`;
+    __resetConfigForTests();
+  });
+
+  test('corrupt stored entries cannot poison sums (string calls / NaN tokens)', async () => {
+    const { getConfigPath } = await import('../src/lib/config.js');
+    const { writeFileSync, mkdirSync } = await import('node:fs');
+    const { dirname, join } = await import('node:path');
+    const file = join(dirname(getConfigPath()), 'byok-usage.json');
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(
+      file,
+      JSON.stringify({
+        'my-provider': { calls: '3', inputTokens: '100', outputTokens: null, lastUsed: 42 },
+        'junk': 'not-an-entry',
+      }),
+      'utf-8',
+    );
+    // Recording one more call must add numerically, not concatenate.
+    recordByokUsage('my-provider', 10, 5);
+    const usage = getByokUsage();
+    expect(usage['my-provider']?.calls).toBe(1);
+    expect(usage['my-provider']?.inputTokens).toBe(10);
+    expect(usage['my-provider']?.outputTokens).toBe(5);
+    expect(usage['junk']).toBeUndefined();
+  });
+
+  test('NaN/Infinity token counts from a broken provider event are ignored, not summed', () => {
+    recordByokUsage('my-provider', Number.NaN, Number.POSITIVE_INFINITY);
+    const usage = getByokUsage();
+    expect(usage['my-provider']?.calls).toBe(1);
+    expect(usage['my-provider']?.inputTokens).toBe(0);
+    expect(usage['my-provider']?.outputTokens).toBe(0);
+    expect(Number.isNaN(usage['my-provider']?.inputTokens ?? 0)).toBe(false);
+  });
+});

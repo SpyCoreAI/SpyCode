@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { freshConfigDir } from './helpers.js';
 import { JsonRpcEndpoint } from '../src/lib/acp/jsonrpc.js';
 import { AcpAgentServer, ACP_PROTOCOL_VERSION } from '../src/lib/acp/server.js';
+import type { BudgetCaps } from '../src/lib/agent/budget.js';
 import type { Provider, ProviderEvent, StreamChatParams, CreateConversationParams } from '../src/lib/providers/types.js';
 
 /**
@@ -162,7 +163,10 @@ let endpointDone: Promise<void>;
 // generic's constraint, and MockInstance is invariant in its fn type.
 let stdoutSpy: MockInstance<typeof process.stdout.write>;
 
-function startServer(provider: Provider, opts: { authed?: () => Promise<boolean>; requiresAuth?: boolean } = {}): void {
+function startServer(
+  provider: Provider,
+  opts: { authed?: () => Promise<boolean>; requiresAuth?: boolean; budgetCaps?: BudgetCaps } = {},
+): void {
   client = new FakeAcpClient();
   const endpoint = new JsonRpcEndpoint(client.toServer, client.fromServer);
   new AcpAgentServer({
@@ -175,6 +179,7 @@ function startServer(provider: Provider, opts: { authed?: () => Promise<boolean>
     agentVersion: '0.0.0-test',
     commandTimeoutMs: 10_000,
     maxTurns: 10,
+    budgetCaps: opts.budgetCaps,
   });
   endpointDone = endpoint.start();
 }
@@ -449,6 +454,33 @@ describe('acp cancellation', () => {
   });
 });
 
+describe('acp budget caps', () => {
+  test('maxTokens stops the prompt with max_tokens, and the next prompt gets a fresh budget', async () => {
+    // Each tool turn reports 1 input + 1 output token, so a 1-token cap trips
+    // at the turn boundary after the first dispatched tool call.
+    const provider = new StubProvider([
+      nativeToolTurn([{ id: 'c1', name: 'write_file', arguments: JSON.stringify({ path: 'cap1.txt', content: '1' }) }]),
+      nativeToolTurn([{ id: 'c2', name: 'write_file', arguments: JSON.stringify({ path: 'cap2.txt', content: '2' }) }]),
+    ]);
+    startServer(provider, { budgetCaps: { maxTokens: 1 } });
+    const sessionId = await newSession();
+
+    const first = await client.request('session/prompt', { sessionId, prompt: promptBlocks('write cap1') });
+    expect((first.result as { stopReason: string }).stopReason).toBe('max_tokens');
+    expect(readFileSync(join(workDir, 'cap1.txt'), 'utf8')).toBe('1');
+    // The second turn never started - the cap stopped the run at the boundary.
+    expect(provider.calls).toHaveLength(1);
+
+    // Fresh budget per prompt: with a budget carried over from the first
+    // prompt the second run would stop before its first turn and write
+    // nothing. Instead its tool call dispatches, then the cap trips again.
+    const second = await client.request('session/prompt', { sessionId, prompt: promptBlocks('write cap2') });
+    expect((second.result as { stopReason: string }).stopReason).toBe('max_tokens');
+    expect(readFileSync(join(workDir, 'cap2.txt'), 'utf8')).toBe('2');
+    expect(provider.calls).toHaveLength(2);
+  });
+});
+
 describe('acp wire hygiene', () => {
   test('every server frame is valid JSON-RPC 2.0 (stdout purity of the protocol stream)', async () => {
     const provider = new StubProvider([
@@ -469,5 +501,77 @@ describe('acp wire hygiene', () => {
     startServer(new StubProvider([]));
     const resp = await client.request('session/load', { sessionId: 'x' });
     expect(resp.error?.code).toBe(-32601);
+  });
+});
+
+describe('JsonRpcEndpoint 4c (framing caps, request timeout, string ids)', () => {
+  function makeEndpoint(): {
+    input: PassThrough;
+    endpoint: JsonRpcEndpoint;
+    frames: Array<Record<string, unknown>>;
+    done: Promise<void>;
+  } {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const endpoint = new JsonRpcEndpoint(input, output);
+    const frames: Array<Record<string, unknown>> = [];
+    let buf = '';
+    output.setEncoding('utf8');
+    output.on('data', (chunk: string) => {
+      buf += chunk;
+      let nl = buf.indexOf('\n');
+      while (nl !== -1) {
+        const line = buf.slice(0, nl);
+        buf = buf.slice(nl + 1);
+        if (line.trim().length > 0) frames.push(JSON.parse(line) as Record<string, unknown>);
+        nl = buf.indexOf('\n');
+      }
+    });
+    endpoint.on('echo', async (params) => params);
+    const done = endpoint.start();
+    return { input, endpoint, frames, done };
+  }
+
+  const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 25));
+
+  test('a response with a string id is not an invalid-request error', async () => {
+    const { input, frames, done } = makeEndpoint();
+    input.write('{"jsonrpc":"2.0","id":"abc","result":{}}\n');
+    await tick();
+    // No error frame: an unsolicited string-id response is ignored, not
+    // answered with -32600 (the old code only recognised numeric ids).
+    expect(frames.filter((f) => (f.error as { code?: number } | undefined)?.code === -32600)).toHaveLength(0);
+    input.end();
+    await done;
+  });
+
+  test('an outbound request rejects on timeout instead of hanging forever', async () => {
+    const { input, endpoint, done } = makeEndpoint();
+    await expect(
+      endpoint.request('session/request_permission', {}, { timeoutMs: 50 }),
+    ).rejects.toThrow(/timed out after/);
+    input.end();
+    await done;
+  });
+
+  test('a newline-less line past the cap is dropped with a parse error and the endpoint survives', async () => {
+    const { input, frames, done } = makeEndpoint();
+    input.write('x'.repeat(1_048_577));
+    await tick();
+    expect(
+      frames.some(
+        (f) =>
+          (f.error as { code?: number; message?: string } | undefined)?.code === -32700 &&
+          ((f.error as { message?: string }).message ?? '').includes('line too long'),
+      ),
+    ).toBe(true);
+    // Still alive: a normal request afterwards gets its result.
+    input.write('{"jsonrpc":"2.0","id":7,"method":"echo","params":{"a":1}}\n');
+    await tick();
+    expect(
+      frames.some((f) => f.id === 7 && JSON.stringify(f.result) === JSON.stringify({ a: 1 })),
+    ).toBe(true);
+    input.end();
+    await done;
   });
 });

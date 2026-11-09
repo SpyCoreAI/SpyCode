@@ -88,6 +88,13 @@ export async function clearToken(): Promise<void> {
 }
 
 export async function isAuthenticated(): Promise<boolean> {
+  // Any non-empty token authenticates requests - getToken() returns a
+  // SPYCORE_TOKEN verbatim, with no prefix requirement. The old
+  // `spycli_` prefix check disagreed with that: a token without the
+  // prefix authenticated every request while whoami/ping reported
+  // "Not logged in". A stored token from another tool is still the
+  // user's own credential surface, not a foreign one - the prefix was
+  // never an authentication boundary, only a display convention.
   const t = await getToken();
-  return Boolean(t && t.startsWith('spycli_'));
+  return Boolean(t);
 }

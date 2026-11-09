@@ -93,6 +93,15 @@ const BLOCKING_EVENTS: ReadonlySet<HookEvent> = new Set(['prompt-submit', 'pre-t
 
 export const HOOK_TIMEOUT_DEFAULT_MS = 30_000;
 export const HOOK_TIMEOUT_CAP_MS = 120_000;
+/** Max hooks run for one event: N hooks x the 120s per-hook cap, sequential. */
+export const HOOK_MAX_PER_EVENT = 10;
+/**
+ * Total wall-clock budget for ALL hooks of one event (ms). The per-hook
+ * cap alone bounds one hook; without a total cap N hooks could hold an
+ * event for N x 120s. 5 minutes: generous for a handful of guards, still
+ * a hard ceiling.
+ */
+export const HOOK_TOTAL_BUDGET_MS = 300_000;
 /** Cap on the post-tool feedback block fed to the model. */
 export const HOOK_FEEDBACK_MAX_CHARS = 4_000;
 /** Caps on what the payload carries (digests, not full content). */
@@ -615,6 +624,18 @@ export async function fireHookEvent(
   const result: HookFireResult = { blocked: false, blockReason: null, feedback: null, notices: [] };
   const hooks = session.hooks.filter((h) => h.event === event);
   if (hooks.length === 0) return result;
+  // Count cap: extra hooks for this event are skipped, with a notice -
+  // never silently run, never silently dropped.
+  if (hooks.length > HOOK_MAX_PER_EVENT) {
+    result.notices.push(
+      `Hooks: ${hooks.length - HOOK_MAX_PER_EVENT} ${event} hook(s) skipped (max ${HOOK_MAX_PER_EVENT} per event).`,
+    );
+  }
+  const selected = hooks.slice(0, HOOK_MAX_PER_EVENT);
+  // Total budget: the per-hook cap bounds one hook, this deadline bounds
+  // the whole event. Each hook runs with the smaller of its own timeout
+  // and the budget remaining.
+  const deadline = Date.now() + HOOK_TOTAL_BUDGET_MS;
 
   const payload = JSON.stringify({
     event,
@@ -634,10 +655,21 @@ export async function fireHookEvent(
       : {}),
   });
 
-  for (const hook of hooks) {
+  for (const hook of selected) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      result.notices.push(
+        `Hook (${event}) skipped: total hook budget of ${Math.round(HOOK_TOTAL_BUDGET_MS / 1000)}s for this event is exhausted.`,
+      );
+      break;
+    }
+    const effective: LoadedHook =
+      hook.timeoutMs > remaining
+        ? { ...hook, timeoutMs: Math.max(1, remaining) }
+        : hook;
     let outcome: SpawnOutcome;
     try {
-      outcome = await runHookCommand(hook, payload, session.cwd);
+      outcome = await runHookCommand(effective, payload, session.cwd);
     } catch (err) {
       result.notices.push(
         `Hook (${event}) failed to run: ${sanitizeForDisplay(err instanceof Error ? err.message : String(err)).slice(0, NOTICE_CAP)}`,
@@ -652,7 +684,7 @@ export async function fireHookEvent(
     }
     if (outcome.timedOut) {
       result.notices.push(
-        `Hook (${event}) timed out after ${Math.round(hook.timeoutMs / 1000)}s and was killed [${shortCmd(hook.command)}].`,
+        `Hook (${event}) timed out after ${Math.round(effective.timeoutMs / 1000)}s and was killed [${shortCmd(hook.command)}].`,
       );
       continue;
     }

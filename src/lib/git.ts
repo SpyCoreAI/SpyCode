@@ -21,6 +21,37 @@ const GIT_TIMEOUT_MS = 15_000;
 /** Diffs can be large; give reads a generous buffer (default is 1 MB). */
 const GIT_MAX_BUFFER = 64 * 1024 * 1024;
 
+/**
+ * A caller-controlled ref/base/name that starts with `-` would parse as a
+ * git OPTION once placed in argv (option injection). git has no `--`
+ * separator that works here - `log`/`diff` treat a post-`--` range as a
+ * pathspec, and `switch -c -- <name>` reads `--` as the branch name - so
+ * dash-leading values are refused outright, before git ever sees them.
+ * `--end-of-options` is still passed for the rev-taking commands as a
+ * second layer: it keeps a normal range parsed as revs, never as options.
+ */
+function invalidRefValue(value: string): string | null {
+  if (value.length === 0) return 'empty value';
+  if (value.startsWith('-')) return `starts with \`-\` (${value})`;
+  return null;
+}
+
+/** Branch-name shape check (git check-ref-format rules, conservative subset). */
+function invalidBranchName(name: string): string | null {
+  if (name.length === 0) return 'empty value';
+  if (name.startsWith('-')) return `starts with \`-\` (${name})`;
+  if (name.startsWith('/') || name.endsWith('/')) return `leading/trailing slash (${name})`;
+  if (name.includes('..')) return `contains \`..\` (${name})`;
+  if (name.includes('//')) return `contains \`//\` (${name})`;
+  if (name.endsWith('.lock') || name.endsWith('.')) return `invalid suffix (${name})`;
+  if (name.includes('@{') || name === '@') return `contains an invalid sequence (${name})`;
+  // eslint-disable-next-line no-control-regex
+  if (/[\s~^:?*\[\\]/.test(name) || /[\u0000-\u001f\u007f]/.test(name)) {
+    return `contains an invalid character (${name})`;
+  }
+  return null;
+}
+
 export interface GitResult {
   ok: boolean;
   stdout: string;
@@ -175,12 +206,20 @@ export function unpushedCount(cwd: string): number {
 
 /** Commit subjects on this branch that the base doesn't have. */
 export function branchLog(cwd: string, base: string): GitResult {
-  return runGit(cwd, ['log', '--oneline', '--no-color', `${base}..HEAD`]);
+  const bad = invalidRefValue(base);
+  if (bad) {
+    return { ok: false, stdout: '', stderr: `refusing unsafe git base: ${bad}` };
+  }
+  return runGit(cwd, ['log', '--oneline', '--no-color', '--end-of-options', `${base}..HEAD`]);
 }
 
 /** Merge-base diff of this branch vs the base (three-dot). */
 export function branchDiff(cwd: string, base: string): GitResult {
-  return runGit(cwd, ['diff', '--no-color', `${base}...HEAD`]);
+  const bad = invalidRefValue(base);
+  if (bad) {
+    return { ok: false, stdout: '', stderr: `refusing unsafe git base: ${bad}` };
+  }
+  return runGit(cwd, ['diff', '--no-color', '--end-of-options', `${base}...HEAD`]);
 }
 
 /** Push the current branch. WRITE - reachable only behind `--push` + confirm. */
@@ -193,10 +232,17 @@ export function pushCurrentBranch(cwd: string): GitResult {
 
 /** True when a local branch with this name already exists. */
 export function branchExists(cwd: string, name: string): boolean {
+  // The `refs/heads/` prefix already keeps a dash-leading name out of
+  // option position; reject it anyway so a bogus name never reaches git.
+  if (invalidBranchName(name)) return false;
   return runGit(cwd, ['rev-parse', '-q', '--verify', `refs/heads/${name}`]).ok;
 }
 
 /** Create and switch to a new branch. WRITE - confirm-gated. */
 export function createAndSwitchBranch(cwd: string, name: string): GitResult {
+  const bad = invalidBranchName(name);
+  if (bad) {
+    return { ok: false, stdout: '', stderr: `refusing unsafe branch name: ${bad}` };
+  }
   return runGit(cwd, ['switch', '-c', name]);
 }

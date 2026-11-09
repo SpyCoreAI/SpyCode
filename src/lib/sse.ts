@@ -50,6 +50,59 @@ export interface ParseSSEOpts {
 export const DEFAULT_SSE_IDLE_TIMEOUT_MS = 60_000;
 
 /**
+ * Cap on an error/success JSON body read via {@link readCappedJson}: error
+ * bodies are small diagnostics, never bulk payloads - anything past this
+ * is treated as unparseable rather than read into memory unboundedly.
+ */
+export const ERROR_BODY_MAX_BYTES = 1_048_576;
+
+/**
+ * Read a response body as JSON with a size cap. Real undici bodies are
+ * async-iterable, so they stream through the cap; bodies that only offer
+ * `.json()` (test doubles, non-streaming transports) fall back to it.
+ * Returns null past the cap, on a read fault, or on malformed JSON.
+ */
+export async function readCappedJson(body: unknown): Promise<unknown | null> {
+  const b = body as {
+    json?: () => Promise<unknown>;
+    destroy?: (err?: Error) => void;
+    [Symbol.asyncIterator]?: () => AsyncIterator<Uint8Array>;
+  } | null;
+  if (!b || typeof b !== 'object') return null;
+  if (typeof b[Symbol.asyncIterator] === 'function') {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    try {
+      for await (const chunk of b as AsyncIterable<Uint8Array>) {
+        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        total += buf.length;
+        if (total > ERROR_BODY_MAX_BYTES) {
+          try {
+            b.destroy?.();
+          } catch {
+            /* best-effort */
+          }
+          return null;
+        }
+        chunks.push(buf);
+      }
+    } catch {
+      return null;
+    }
+    try {
+      return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
+    } catch {
+      return null;
+    }
+  }
+  try {
+    return (await b.json?.()) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Idle-timeout wrapper for SSE chunk iteration. Each chunk resets the
  * clock; when no chunk arrives within `idleMs` the wait is abandoned and a
  * `SpycoreCliError` (`EXIT_NETWORK_ERROR`) is thrown so a quiet-but-open
@@ -168,18 +221,21 @@ export async function* parseSSEStream(
       { stream: true },
     );
     parser.feed(text);
-    while (queue.length > 0) {
-      const next = queue.shift();
-      if (next) yield next;
+    // Drain by index, not queue.shift(): shift() is O(n) per event, so a
+    // long stream drained quadratically. Clearing the array after the
+    // drain keeps the buffer bounded between chunks.
+    for (let i = 0; i < queue.length; i += 1) {
+      yield queue[i] as StreamEvent;
     }
+    queue.length = 0;
   }
   // Flush trailing decoder bytes (rare but possible at exact UTF-8 boundary).
   const tail = decoder.decode();
   if (tail.length > 0) parser.feed(tail);
-  while (queue.length > 0) {
-    const next = queue.shift();
-    if (next) yield next;
+  for (let i = 0; i < queue.length; i += 1) {
+    yield queue[i] as StreamEvent;
   }
+  queue.length = 0;
 }
 
 /**
@@ -406,11 +462,10 @@ async function safeReadJson(body: { json: () => Promise<unknown> }): Promise<{
   error?: string;
   message?: string;
 } | null> {
-  try {
-    return (await body.json()) as { error?: string; message?: string };
-  } catch {
-    return null;
-  }
+  // Capped read: an error body is a diagnostic, never a bulk payload.
+  const parsed = await readCappedJson(body);
+  if (!parsed || typeof parsed !== 'object') return null;
+  return parsed as { error?: string; message?: string };
 }
 
 function mapHttpFailure(
@@ -573,11 +628,13 @@ export async function* streamRequest<T = unknown>(
 
   try {
     while (true) {
-      if (queue.length > 0) {
-        const next = queue.shift();
+      // Drain by index, not queue.shift() (O(n) per event - see
+      // parseSSEStream above for why the shift() drain was quadratic).
+      for (let i = 0; i < queue.length; i += 1) {
+        const next = queue[i] as StreamEvent;
         if (next) yield next;
-        continue;
       }
+      queue.length = 0;
       if (done) break;
       const next = await new Promise<StreamEvent | null>((resolve) => {
         resolveNext = resolve;

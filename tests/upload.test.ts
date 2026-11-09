@@ -369,3 +369,74 @@ describe('S1: bufferStdinToTempFile path traversal', () => {
     }
   });
 });
+
+describe('uploadFile 4c limits (timeout, size cap, missing path)', () => {
+  test('missing path throws SpycoreCliError (not raw ENOENT) and never hits the network', async () => {
+    responder = () => {
+      throw new Error('no network expected');
+    };
+    const { uploadFile } = await import('../src/lib/upload.js');
+    const { isSpycoreCliError } = await import('../src/lib/errors.js');
+    let caught: unknown = null;
+    try {
+      await uploadFile({
+        path: join(workDir, 'does-not-exist.txt'),
+        url: 'https://api.example.com/api/files/upload',
+      });
+    } catch (err) {
+      caught = err;
+    }
+    expect(isSpycoreCliError(caught)).toBe(true);
+    if (isSpycoreCliError(caught)) {
+      expect(caught.message).toMatch(/No such file/);
+    }
+  });
+
+  test('file over maxBytes is refused before any network call', async () => {
+    const file = join(workDir, 'over.txt');
+    writeFileSync(file, Buffer.alloc(64));
+    responder = () => {
+      throw new Error('no network expected');
+    };
+    const { uploadFile } = await import('../src/lib/upload.js');
+    const { isSpycoreCliError } = await import('../src/lib/errors.js');
+    let caught: unknown = null;
+    try {
+      await uploadFile({
+        path: file,
+        url: 'https://api.example.com/api/files/upload',
+        maxBytes: 10,
+      });
+    } catch (err) {
+      caught = err;
+    }
+    expect(isSpycoreCliError(caught)).toBe(true);
+    if (isSpycoreCliError(caught)) {
+      expect(caught.message).toMatch(/too large to upload/);
+    }
+  });
+
+  test('default timeout aborts the request signal (undici mock never settles)', async () => {
+    const file = join(workDir, 'stall.txt');
+    writeFileSync(file, Buffer.alloc(8));
+    // Never-settling responder: the only thing that can end this upload
+    // is the timeout signal aborting.
+    responder = (() => new Promise<never>(() => {})) as never;
+    const { request } = await import('undici');
+    const { uploadFile } = await import('../src/lib/upload.js');
+    const p = uploadFile({
+      path: file,
+      url: 'https://api.example.com/api/files/upload',
+      timeoutMs: 50,
+    });
+    // Never awaited: the mock ignores the signal, so the promise cannot
+    // settle - only the signal itself is under test here.
+    p.catch(() => {});
+    await new Promise((r) => setTimeout(r, 200));
+    const calls = (request as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    const init = calls[calls.length - 1]![1] as { signal?: AbortSignal };
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+    expect(init.signal?.aborted).toBe(true);
+  });
+});

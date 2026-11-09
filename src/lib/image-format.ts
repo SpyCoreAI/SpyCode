@@ -13,7 +13,7 @@
  * extension beats crashing on an empty/garbled response.
  */
 
-export type ImageExtension = '.jpg' | '.png' | '.webp' | '.gif';
+export type ImageExtension = '.jpg' | '.png' | '.webp' | '.gif' | '.avif';
 
 const DEFAULT_EXTENSION: ImageExtension = '.png';
 
@@ -33,13 +33,15 @@ function extensionForContentType(contentType: string): ImageExtension | null {
       return '.webp';
     case 'image/gif':
       return '.gif';
+    case 'image/avif':
+      return '.avif';
     default:
       return null;
   }
 }
 
 /**
- * Detect an image format from its leading bytes. Covers the four encodings the
+ * Detect an image format from its leading bytes. Covers the five encodings the
  * endpoint can plausibly emit. Returns null when nothing matches.
  */
 function sniffMagicBytes(head: Buffer): ImageExtension | null {
@@ -68,6 +70,16 @@ function sniffMagicBytes(head: Buffer): ImageExtension | null {
   // GIF - "GIF8" (covers GIF87a / GIF89a)
   if (head.length >= 4 && head.toString('ascii', 0, 4) === 'GIF8') {
     return '.gif';
+  }
+  // AVIF - ISO-BMFF "ftyp" box with a "avif" (or "avis" sequence) brand:
+  // bytes 4-8 "ftyp", bytes 8-12 the major brand.
+  if (
+    head.length >= 12 &&
+    head.toString('ascii', 4, 8) === 'ftyp' &&
+    (head.toString('ascii', 8, 12) === 'avif' ||
+      head.toString('ascii', 8, 12) === 'avis')
+  ) {
+    return '.avif';
   }
   return null;
 }

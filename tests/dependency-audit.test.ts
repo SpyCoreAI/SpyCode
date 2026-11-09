@@ -201,3 +201,28 @@ describe('resolvePnpmCommand + buildCmdCommandLine (injected win32, runs on Linu
     });
   });
 });
+
+describe('known-advisory waiver matches the version exactly', () => {
+  const known = (versions: string) => ({
+    advisories: {
+      '1': {
+        id: 'GHSA-vfj7-8cjw-p6xm',
+        severity: 'high',
+        package_name: 'braces',
+        vulnerable_versions: versions,
+      },
+    },
+  });
+
+  test('3.0.30 does NOT match the 3.0.3 waiver (substring trap)', () => {
+    expect(() => evaluateAuditReport(known('3.0.30'))).toThrow(/1 high\/critical advisorie/);
+  });
+
+  test('an exact 3.0.3 token is still waived (patch wired in this tree)', () => {
+    expect(evaluateAuditReport(known('3.0.3'))).toEqual({ scanned: 1, waived: 1, blocked: 0 });
+  });
+
+  test('a range token naming 3.0.3 exactly is still waived', () => {
+    expect(evaluateAuditReport(known('<=3.0.3'))).toEqual({ scanned: 1, waived: 1, blocked: 0 });
+  });
+});

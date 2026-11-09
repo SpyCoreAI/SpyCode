@@ -160,3 +160,44 @@ describe('commitWithMessageFile', () => {
     expect(r.stderr).toBe('');
   });
 });
+
+describe('branch helpers refuse dash-leading refs (argv injection)', () => {
+  test('branchLog/branchDiff refuse a base starting with `-`', async () => {
+    const { branchLog, branchDiff } = await import('../src/lib/git.js');
+    const log = branchLog(dir, '--upload-pack=touch /tmp/pwn');
+    expect(log.ok).toBe(false);
+    expect(log.stderr).toMatch(/refusing unsafe git base/);
+    const diff = branchDiff(dir, '--ext-diff');
+    expect(diff.ok).toBe(false);
+    expect(diff.stderr).toMatch(/refusing unsafe git base/);
+  });
+
+  test('branchLog still lists commits for a normal base', async () => {
+    const { branchLog } = await import('../src/lib/git.js');
+    commitFile('a.txt', 'a', 'first commit');
+    expect(runGit(dir, ['checkout', '-b', 'feature']).ok).toBe(true);
+    commitFile('b.txt', 'b', 'second commit');
+    const r = branchLog(dir, 'main');
+    expect(r.ok).toBe(true);
+    expect(r.stdout).toContain('second commit');
+    expect(r.stdout).not.toContain('first commit');
+  });
+
+  test('branchExists/createAndSwitchBranch refuse dash-leading names', async () => {
+    const { branchExists, createAndSwitchBranch } = await import('../src/lib/git.js');
+    expect(branchExists(dir, '--weird')).toBe(false);
+    const created = createAndSwitchBranch(dir, '-weird');
+    expect(created.ok).toBe(false);
+    expect(created.stderr).toMatch(/refusing unsafe branch name/);
+    const slash = createAndSwitchBranch(dir, 'a/../b');
+    expect(slash.ok).toBe(false);
+  });
+
+  test('createAndSwitchBranch still creates a normal branch', async () => {
+    const { createAndSwitchBranch, currentBranch } = await import('../src/lib/git.js');
+    commitFile('a.txt', 'a', 'first commit');
+    const r = createAndSwitchBranch(dir, 'feat/test-branch');
+    expect(r.ok).toBe(true);
+    expect(currentBranch(dir)).toBe('feat/test-branch');
+  });
+});

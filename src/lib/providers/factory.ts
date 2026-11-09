@@ -75,12 +75,13 @@ export async function createByokProvider(config: ByokConfig): Promise<Provider> 
         // from one) so the next process does not retry with a revoked token.
         let currentRefreshToken = config.oauthRefreshToken;
         const refresh = async (): Promise<string> => {
-          // refreshAccessToken has no timeout of its own (its fetch takes
-          // no signal - see the lib batch's oauth.ts follow-up), so bound
-          // it here: a hung token endpoint must fail the refresh after
-          // 30s instead of hanging provider construction - or a mid-run
-          // 401 retry - forever. The race only unblocks the caller; the
-          // underlying fetch still settles on its own.
+          // Belt and braces: refreshAccessToken aborts its own fetch
+          // after 30s (AbortSignal.timeout), and this race bounds the
+          // caller the same way - a hung token endpoint must fail the
+          // refresh after 30s instead of hanging provider construction -
+          // or a mid-run 401 retry - forever. Either timeout yields a
+          // timeout error; the inner one is what actually closes the
+          // fetch, so the race no longer leaves a hung request behind.
           const tokens = await withTimeout(
             refreshAccessToken(oauthConfig, currentRefreshToken),
             OAUTH_REFRESH_TIMEOUT_MS,

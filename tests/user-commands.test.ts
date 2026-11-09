@@ -609,3 +609,21 @@ describe('F6 resolver + registry integration', () => {
     if (outcome.kind === 'user-command') expect(outcome.message).toBe('sync a.ts.');
   });
 });
+
+describe('splitNamedArgFlags unterminated quote', () => {
+  test('an unterminated quote drops the flag with a notice - no stray quote, no swallowed value', async () => {
+    const { splitNamedArgFlags } = await import('../src/lib/slash/user-commands.js');
+    const r = splitNamedArgFlags(['pos', '--arg', 'MESSAGE="ship', 'it', 'friday']);
+    expect(r.positional).toEqual(['pos']);
+    expect(r.named).toEqual({});
+    expect(r.notices).toHaveLength(1);
+    expect(r.notices[0]).toMatch(/unterminated quote/);
+  });
+
+  test('a terminated multi-token quote still works after the fix', async () => {
+    const { splitNamedArgFlags } = await import('../src/lib/slash/user-commands.js');
+    const r = splitNamedArgFlags(['--arg', 'MESSAGE="ship', 'it', 'friday"', 'tail']);
+    expect(r.named).toEqual({ MESSAGE: 'ship it friday' });
+    expect(r.positional).toEqual(['tail']);
+  });
+});

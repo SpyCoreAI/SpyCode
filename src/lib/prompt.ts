@@ -90,10 +90,10 @@ export async function readSingleLineInput(prompt: string): Promise<string> {
 /**
  * Read a multi-line message. The user sees the `prompt` once, then types
  * across N lines. We finish on EITHER:
- * - an empty line followed by Enter (matches the Unix-y "blank line ends
- * paragraph" intuition)
+ * - two empty lines in a row ("send") - a single empty line is kept as a
+ *   paragraph break, so a blank line inside the message does not end it
  * - EOF (Ctrl+D on Unix, Ctrl+Z + Enter on Windows)
- * Returns the joined input WITHOUT the trailing blank line.
+ * Returns the joined input WITHOUT the trailing blank lines.
  */
 export async function readMultilineInput(opts?: {
   prompt?: string;
@@ -124,18 +124,17 @@ export async function readMultilineInput(opts?: {
 
     rl.on('line', (line) => {
       if (line === '' && lastWasEmpty) {
-        // Two empty lines in a row = "send" - drop the most recent and finish.
-        if (lines.length > 0) lines.pop();
-        finish();
-        return;
-      }
-      if (line === '' && lines.length > 0) {
-        lastWasEmpty = true;
+        // Two empty lines in a row = "send" - drop the trailing blank line
+        // and finish. (finish() also strips trailing newlines.)
+        if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
         finish();
         return;
       }
       if (line === '') {
+        // First empty line: a paragraph break inside the message, kept -
+        // only a second consecutive empty line sends.
         lastWasEmpty = true;
+        lines.push('');
         return;
       }
       lastWasEmpty = false;

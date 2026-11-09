@@ -103,6 +103,9 @@ export function clampWireAssembly(
 
   // Mathematical last resort (fixed parts alone above the cap - unreachable
   // in practice): tail-cut the final texts so the invariant NEVER breaks.
+  // The cut NEVER deletes a part silently: when no room for a body stub
+  // remains, the part becomes an explicit omission marker (truncated to
+  // the room left, if even the marker does not fit whole).
   if (total > maxChars) {
     for (let i = parts.length - 1; i >= 0 && total > maxChars; i -= 1) {
       const over = total - maxChars;
@@ -110,7 +113,11 @@ export function clampWireAssembly(
       const p = parts[i]!;
       const marker = truncMarker(p.label);
       const keep = t.length - over - marker.length;
-      const next = keep > 0 ? `${t.slice(0, keep)}${marker}` : '';
+      const room = Math.max(0, t.length - over);
+      const next =
+        keep > 0
+          ? `${t.slice(0, keep)}${marker}`
+          : omitMarker(p.label).slice(0, room);
       total -= t.length - next.length;
       texts[i] = next;
       if (next !== t) trimmed.push(p.label);

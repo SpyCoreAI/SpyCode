@@ -127,3 +127,53 @@ describe('fireHookEvent outcomes', () => {
     expect(payload.tool.args).toBe('{}');
   });
 });
+
+describe('fireHookEvent caps (4c)', () => {
+  test('at most HOOK_MAX_PER_EVENT hooks run per event; the rest are skipped with a notice', async () => {
+    const { HOOK_MAX_PER_EVENT } = await import('../src/lib/hooks.js');
+    expect(HOOK_MAX_PER_EVENT).toBe(10);
+    const hooks = Array.from({ length: 12 }, (_, i) => ({
+      event: 'pre-tool' as const,
+      command: `echo hook-${i}`,
+      timeoutMs: 5000,
+      scope: 'user' as const,
+    }));
+    const result = await fireHookEvent(
+      { cwd: workDir, sessionId: 'test', hooks, notices: [] },
+      'pre-tool',
+    );
+    expect(result.blocked).toBe(false);
+    expect(result.notices.some((n) => n.includes('2 pre-tool hook(s) skipped'))).toBe(true);
+    // Exactly 10 hooks ran: one notice per hook-0..9 stdout tail.
+    expect(result.notices.filter((n) => n.startsWith('Hook (pre-tool):')).length).toBe(10);
+  });
+
+  test('the total budget stops later hooks once exhausted (Date.now mocked)', async () => {
+    const { HOOK_TOTAL_BUDGET_MS } = await import('../src/lib/hooks.js');
+    expect(HOOK_TOTAL_BUDGET_MS).toBe(300_000);
+    // Date.now calls in fireHookEvent, in order: deadline, remaining
+    // before hook 1, remaining before hook 2, ... - jump past the
+    // deadline after the first hook.
+    const nowValues = [0, 0, HOOK_TOTAL_BUDGET_MS + 1];
+    let calls = 0;
+    const origNow = Date.now;
+    Date.now = () => nowValues[Math.min(calls++, nowValues.length - 1)] ?? 0;
+    try {
+      const hooks = [0, 1].map((i) => ({
+        event: 'pre-tool' as const,
+        command: `echo hook-${i}`,
+        timeoutMs: 5000,
+        scope: 'user' as const,
+      }));
+      const result = await fireHookEvent(
+        { cwd: workDir, sessionId: 'test', hooks, notices: [] },
+        'pre-tool',
+      );
+      expect(result.notices.some((n) => n.includes('Hook (pre-tool): hook-0'))).toBe(true);
+      expect(result.notices.some((n) => n.includes('total hook budget'))).toBe(true);
+      expect(result.notices.some((n) => n.includes('hook-1'))).toBe(false);
+    } finally {
+      Date.now = origNow;
+    }
+  });
+});

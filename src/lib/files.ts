@@ -88,6 +88,17 @@ export function relativeTime(iso: string): string {
   const ts = Date.parse(iso);
   if (Number.isNaN(ts)) return '';
   const diffSec = Math.floor((Date.now() - ts) / 1000);
+  // Future timestamps are "in …", never a negative "… ago".
+  if (diffSec < 0) {
+    const s = -diffSec;
+    if (s < 60) return `in ${s}s`;
+    if (s < 3600) return `in ${Math.floor(s / 60)}m`;
+    if (s < 86400) return `in ${Math.floor(s / 3600)}h`;
+    if (s < 86400 * 7) return `in ${Math.floor(s / 86400)}d`;
+    if (s < 86400 * 30) return `in ${Math.floor(s / (86400 * 7))}w`;
+    if (s < 86400 * 365) return `in ${Math.floor(s / (86400 * 30))}mo`;
+    return `in ${Math.floor(s / (86400 * 365))}y`;
+  }
   if (diffSec < 60) return `${diffSec}s ago`;
   if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
   if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;

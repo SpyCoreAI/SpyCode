@@ -488,3 +488,36 @@ describe('skills remove', () => {
     expect(existsSync(join(configDir, 'skills', 'keepme', 'SKILL.md'))).toBe(true);
   });
 });
+
+describe('generateValidSkill output cap (4c)', () => {
+  test('a runaway provider stream throws instead of accumulating forever', async () => {
+    const { generateValidSkill, SKILL_GEN_MAX_TEXT_CHARS } = await import(
+      '../src/lib/skills-create.js'
+    );
+    const { isSpycoreCliError } = await import('../src/lib/errors.js');
+    expect(SKILL_GEN_MAX_TEXT_CHARS).toBe(256_000);
+    const fakeProvider = {
+      streamChat: async function* () {
+        yield { type: 'text', text: 'x'.repeat(SKILL_GEN_MAX_TEXT_CHARS + 1) };
+      },
+    };
+    let caught: unknown = null;
+    try {
+      await generateValidSkill(
+        {
+          provider: fakeProvider as never,
+          conversationId: 'c_test',
+          model: 'hermes',
+        },
+        'runaway-skill',
+        'Write the skill now.',
+      );
+    } catch (err) {
+      caught = err;
+    }
+    expect(isSpycoreCliError(caught)).toBe(true);
+    if (isSpycoreCliError(caught)) {
+      expect(caught.message).toMatch(/output limit/);
+    }
+  });
+});

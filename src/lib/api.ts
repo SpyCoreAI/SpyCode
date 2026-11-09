@@ -1,5 +1,6 @@
 import { request } from 'undici';
 import { getToken } from './auth.js';
+import { readCappedJson } from './sse.js';
 import { isTrustedTokenHost, normalizeApiBase, resolveApiUrl } from './config.js';
 import {
   EXIT_AUTH_ERROR,
@@ -141,12 +142,8 @@ export async function apiRequest<T>(
   clearTimeout(timeout);
 
   const status = res.statusCode;
-  let parsed: ApiResponse<T> | null = null;
-  try {
-    parsed = (await res.body.json()) as ApiResponse<T>;
-  } catch {
-    // Body wasn't JSON - fall through to the status-code branch below.
-  }
+  // Capped read: an error body is a diagnostic, never a bulk payload.
+  const parsed = (await readCappedJson(res.body)) as ApiResponse<T> | null;
 
   if (status >= 200 && status < 300 && parsed && parsed.success) {
     return parsed.data;
@@ -242,4 +239,4 @@ export const api = {
 // Re-export the streaming helper so commands import everything from one
 // place. The implementation lives in lib/sse.ts because the SSE wiring is
 // substantial and worth its own module + tests.
-export { streamRequest, type StreamEvent } from './sse.js';
+export { readCappedJson, streamRequest, type StreamEvent } from './sse.js';

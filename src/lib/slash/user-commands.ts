@@ -326,9 +326,19 @@ export function splitNamedArgFlags(args: string[]): SplitArgsResult {
       if (after.length > 0 && (after[0] === '"' || after[0] === "'")) {
         const q = after[0];
         let value = after;
-        while (i < args.length && !(value.length > 1 && value.endsWith(q))) {
+        // Track closure explicitly: the old loop condition re-checked the
+        // suffix each pass but, when no closing quote ever arrived,
+        // consumed every remaining arg and then left a stray leading
+        // quote in the value via stripArgQuotes.
+        let closed = value.length > 1 && value.endsWith(q);
+        while (i < args.length && !closed) {
           value += ` ${args[i] ?? ''}`;
           i += 1;
+          closed = value.length > 1 && value.endsWith(q);
+        }
+        if (!closed) {
+          fail('unterminated quote in --arg value');
+          continue;
         }
         flag = `${flag.slice(0, eq + 1)}${stripArgQuotes(value)}`;
       }

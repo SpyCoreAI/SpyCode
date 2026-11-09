@@ -752,6 +752,7 @@ describe('§12 the sink CATEGORIES - prompt, spinner, completion line', () => {
     'src/lib/agent/builtin-tools.ts :: wrapUntrustedWebContent',
     'src/lib/agent/lsp/client.ts :: isObject',
     'src/lib/agent/mcp.ts :: renderContent',
+    'src/lib/git-generate.ts :: appendCappedText',
     'src/lib/git-generate.ts :: collectTurn',
     'src/lib/slash/registry.ts :: conversationToMarkdown',
     'src/lib/version-check.ts :: compareVersions',

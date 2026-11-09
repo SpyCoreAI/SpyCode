@@ -361,3 +361,34 @@ describe('normalizeApiBase', () => {
     expect(normalizeApiBase(once)).toBe('https://api.spycore.ai/api');
   });
 });
+
+describe('apiResponse body size cap', () => {
+  test('a small async-iterable body still parses (streaming path)', async () => {
+    const payload = JSON.stringify({ success: true, data: { ok: 1 } });
+    async function* gen(): AsyncGenerator<Buffer> {
+      yield Buffer.from(payload.slice(0, 10), 'utf8');
+      yield Buffer.from(payload.slice(10), 'utf8');
+    }
+    nextResp = {
+      statusCode: 200,
+      headers: {},
+      body: gen() as unknown as { json: () => Promise<unknown> },
+    };
+    const { api } = await import('../src/lib/api.js');
+    await expect(api.get('/some/path', { anonymous: true })).resolves.toEqual({ ok: 1 });
+  });
+
+  test('an oversized body is treated as unparseable, not read unboundedly', async () => {
+    async function* gen(): AsyncGenerator<Buffer> {
+      yield Buffer.alloc(600_000, 0x61);
+      yield Buffer.alloc(600_000, 0x61);
+    }
+    nextResp = {
+      statusCode: 200,
+      headers: {},
+      body: gen() as unknown as { json: () => Promise<unknown> },
+    };
+    const { api } = await import('../src/lib/api.js');
+    await expect(api.get('/some/path', { anonymous: true })).rejects.toThrow(/HTTP 200/);
+  });
+});

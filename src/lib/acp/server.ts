@@ -44,6 +44,7 @@ function acpNumberConfig(key: string): number | undefined {
   return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
 }
 import { runAgent, DEFAULT_MAX_TURNS, type AgentEvent } from '../agent/loop.js';
+import { createBudget, type BudgetCaps } from '../agent/budget.js';
 import type { Provider } from '../providers/types.js';
 import type { ApprovalRequest, ApprovalOutcome, RequestApproval } from '../agent/approval.js';
 
@@ -94,6 +95,8 @@ export interface AcpServerOptions {
   commandTimeoutMs?: number | undefined;
   /** Max model round-trips per prompt turn. */
   maxTurns?: number | undefined;
+  /** Token / wall-clock caps for each prompt (a fresh budget per prompt). */
+  budgetCaps?: BudgetCaps | undefined;
   /** Web tools (web_search / fetch_url); false removes them entirely. */
   webTools?: boolean | undefined;
   observeWorkspace?: boolean | undefined;
@@ -309,6 +312,9 @@ export class AcpAgentServer {
         model: this.opts.model,
         provider: this.opts.provider,
         maxTurns: this.opts.maxTurns ?? DEFAULT_MAX_TURNS,
+        // Fresh budget per prompt - one prompt is one run, so caps never
+        // carry spend from an earlier prompt in the session.
+        budget: this.opts.budgetCaps ? createBudget(this.opts.budgetCaps) : undefined,
         apiUrlOverride: this.opts.apiUrlOverride,
         signal: abort.signal,
         cwd: session.cwd,

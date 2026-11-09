@@ -300,3 +300,27 @@ describe('powershell completion', () => {
   });
 
 });
+
+describe('bash completion double-quote escaping', () => {
+  test('escapeBashDoubleQuoted neutralizes \\, ", $ and backtick', async () => {
+    const { escapeBashDoubleQuoted } = await import('../src/lib/completion/bash.js');
+    expect(escapeBashDoubleQuoted('plain')).toBe('plain');
+    expect(escapeBashDoubleQuoted('a"b')).toBe('a\\"b');
+    expect(escapeBashDoubleQuoted('a$b')).toBe('a\\$b');
+    expect(escapeBashDoubleQuoted('a`b`')).toBe('a\\`b\\`');
+    expect(escapeBashDoubleQuoted('a\\b')).toBe('a\\\\b');
+    expect(escapeBashDoubleQuoted('a"b$c`d\\e')).toBe('a\\"b\\$c\\`d\\\\e');
+  });
+
+  test('every echo line in the generated script has balanced double-quotes', () => {
+    const out = generateBashCompletion();
+    for (const line of out.split('\n')) {
+      if (!line.includes('echo "')) continue;
+      // Strip escaped quotes, then the remaining " count must be even:
+      // an unescaped inner quote would make it odd and break the line.
+      const unescaped = line.replace(/\\"/g, '');
+      const count = (unescaped.match(/"/g) ?? []).length;
+      expect(count % 2).toBe(0);
+    }
+  });
+});

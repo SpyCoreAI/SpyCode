@@ -8,6 +8,18 @@ import {
   EXIT_USER_ERROR,
   SpycoreCliError,
 } from './errors.js';
+import { readCappedJson } from './sse.js';
+
+/** Default upload timeout: a stalled upload surfaces instead of hanging forever. */
+export const UPLOAD_TIMEOUT_MS = 120_000;
+/**
+ * Client-side size cap: the server's per-plan limit is 20 MB, so anything
+ * above this can never succeed - refuse before streaming instead of
+ * uploading multi-GB files until the server 413s. Generous on purpose:
+ * the server is the authority on plan limits; this cap only stops
+ * pathological inputs. Override with `maxBytes` when a caller knows better.
+ */
+export const UPLOAD_MAX_BYTES = 100 * 1024 * 1024;
 
 export interface UploadFileOpts {
   /** Local path to the file. */
@@ -29,6 +41,13 @@ export interface UploadFileOpts {
   onProgress?: (loaded: number, total: number) => void;
   /** Cancellation. */
   signal?: AbortSignal;
+  /**
+   * Abort the upload when it stalls longer than this (ms).
+   * Defaults to UPLOAD_TIMEOUT_MS; pass 0 or a negative number to disable.
+   */
+  timeoutMs?: number;
+  /** Refuse files larger than this (bytes) before streaming. Defaults to UPLOAD_MAX_BYTES. */
+  maxBytes?: number;
 }
 
 export interface UploadResult {
@@ -52,7 +71,18 @@ export interface UploadResult {
  *   user cancel → EXIT_USER_ERROR (Cancelled)
  */
 export async function uploadFile(opts: UploadFileOpts): Promise<UploadResult> {
-  const stat = statSync(opts.path);
+  let stat: { isFile: () => boolean; size: number };
+  try {
+    stat = statSync(opts.path);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    throw new SpycoreCliError(
+      code === 'ENOENT'
+        ? `No such file: ${opts.path}`
+        : `Cannot read file: ${opts.path}`,
+      EXIT_USER_ERROR,
+    );
+  }
   if (!stat.isFile()) {
     throw new SpycoreCliError(
       `Not a regular file: ${opts.path}`,
@@ -60,6 +90,14 @@ export async function uploadFile(opts: UploadFileOpts): Promise<UploadResult> {
     );
   }
   const totalBytes = stat.size;
+  const maxBytes = opts.maxBytes ?? UPLOAD_MAX_BYTES;
+  if (totalBytes > maxBytes) {
+    throw new SpycoreCliError(
+      `File is too large to upload (${totalBytes} bytes; client limit ${maxBytes} bytes).`,
+      EXIT_USER_ERROR,
+      'The server per-plan limit is lower still - split the file or pick a smaller one.',
+    );
+  }
   const remoteName = opts.remoteName?.trim() || basename(opts.path);
 
   const form = new FormData();
@@ -90,6 +128,17 @@ export async function uploadFile(opts: UploadFileOpts): Promise<UploadResult> {
     headers['content-length'] = String(contentLength);
   }
 
+  const timeoutMs = opts.timeoutMs ?? UPLOAD_TIMEOUT_MS;
+  // Default timeout so a stalled upload cannot hang forever; the caller's
+  // signal still cancels first when it fires. AbortSignal.any needs at
+  // least one signal - with no caller signal the timeout stands alone.
+  const timeoutSignal =
+    timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : undefined;
+  const signal =
+    opts.signal && timeoutSignal
+      ? AbortSignal.any([opts.signal, timeoutSignal])
+      : (opts.signal ?? timeoutSignal);
+
   let res: Dispatcher.ResponseData;
   try {
     res = await request(opts.url, {
@@ -97,9 +146,16 @@ export async function uploadFile(opts: UploadFileOpts): Promise<UploadResult> {
       headers,
       // form-data is a Node Readable; undici accepts that directly.
       body: form as unknown as Readable,
-      signal: opts.signal,
+      signal,
     });
   } catch (err) {
+    if (timeoutSignal?.aborted) {
+      throw new SpycoreCliError(
+        `Upload timed out after ${Math.round(timeoutMs / 1000)}s`,
+        EXIT_NETWORK_ERROR,
+        `Tried ${opts.url}. Check your connection and try again.`,
+      );
+    }
     if (opts.signal?.aborted) {
       throw new SpycoreCliError('Cancelled', EXIT_USER_ERROR);
     }
@@ -113,12 +169,9 @@ export async function uploadFile(opts: UploadFileOpts): Promise<UploadResult> {
 
   type ParsedBody = { success?: boolean; data?: unknown; error?: string };
   const status = res.statusCode;
-  let parsed: ParsedBody | null = null;
-  try {
-    parsed = (await res.body.json()) as ParsedBody;
-  } catch {
-    parsed = null;
-  }
+  // Capped read: an oversized or non-JSON error body must not grow memory
+  // unboundedly (readCappedJson returns null past the cap / on bad JSON).
+  const parsed = (await readCappedJson(res.body)) as ParsedBody | null;
 
   if (status === 413) {
     throw new SpycoreCliError(

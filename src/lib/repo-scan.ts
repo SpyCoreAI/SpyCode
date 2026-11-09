@@ -13,7 +13,7 @@
  * scanning approach is kept byte-compatible with `repo_map` so the two stay in
  * agreement about what a project looks like.
  */
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
 import { extname, join, resolve } from 'node:path';
 import { loadSecretGuardSync } from './agent/secrets.js';
 
@@ -58,6 +58,73 @@ const SCAN_SAMPLE_CAP = 8000;
 const README_NAMES = ['README.md', 'README.markdown', 'README'];
 /** Cap on the extracted README overview snippet. */
 const README_SUMMARY_CAP = 500;
+/**
+ * Cap on bytes read from a README: only the first paragraph is ever used,
+ * so reading a multi-GB file whole into memory to extract 500 chars was
+ * pure waste (and a hostile README could OOM the scan).
+ */
+const README_READ_CAP_BYTES = 64 * 1024;
+
+/**
+ * Read at most `maxBytes` from the head of a file. Returns null when the
+ * file cannot be opened/read. The caller only ever needs a prefix, so the
+ * rest of the file is never materialized.
+ */
+export function readFilePrefix(path: string, maxBytes: number): string | null {
+  let fd: number;
+  try {
+    fd = openSync(path, 'r');
+  } catch {
+    return null;
+  }
+  try {
+    const size = fstatSync(fd).size;
+    const buf = Buffer.alloc(Math.min(size, maxBytes));
+    readSync(fd, buf, 0, buf.length, 0);
+    return buf.toString('utf8');
+  } catch {
+    return null;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Count lines in a file by streaming 64 KiB chunks - the whole file is
+ * never loaded. Same count as `content.replace(/\n$/, '').split('\n').length`
+ * (0 for an empty file). Returns null when the file cannot be read.
+ */
+export function countFileLines(path: string): number | null {
+  let fd: number;
+  try {
+    fd = openSync(path, 'r');
+  } catch {
+    return null;
+  }
+  try {
+    const buf = Buffer.alloc(64 * 1024);
+    let newlines = 0;
+    let total = 0;
+    let lastByte = -1;
+    let pos = 0;
+    for (;;) {
+      const n = readSync(fd, buf, 0, buf.length, pos);
+      if (n === 0) break;
+      pos += n;
+      total += n;
+      for (let i = 0; i < n; i += 1) {
+        if (buf[i] === 0x0a) newlines += 1;
+      }
+      lastByte = buf[n - 1] as number;
+    }
+    if (total === 0) return 0;
+    return newlines + (lastByte === 0x0a ? 0 : 1);
+  } catch {
+    return null;
+  } finally {
+    closeSync(fd);
+  }
+}
 
 /**
  * Conventional source entry points, checked by existence relative to the root.
@@ -190,12 +257,9 @@ function readReadmeSummary(cwd: string): string | undefined {
     // both injected into the model's context and committed by the user - so a
     // README symlinked at a secret exfiltrates through two routes at once.
     if (isSecret(p)) continue;
-    let raw: string;
-    try {
-      raw = readFileSync(p, 'utf8');
-    } catch {
-      return undefined;
-    }
+    // Capped read: only the first paragraph is ever used.
+    const raw = readFilePrefix(p, README_READ_CAP_BYTES);
+    if (raw === null) return undefined;
     const para: string[] = [];
     for (const line of raw.split('\n')) {
       const t = line.trim();

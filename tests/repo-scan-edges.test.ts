@@ -85,3 +85,23 @@ describe('repo-scan directory walk', () => {
     expect(scan.fileCount).toBe(0);
   });
 });
+
+describe('repo-scan capped reads (4c)', () => {
+  test('a huge README is only prefix-read - the first paragraph still extracts', async () => {
+    const big = `# Title\n\nFirst para line one.\nSecond line.\n\n${'z'.repeat(200_000)}\n`;
+    writeFileSync(fp('README.md'), big);
+    const scan = await scanRepo(workDir);
+    expect(scan.readmeSummary).toBe('First para line one. Second line.');
+  });
+
+  test('countFileLines matches the split-lines count without loading the file', async () => {
+    const { countFileLines } = await import('../src/lib/repo-scan.js');
+    writeFileSync(fp('a.txt'), 'one\ntwo\nthree\n');
+    expect(countFileLines(fp('a.txt'))).toBe(3);
+    writeFileSync(fp('b.txt'), 'one\ntwo\nthree');
+    expect(countFileLines(fp('b.txt'))).toBe(3);
+    writeFileSync(fp('c.txt'), '');
+    expect(countFileLines(fp('c.txt'))).toBe(0);
+    expect(countFileLines(fp('missing.txt'))).toBeNull();
+  });
+});

@@ -11,10 +11,14 @@
  * `spycore` CLI runs - it always lives at the end-user's project root, and
  * nothing here ever writes into the CLI's own source tree.
  */
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { countFileLines, readFilePrefix } from './repo-scan.js';
 import { loadSecretGuardSync } from './agent/secrets.js';
 import { redactFreeText } from './redact.js';
+
+/** Cap on bytes read from CODEBASE_CHANGELOG.md for the recent-entries view. */
+const CHANGELOG_READ_CAP_BYTES = 1_048_576;
 
 /** The newest-first changelog at the user's project root. */
 export const CHANGELOG_FILE = 'CODEBASE_CHANGELOG.md';
@@ -234,10 +238,17 @@ export function readRecentChangelog(cwd: string, opts: RecentChangelogOptions = 
   if (loadSecretGuardSync(resolve(cwd))(path)) {
     return { exists: true, path, text: '', entryCount: 0, shownEntryCount: 0, truncated: false };
   }
-  let content = '';
+  // Capped read: only the newest entries are ever rendered, so a large
+  // changelog must not be loaded whole. `truncated` reports the byte cap
+  // as well as the char cap; entryCount is then a lower bound.
+  let size = 0;
   try {
-    content = readFileSync(path, 'utf8');
+    size = statSync(path).size;
   } catch {
+    return { exists: true, path, text: '', entryCount: 0, shownEntryCount: 0, truncated: false };
+  }
+  const content = readFilePrefix(path, CHANGELOG_READ_CAP_BYTES);
+  if (content === null) {
     return { exists: true, path, text: '', entryCount: 0, shownEntryCount: 0, truncated: false };
   }
   const { entries } = parseChangelogEntries(content);
@@ -247,7 +258,7 @@ export function readRecentChangelog(cwd: string, opts: RecentChangelogOptions = 
     .map((e) => `${e.heading}\n${e.body}`.replace(/\s+$/, ''))
     .join('\n\n')
     .trim();
-  let truncated = false;
+  let truncated = size > CHANGELOG_READ_CAP_BYTES;
   if (opts.maxChars !== undefined && text.length > opts.maxChars) {
     const marker = '\n\n<!-- … older entries trimmed to fit -->';
     const room = Math.max(0, opts.maxChars - marker.length);
@@ -277,12 +288,6 @@ export interface ChangelogStatus {
 export function changelogStatus(cwd: string): ChangelogStatus {
   const path = join(resolve(cwd), CHANGELOG_FILE);
   if (!existsSync(path)) return { exists: false, path, lines: 0 };
-  let lines = 0;
-  try {
-    const content = readFileSync(path, 'utf8');
-    lines = content.length === 0 ? 0 : content.replace(/\n$/, '').split('\n').length;
-  } catch {
-    /* leave lines at 0 */
-  }
-  return { exists: true, path, lines };
+  const lines = countFileLines(path);
+  return { exists: true, path, lines: lines ?? 0 };
 }

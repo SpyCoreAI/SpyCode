@@ -1,6 +1,21 @@
 import { COMMAND_SPEC, type CommandSpec } from './spec.js';
 
 /**
+ * Escape a value for embedding in a double-quoted `"…"` echo line of the
+ * generated script. Without this, a spec value containing a space, quote,
+ * `$` or backtick silently breaks the script (or expands at completion
+ * time). zsh/fish/powershell escape their descriptions; bash escaped
+ * nothing - now it does the same job for double-quoted strings.
+ */
+export function escapeBashDoubleQuoted(s: string): string {
+  return s
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\$/g, '\\$')
+    .replace(/`/g, '\\`');
+}
+
+/**
  * Bash completion generator.
  *
  * Strategy: emit a static script that walks dotted-path lookup tables at
@@ -24,14 +39,14 @@ export function generateBashCompletion(): string {
       opts.push(opt.name);
       if (opt.short) opts.push(opt.short);
     }
-    subTable.push(`    "${key}") echo "${subs}" ;;`);
-    optTable.push(`    "${key}") echo "${opts.join(' ')}" ;;`);
+    subTable.push(`    "${escapeBashDoubleQuoted(key)}") echo "${escapeBashDoubleQuoted(subs)}" ;;`);
+    optTable.push(`    "${escapeBashDoubleQuoted(key)}") echo "${escapeBashDoubleQuoted(opts.join(' '))}" ;;`);
     for (const opt of cmd.options ?? []) {
       if (opt.takesValue && opt.values && opt.values.length > 0) {
         const flagKeys = [opt.name, ...(opt.short ? [opt.short] : [])];
         for (const flagKey of flagKeys) {
           valueTable.push(
-            `    "${key}::${flagKey}") echo "${opt.values.join(' ')}" ;;`,
+            `    "${escapeBashDoubleQuoted(key)}::${escapeBashDoubleQuoted(flagKey)}") echo "${escapeBashDoubleQuoted(opt.values.join(' '))}" ;;`,
           );
         }
       }

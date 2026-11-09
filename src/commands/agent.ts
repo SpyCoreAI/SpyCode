@@ -61,6 +61,7 @@ import {
 import { getOutputOptions, json, warn } from '../lib/output.js';
 import { readSingleLineInput } from '../lib/prompt.js';
 import { EXIT_AUTH_ERROR, EXIT_USER_ERROR, SpycoreCliError } from '../lib/errors.js';
+import { parseStrictIntFlag } from '../lib/numeric-flags.js';
 import { MODEL_DISPLAY, isModelSlug } from '../lib/models.js';
 import {
   assertAgentTaskFits,
@@ -81,41 +82,6 @@ import { shutdownLspManagers } from '../lib/agent/lsp/manager.js';
 import { shutdownAllMcpClients } from '../lib/agent/mcp-client.js';
 
 const ALLOWED_AGENT_MODELS = ['charon', 'styx', 'hermes', 'minos'] as const;
-
-/**
- * Strict positive-integer flag parsing for the runaway-guard flags
- * (--max-turns, --max-tool-calls-per-turn, --cmd-timeout). Unlike
- * parseIntFlag (which clamps) and resolveMaxTurns (which silently falls
- * back to the default), an unparseable or out-of-range value is an
- * error: `--max-turns abc` or `0` must never silently become 25, and a
- * cap must never silently go uncapped.
- */
-function parseStrictIntFlag(
-  raw: string | undefined,
-  flag: string,
-  min: number,
-  max: number,
-  defaultValue: number,
-): number {
-  if (raw === undefined) return defaultValue;
-  const trimmed = raw.trim();
-  if (!/^\d+$/.test(trimmed)) {
-    throw new SpycoreCliError(
-      `Invalid --${flag}: "${raw}" is not a positive integer.`,
-      EXIT_USER_ERROR,
-      `Pass --${flag} <n> with ${min} <= n <= ${max}.`,
-    );
-  }
-  const n = Number(trimmed);
-  if (!Number.isSafeInteger(n) || n < min || n > max) {
-    throw new SpycoreCliError(
-      `Invalid --${flag}: "${raw}" is outside ${min}–${max}.`,
-      EXIT_USER_ERROR,
-      `Pass --${flag} <n> with ${min} <= n <= ${max}.`,
-    );
-  }
-  return n;
-}
 
 /**
  * H-2 - the `--json` event stream must not carry raw tool arguments. A

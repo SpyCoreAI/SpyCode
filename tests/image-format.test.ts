@@ -56,3 +56,35 @@ describe('imageExtensionFor', () => {
     expect(imageExtensionFor(undefined, Buffer.from([0x42]))).toBe('.png');
   });
 });
+
+describe('imageExtensionFor AVIF', () => {
+  test('prefers an AVIF Content-Type', () => {
+    const empty = Buffer.alloc(0);
+    expect(imageExtensionFor('image/avif', empty)).toBe('.avif');
+    expect(imageExtensionFor('Image/AVIF; charset=binary', empty)).toBe('.avif');
+  });
+
+  test('sniffs AVIF ftyp magic bytes (avif and avis brands)', () => {
+    const avif = Buffer.concat([
+      Buffer.from([0x00, 0x00, 0x00, 0x18]),
+      Buffer.from('ftyp'),
+      Buffer.from('avif'),
+      Buffer.from([0x00]),
+    ]);
+    const avis = Buffer.concat([
+      Buffer.from([0x00, 0x00, 0x00, 0x18]),
+      Buffer.from('ftyp'),
+      Buffer.from('avis'),
+      Buffer.from([0x00]),
+    ]);
+    expect(imageExtensionFor(undefined, avif)).toBe('.avif');
+    expect(imageExtensionFor(undefined, avis)).toBe('.avif');
+    // An ftyp box with another brand is not AVIF.
+    const mp4 = Buffer.concat([
+      Buffer.from([0x00, 0x00, 0x00, 0x18]),
+      Buffer.from('ftyp'),
+      Buffer.from('isom'),
+    ]);
+    expect(imageExtensionFor(undefined, mp4)).toBe('.png');
+  });
+});

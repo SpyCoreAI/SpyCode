@@ -22,6 +22,14 @@ export const JSONRPC_INVALID_PARAMS = -32602;
 export const JSONRPC_INTERNAL_ERROR = -32603;
 /** ACP: "Authentication is required before this operation can be performed." */
 export const ACP_AUTH_REQUIRED = -32000;
+/**
+ * Cap on one newline-delimited frame held in the inbound buffer: a client
+ * sending a single huge newline-less line otherwise grows `buf` without
+ * bound. Oversized lines are dropped with a parse-error frame, never kept.
+ */
+export const JSONRPC_MAX_LINE_BYTES = 1_048_576;
+/** Default timeout for an outbound request (e.g. session/request_permission). */
+export const JSONRPC_REQUEST_TIMEOUT_MS = 120_000;
 
 /** Throw from a request handler to control the JSON-RPC error response. */
 export class JsonRpcError extends Error {
@@ -40,6 +48,7 @@ export type NotificationHandler = (params: unknown) => void;
 interface PendingOutbound {
   resolve: (value: unknown) => void;
   reject: (err: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
 }
 
 export class JsonRpcEndpoint {
@@ -48,7 +57,7 @@ export class JsonRpcEndpoint {
   private closed = false;
   private readonly handlers = new Map<string, RequestHandler>();
   private readonly notificationHandlers = new Map<string, NotificationHandler>();
-  private readonly pending = new Map<number, PendingOutbound>();
+  private readonly pending = new Map<number | string, PendingOutbound>();
   private readonly closeListeners: Array<() => void> = [];
 
   constructor(
@@ -76,7 +85,10 @@ export class JsonRpcEndpoint {
       const finish = (): void => {
         if (this.closed) return;
         this.closed = true;
-        for (const [, p] of this.pending) p.reject(new Error('connection closed'));
+        for (const [, p] of this.pending) {
+          clearTimeout(p.timer);
+          p.reject(new Error('connection closed'));
+        }
         this.pending.clear();
         for (const l of this.closeListeners.splice(0)) l();
         resolve();
@@ -92,11 +104,43 @@ export class JsonRpcEndpoint {
     this.send({ jsonrpc: '2.0', method, params });
   }
 
-  /** Outbound request (e.g. session/request_permission). */
-  request(method: string, params: unknown): Promise<unknown> {
+  /**
+   * Outbound request (e.g. session/request_permission). Rejects after
+   * `timeoutMs` (default JSONRPC_REQUEST_TIMEOUT_MS) so a client that never
+   * answers cannot hang the approval bridge forever - previously the
+   * promise only settled on a response or on session/cancel.
+   */
+  request(
+    method: string,
+    params: unknown,
+    opts: { timeoutMs?: number } = {},
+  ): Promise<unknown> {
     const id = this.nextId++;
+    const timeoutMs = opts.timeoutMs ?? JSONRPC_REQUEST_TIMEOUT_MS;
     return new Promise<unknown>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const timer = setTimeout(() => {
+        if (!this.pending.has(id)) return;
+        this.pending.delete(id);
+        reject(
+          new JsonRpcError(
+            JSONRPC_INTERNAL_ERROR,
+            `request timed out after ${Math.round(timeoutMs / 1000)}s: ${method}`,
+          ),
+        );
+      }, timeoutMs);
+      // The timer must not hold the process open on its own.
+      timer.unref?.();
+      this.pending.set(id, {
+        resolve: (value) => {
+          clearTimeout(timer);
+          resolve(value);
+        },
+        reject: (err) => {
+          clearTimeout(timer);
+          reject(err);
+        },
+        timer,
+      });
       this.send({ jsonrpc: '2.0', id, method, params });
     });
   }
@@ -112,11 +156,24 @@ export class JsonRpcEndpoint {
 
   private onData(chunk: string): void {
     this.buf += chunk;
+    // A newline-less buffer past the cap is a runaway line, not a frame:
+    // drop it with a parse-error reply instead of growing memory forever.
+    if (this.buf.indexOf('\n') === -1 && this.buf.length > JSONRPC_MAX_LINE_BYTES) {
+      this.buf = '';
+      this.send({ jsonrpc: '2.0', id: null, error: { code: JSONRPC_PARSE_ERROR, message: 'line too long' } });
+      return;
+    }
     let nl = this.buf.indexOf('\n');
     while (nl !== -1) {
       const line = this.buf.slice(0, nl).trim();
       this.buf = this.buf.slice(nl + 1);
-      if (line.length > 0) this.handleLine(line);
+      if (line.length > 0) {
+        if (line.length > JSONRPC_MAX_LINE_BYTES) {
+          this.send({ jsonrpc: '2.0', id: null, error: { code: JSONRPC_PARSE_ERROR, message: 'line too long' } });
+        } else {
+          this.handleLine(line);
+        }
+      }
       nl = this.buf.indexOf('\n');
     }
   }
@@ -136,11 +193,18 @@ export class JsonRpcEndpoint {
       return;
     }
 
-    // A response to one of OUR outbound requests.
-    if (typeof msg.id === 'number' && !('method' in msg) && (('result' in msg) || ('error' in msg))) {
+    // A response to one of OUR outbound requests. JSON-RPC ids may be
+    // strings as well as numbers - a string id is a response, not an
+    // invalid request.
+    if (
+      (typeof msg.id === 'number' || typeof msg.id === 'string') &&
+      !('method' in msg) &&
+      (('result' in msg) || ('error' in msg))
+    ) {
       const pending = this.pending.get(msg.id);
       if (!pending) return;
       this.pending.delete(msg.id);
+      clearTimeout(pending.timer);
       if ('error' in msg && msg.error !== undefined && msg.error !== null) {
         const err = msg.error as { code?: number; message?: string };
         pending.reject(new JsonRpcError(err.code ?? JSONRPC_INTERNAL_ERROR, err.message ?? 'request failed'));

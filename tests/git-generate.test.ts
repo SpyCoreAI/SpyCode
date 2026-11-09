@@ -226,3 +226,29 @@ describe('reviewLoop state machine', () => {
     expect(r.text).toBe('feat: keep me');
   });
 });
+
+describe('appendCappedText (generation output cap)', () => {
+  test('small appends pass through', async () => {
+    const { appendCappedText } = await import('../src/lib/git-generate.js');
+    expect(appendCappedText('a', 'b')).toBe('ab');
+    expect(appendCappedText('', 'x'.repeat(1000)).length).toBe(1000);
+  });
+
+  test('past GENERATE_MAX_TEXT_CHARS it throws a SpycoreCliError', async () => {
+    const { appendCappedText, GENERATE_MAX_TEXT_CHARS } = await import(
+      '../src/lib/git-generate.js'
+    );
+    const { isSpycoreCliError } = await import('../src/lib/errors.js');
+    expect(GENERATE_MAX_TEXT_CHARS).toBe(256_000);
+    let caught: unknown = null;
+    try {
+      appendCappedText('x'.repeat(GENERATE_MAX_TEXT_CHARS), 'y');
+    } catch (err) {
+      caught = err;
+    }
+    expect(isSpycoreCliError(caught)).toBe(true);
+    if (isSpycoreCliError(caught)) {
+      expect(caught.message).toMatch(/output limit/);
+    }
+  });
+});

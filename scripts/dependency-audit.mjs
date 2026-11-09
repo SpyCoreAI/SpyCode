@@ -214,6 +214,22 @@ if (invokedAsScript) runFromCli();
  * The verdict logic, pure and unit-testable (see tests/dependency-audit.test.ts).
  * Throws an Error for every fail-closed shape; returns the scan summary otherwise.
  */
+/**
+ * Exact version match for the known-advisory waiver. `String(versions)
+ * .includes('3.0.3')` matched by SUBSTRING, so a future `3.0.30` (or any
+ * range/token containing `3.0.3` as a prefix) would have been waived
+ * silently. Split the field into version tokens - stripping range
+ * operators (`<`, `<=`, `>=`, `^`, `~`, `=`) and list separators - and
+ * require one token to equal the waived version exactly.
+ */
+function versionsMatchExactly(versions, version) {
+  const tokens = String(versions)
+    .split(/[\s,;]+/)
+    .map((t) => t.replace(/^(>=|<=|>|<|=|\^|~)+/, ''))
+    .filter((t) => t.length > 0);
+  return tokens.includes(version);
+}
+
 export function evaluateAuditReport(data) {
   if (!data || typeof data !== 'object') {
     throw new Error('audit report is not an object');
@@ -249,7 +265,7 @@ export function evaluateAuditReport(data) {
     const isKnown =
       String(id).toUpperCase() === KNOWN.ghsa.toUpperCase() &&
       pkg === KNOWN.pkg &&
-      String(versions).includes(KNOWN.version);
+      versionsMatchExactly(versions, KNOWN.version);
     if (isKnown) {
       const hole = patchIsWired();
       if (hole) throw new Error(`known advisory ${KNOWN.ghsa} is NOT patched (${hole}) - refusing the exception`);

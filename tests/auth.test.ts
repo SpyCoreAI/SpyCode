@@ -28,11 +28,13 @@ describe('auth token storage with file fallback', () => {
     expect(await isAuthenticated()).toBe(false);
   });
 
-  test('isAuthenticated rejects non-spycli prefixes', async () => {
+  test('isAuthenticated agrees with getToken: any stored token authenticates', async () => {
     const { setToken, isAuthenticated } = await import('../src/lib/auth.js');
-    // Smuggle in a value that doesn't have the prefix; this protects
-    // against a stale OS keychain entry from another tool.
+    // getToken() returns a SPYCORE_TOKEN verbatim with no prefix
+    // requirement, so isAuthenticated must too - the old `spycli_`
+    // prefix check reported "Not logged in" for a token that
+    // authenticated every request.
     await setToken('not-a-real-token');
-    expect(await isAuthenticated()).toBe(false);
+    expect(await isAuthenticated()).toBe(true);
   });
 });
