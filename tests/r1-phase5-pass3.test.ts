@@ -193,8 +193,20 @@ describe('R1 pass 3 - truncation never splits a surrogate pair', () => {
   test('TUI shell output: a UTF-8 sequence split across chunk events decodes whole', async () => {
     const workDir = mkdtempSync(join(tmpdir(), 'r1p3-shell-'));
     try {
+      // A script file, not inline `node -e`: `cmd /d /s /c` strips the
+      // outermost quotes, so the nested quotes (and parentheses) of an
+      // inline script do not survive on Windows - the probe never ran and
+      // the output came back empty on both Windows CI legs, while the
+      // same command passes on Ubuntu/macOS. The single-level quoting
+      // below (`"node" "probe.js"`) needs no cmd.exe quote handling.
+      // Same pattern as tests/builtin-tools-edges.test.ts.
+      const probe = join(workDir, 'split-utf8.mjs');
+      writeFileSync(
+        probe,
+        "process.stdout.write(Buffer.from([0xF0,0x9F]));setTimeout(()=>process.stdout.write(Buffer.from([0x98,0x80])),50);\n",
+      );
       // Two writes, 50 ms apart, each carrying half of U+1F600 (F0 9F | 98 80).
-      const cmd = `${process.execPath} -e "process.stdout.write(Buffer.from([0xF0,0x9F]));setTimeout(()=>process.stdout.write(Buffer.from([0x98,0x80])),50)"`;
+      const cmd = `"${process.execPath}" "${probe}"`;
       const r = await runShellCommand(cmd, workDir, 10_000, undefined);
       expect(r.ok).toBe(true);
       expect(r.output).toContain('\u{1F600}');
