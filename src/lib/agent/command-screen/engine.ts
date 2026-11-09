@@ -57,8 +57,13 @@ export function isPipeTerminator(t: string | null): boolean {
  * SHAPE: same name in the definition, both pipe operands, and the call.
  * POSIX function names are `[A-Za-z_][A-Za-z0-9_]*`; `:` is a builtin name
  * used by the classic spelling, so it is allowed too.
+ * R1 pass 4 - the pipe may be the stderr variant `|&` (`f(){ f|& f& }; f`
+ * is a fork bomb by the same shape and `bash -n` accepts it), so an
+ * optional `&` is allowed after the pipe. No benign cost: `|&` followed
+ * by the same function name inside a `(){…}` definition has no
+ * legitimate reading.
  */
-const FORK_BOMB_RE = /([A-Za-z_:][A-Za-z0-9_:]*)\(\)\s*\{\s*\1\s*\|\s*\1\s*&\s*\}\s*;\s*\1/;
+const FORK_BOMB_RE = /([A-Za-z_:][A-Za-z0-9_:]*)\(\)\s*\{\s*\1\s*\|\&?\s*\1\s*&\s*\}\s*;\s*\1/;
 
 /**
  * F-4 - A POSITIONAL PROPERTY TESTED BY A SCAN OVER ALL OPERANDS
@@ -232,6 +237,75 @@ function deviceWriteTargets(name: string, args: string[]): string[] {
       return first !== undefined ? [first] : [];
     }
   }
+}
+
+/**
+ * R1 pass 4 - the values of `tar`'s command-execution options, each read
+ * as a command string.
+ *
+ * Spellings, all four of them: `--opt=VALUE` (attached), `--opt VALUE`
+ * (separate), and the short forms `-I VALUE` / `-IVAlUE` (compress
+ * program) and `-F VALUE` / `-FVALUE` (info script). A checkpoint action
+ * is a command only when it starts with `exec=` - `echo`, `dot`,
+ * `sleep=N` and `totals` run nothing, so they are not yielded.
+ *
+ * THE VALUE IS JOINED WITH THE WORDS AFTER THE OPTION. An attached
+ * value is one word (`--to-command=rm`), and the words after it on the
+ * line are tar's own operands - but a command written unquoted spills
+ * exactly that way (`--to-command=rm -rf /`), and screening the value
+ * alone would read it as a bare `rm` and miss the payload the line
+ * plainly carries. The join reads the option the way the line spells
+ * it; a quoted value is already one word, so the join adds only tar's
+ * own operands to it, which screen clean unless the line really does
+ * spell a catastrophic command. `cpio` has no equivalent option and
+ * `rsync --rsync-path` names a REMOTE program, so neither is in this
+ * table.
+ */
+function tarCommandValues(args: string[]): string[] {
+  const values: string[] = [];
+  const LONG_COMMAND_OPTS = ['--to-command', '--use-compress-program', '--info-script', '--new-volume-script'];
+  for (let k = 0; k < args.length; k += 1) {
+    const a = args[k] as string;
+    const attached = /^--(to-command|checkpoint-action|use-compress-program|info-script|new-volume-script)=([\s\S]*)$/.exec(a);
+    if (attached !== null) {
+      const opt = attached[1] as string;
+      const value = attached[2] as string;
+      const rest = args.slice(k + 1).join(' ');
+      const joined = rest.length > 0 ? `${value} ${rest}` : value;
+      if (opt === 'checkpoint-action') {
+        if (joined.startsWith('exec=')) values.push(joined.slice('exec='.length));
+      } else {
+        values.push(joined);
+      }
+      continue;
+    }
+    if (LONG_COMMAND_OPTS.includes(a) || a === '--checkpoint-action') {
+      const v = args[k + 1];
+      if (v === undefined) continue;
+      const rest = args.slice(k + 2).join(' ');
+      const joined = rest.length > 0 ? `${v} ${rest}` : v;
+      if (a === '--checkpoint-action') {
+        if (joined.startsWith('exec=')) values.push(joined.slice('exec='.length));
+      } else {
+        values.push(joined);
+      }
+      continue;
+    }
+    if (a === '-I' || a === '-F') {
+      const v = args[k + 1];
+      if (v === undefined) continue;
+      const rest = args.slice(k + 2).join(' ');
+      values.push(rest.length > 0 ? `${v} ${rest}` : v);
+      continue;
+    }
+    const shortAttached = /^-[IF]([\s\S]+)$/.exec(a);
+    if (shortAttached !== null) {
+      const value = shortAttached[1] as string;
+      const rest = args.slice(k + 1).join(' ');
+      values.push(rest.length > 0 ? `${value} ${rest}` : value);
+    }
+  }
+  return values;
 }
 
 /**
@@ -688,8 +762,33 @@ function screenArgv(
       }
     }
 
+    // ── R1 pass 4 - tar options whose VALUE is a command ──
+    //
+    // GNU tar runs a command from `--to-command` (each extracted file is
+    // piped to it, via the shell), from `--checkpoint-action=exec=…` (at
+    // each checkpoint, on create as well as extract), from
+    // `--use-compress-program` (the filter program) and from
+    // `--info-script` / `--new-volume-script` (at each volume change) -
+    // every one verified by driving this VM's GNU tar with a harmless
+    // payload. The device arm above models `tar` only as an archiver, so
+    // none of these was ever looked at. Each value is screened as a
+    // command via `screenNested`, the way a `-c` payload is.
+    if (name === 'tar') {
+      for (const value of tarCommandValues(args)) {
+        const inner = screenNested(value, depth);
+        if (inner) return inner;
+      }
+    }
+
     // ── a network download piped into a shell: remote code execution ──
-    if (DOWNLOADERS.has(name) && isPipeTerminator(cmd.terminator)) {
+    // R1 pass 4 - `openssl` is scoped to its `s_client` subcommand: only
+    // that subcommand streams bytes from the network to stdout, so only
+    // it belongs in this rule. The subcommand is the first operand, the
+    // way `reg delete` is scoped at the Windows screen.
+    const isNetworkStreamer =
+      DOWNLOADERS.has(name) ||
+      (name === 'openssl' && splitArgs(args).operands[0] === 's_client');
+    if (isNetworkStreamer && isPipeTerminator(cmd.terminator)) {
       for (let j = i + 1; j < commands.length; j += 1) {
         const stage = commands[j] as SimpleCommand;
         // F-2c-40 - the SAME candidate reading as the main loop. This rule
@@ -814,6 +913,30 @@ function screenArgv(
         const body = cmd.redirects[r];
         if (body === undefined) continue;
         const inner = screenNested(body.value, depth);
+        if (inner) return inner;
+      }
+    }
+
+    // ── R1 pass 4 - `at` / `batch` run piped stdin via `/bin/sh` ──
+    //
+    // `at(1)`/`batch(1)` read commands from standard input "which are to
+    // be executed at a later time, using /bin/sh", and `at now` runs
+    // essentially immediately - so `echo 'rm -rf /' | at now` is a
+    // deferred execution of a payload in plain sight. The bare-shell
+    // arm above screens an upstream stage's operands as a script only
+    // when the next stage is a SHELL; `at`/`batch` are not shells, so
+    // the piped text was never screened. This arm is that arm, for
+    // these two heads: the upstream operands ARE the script. `at -f
+    // file` reads the job from a file and stays out of scope exactly
+    // like `sh script.sh` - it takes no pipe, so this arm never fires
+    // for it - and a heredoc body needs no arm here, because the parser
+    // already splits its lines into commands and screens them.
+    if ((name === 'at' || name === 'batch') && i > 0 && isPipeTerminator((commands[i - 1] as SimpleCommand).terminator)) {
+      const upstream = effectiveWords(commands[i - 1] as SimpleCommand)
+        .slice(1)
+        .map((w) => w.value);
+      for (const chunk of splitArgs(upstream).operands) {
+        const inner = screenNested(chunk, depth);
         if (inner) return inner;
       }
     }

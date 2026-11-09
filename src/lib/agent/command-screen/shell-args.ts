@@ -7,6 +7,7 @@ import {
 import { osFold } from '../../os-fold.js';
 import {
   COMMAND_CARRIERS,
+  COMMAND_LAUNCHERS,
   FALLBACK_REDIRECTS,
   INTERPRETERS,
   OPERATOR_SPLIT,
@@ -347,7 +348,18 @@ function textMayExecOperands(command: string): boolean {
   for (const w of command.split(/[\s;|&<>()`]+/)) {
     if (w.length === 0) continue;
     const n = osFold(commandBasename(w.replace(/['"\\]/g, '')));
-    if (COMMAND_WRAPPERS.has(n) || COMMAND_CARRIERS.has(n) || INTERPRETERS.has(n) || SHELLS.has(n)) return true;
+    // R1 pass 4 - the conservative fallback is the same gate as
+    // `headMayExecOperands` and it did not consult the launcher census
+    // at all, so an unconfident nested parse with a censused launcher
+    // head was suppressed there too. Same set, same reading.
+    if (
+      COMMAND_WRAPPERS.has(n) ||
+      COMMAND_CARRIERS.has(n) ||
+      COMMAND_LAUNCHERS.has(n) ||
+      INTERPRETERS.has(n) ||
+      SHELLS.has(n)
+    )
+      return true;
   }
   return false;
 }

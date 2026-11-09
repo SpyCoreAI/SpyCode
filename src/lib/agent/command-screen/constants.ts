@@ -30,8 +30,13 @@ export const MAX_SCREEN_DEPTH = 3;
  */
 export const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'csh', 'tcsh', 'fish', 'ash', 'mksh', 'pwsh']);
 
-/** Downloaders whose output piped into a shell is remote code execution. */
-export const DOWNLOADERS = new Set(['curl', 'wget', 'fetch', 'aria2c', 'axel', 'httpie', 'http', 'https']);
+/** Downloaders whose output piped into a shell is remote code execution.
+ * R1 pass 4 - `nc`/`ncat`, `socat`, `ssh` and `telnet` stream bytes from
+ * the network to stdout exactly the way `curl` does, so piping any of
+ * them into a shell executes whatever the remote end sends. `openssl`
+ * is deliberately NOT here: only its `s_client` subcommand streams from
+ * the network, and the rule scopes to it at the call site. */
+export const DOWNLOADERS = new Set(['curl', 'wget', 'fetch', 'aria2c', 'axel', 'httpie', 'http', 'https', 'nc', 'ncat', 'socat', 'ssh', 'telnet']);
 
 /**
  * R1-1 - LAUNCHERS: BINARIES THAT TAKE A COMMAND AS AN OPERAND AND RUN IT.
@@ -56,11 +61,19 @@ export const DOWNLOADERS = new Set(['curl', 'wget', 'fetch', 'aria2c', 'axel', '
  * arm, so the four lists above - and the differential legs that pin those
  * names as unmodelled there - are untouched.
  *
- * RESIDUE, STATED: a launcher NOT in this census (`gtimeout`,
- * `proxychains`) with a VERB-keyed core inside a substitution is still
- * permitted - the same residue the corpus's own head-axis LIVE leg accepts,
- * which pins object-keyed cores for unlisted executors only. Closing it
- * needs a wider census, not a wider rule.
+ * RESIDUE, STATED AND NOW NARROWER (R1 pass 4): the five names this
+ * paragraph used to name (`gtimeout`, `proxychains`, `parallel`, `gosu`,
+ * `entr`) are in the census below, together with the four adjacent
+ * user-switching launchers the pass-4 audit verified the same way
+ * (`su-exec`, `setuidgid`, `envuidgid`, `chpst`, `s6-setuidgid` - each
+ * drops privileges or changes process state and then execs its operands;
+ * `su-exec` via execvp, `setuidgid`/`envuidgid` via pathexec_run,
+ * `chpst` via execvp, `s6-setuidgid` by executing its program as the
+ * named user). What remains is the census's own shape: a launcher NOT
+ * in this census with a VERB-keyed core inside a substitution is still
+ * permitted - the same residue the corpus's own head-axis LIVE leg
+ * accepts, which pins object-keyed cores for unlisted executors only.
+ * Closing it further needs a wider census, not a wider rule.
  */
 export const COMMAND_LAUNCHERS = new Set([
   // macOS census (man1/man8 SYNOPSIS).
@@ -70,6 +83,16 @@ export const COMMAND_LAUNCHERS = new Set([
   'eatmydata', 'firejail', 'bwrap', 'proot', 'catchsegv', 'strace', 'ltrace', 'valgrind',
   'torsocks', 'proxychains4', 'schroot', 'cgexec', 'daemonize', 'start-stop-daemon',
   'runcon', 'pkexec', 'systemd-nspawn',
+  // R1 pass 4 - the pass-3 residual, confirmed live and wider than stated:
+  // `gtimeout` (GNU timeout as Homebrew names it on macOS), `proxychains`
+  // (the classic spelling; only `proxychains4` was censused), `parallel`
+  // (GNU parallel runs its operands as commands), `gosu` (runs a command
+  // as another user) and `entr` (runs its operands via a shell when files
+  // change) each execute a verb-keyed core inside a substitution.
+  'gtimeout', 'proxychains', 'parallel', 'gosu', 'entr',
+  // R1 pass 4 - adjacent user-switching launchers, audited the same way
+  // (each verified to execute its operands before adding).
+  'su-exec', 'setuidgid', 'envuidgid', 'chpst', 's6-setuidgid',
 ]);
 
 /**

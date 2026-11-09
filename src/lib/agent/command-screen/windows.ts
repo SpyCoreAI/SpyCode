@@ -156,6 +156,43 @@ function psCommandFlag(flag: string): 'command' | 'encoded' | null {
   if (rest.length >= 2 && 'encodedcommand'.startsWith(rest)) return 'encoded';
   return null;
 }
+/**
+ * R1 pass 4 - split a PowerShell payload into its `;`-separated
+ * statements. The boundary is tracked quote-awarely, so a `;` inside a
+ * quoted string (`Remove-Item 'a;b' -Recurse`) does not split the
+ * statement it belongs to. A comma is NOT split on: it is not a
+ * PowerShell statement separator (`Remove-Item a, b` is one command).
+ * Best-effort on escapes, matching the quote handling of the scanner
+ * below: a backtick-escaped `;` still splits, exactly as the old
+ * token split did.
+ */
+function splitPowerShellStatements(payload: string): string[] {
+  const out: string[] = [];
+  let current = '';
+  let quote: string | null = null;
+  for (let i = 0; i < payload.length; i += 1) {
+    const ch = payload[i] as string;
+    if (quote !== null) {
+      current += ch;
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      current += ch;
+      continue;
+    }
+    if (ch === ';') {
+      out.push(current);
+      current = '';
+      continue;
+    }
+    current += ch;
+  }
+  out.push(current);
+  return out;
+}
+
 function screenPowerShellPayload(payload: string): string | null {
   const winHit = screenWindowsCommand(payload);
   if (winHit) return winHit;
@@ -165,18 +202,29 @@ function screenPowerShellPayload(payload: string): string | null {
   // pipe (`Get-ChildItem | Remove-Item -Recurse`) or a call operator
   // (`& { Remove-Item -Recurse … }`) - and only the tokens up to the next
   // destructive head count as its arguments.
-  const tokens = payload
-    .split(/[\s;,|]+/)
-    .map((t) => t.replace(/^["']|["']$/g, ''))
-    .filter((t) => t.length > 0);
-  for (let i = 0; i < tokens.length; i += 1) {
-    const head = (tokens[i] as string).toLowerCase();
-    if (PS_ALWAYS_BLOCK_HEADS.has(head)) return `${head} (destructive PowerShell command)`;
-    if (!PS_RECURSIVE_HEADS.has(head)) continue;
-    for (let j = i + 1; j < tokens.length; j += 1) {
-      const arg = (tokens[j] as string).toLowerCase();
-      if (PS_RECURSIVE_HEADS.has(arg) || PS_ALWAYS_BLOCK_HEADS.has(arg)) break;
-      if (isRecurseArg(arg)) return `${head} -Recurse (recursive delete via PowerShell)`;
+  //
+  // R1 pass 4 - the argument scan used to run past `;`: the token list
+  // had lost the statement boundary, so a `-Recurse` belonging to a
+  // LATER statement (`Remove-Item C:\x; Get-ChildItem -Recurse C:\`)
+  // was read as the earlier `Remove-Item`'s flag and a benign command
+  // was refused at the no-override screen. Each statement is scanned
+  // on its own now, so a flag can only be attributed to a head in the
+  // same statement. The pipe variant was already correct, because
+  // `splitCmdSegments` splits on `|` before the payload is built.
+  for (const statement of splitPowerShellStatements(payload)) {
+    const tokens = statement
+      .split(/[\s;,|]+/)
+      .map((t) => t.replace(/^["']|["']$/g, ''))
+      .filter((t) => t.length > 0);
+    for (let i = 0; i < tokens.length; i += 1) {
+      const head = (tokens[i] as string).toLowerCase();
+      if (PS_ALWAYS_BLOCK_HEADS.has(head)) return `${head} (destructive PowerShell command)`;
+      if (!PS_RECURSIVE_HEADS.has(head)) continue;
+      for (let j = i + 1; j < tokens.length; j += 1) {
+        const arg = (tokens[j] as string).toLowerCase();
+        if (PS_RECURSIVE_HEADS.has(arg) || PS_ALWAYS_BLOCK_HEADS.has(arg)) break;
+        if (isRecurseArg(arg)) return `${head} -Recurse (recursive delete via PowerShell)`;
+      }
     }
   }
   return null;
