@@ -576,6 +576,19 @@ describe('JsonRpcEndpoint 4c (framing caps, request timeout, string ids)', () =>
     await done;
   });
 
+  test('a response whose id is the STRING "1" resolves the pending numeric-id request (R2 pass 3)', async () => {
+    const { input, endpoint, done } = makeEndpoint();
+    const pending = endpoint.request('session/request_permission', {}, { timeoutMs: 5000 });
+    await tick();
+    // A client (or proxy) that re-serializes ids as strings used to leave
+    // this unsettled until the 120 s timeout: the pending map is keyed by
+    // the numeric id request() generated, and Map treats "1" !== 1.
+    input.write('{"jsonrpc":"2.0","id":"1","result":{"outcome":"allow"}}\n');
+    await expect(pending).resolves.toEqual({ outcome: 'allow' });
+    input.end();
+    await done;
+  });
+
   test('a newline-less line past the cap is dropped with a parse error and the endpoint survives', async () => {
     const { input, frames, done } = makeEndpoint();
     input.write('x'.repeat(1_048_577));
@@ -592,6 +605,30 @@ describe('JsonRpcEndpoint 4c (framing caps, request timeout, string ids)', () =>
     await tick();
     expect(
       frames.some((f) => f.id === 7 && JSON.stringify(f.result) === JSON.stringify({ a: 1 })),
+    ).toBe(true);
+    input.end();
+    await done;
+  });
+
+  test('the cap is measured in BYTES, not UTF-16 code units (R2 pass 3)', async () => {
+    const { input, frames, done } = makeEndpoint();
+    // 1,048,576 'é' chars = 2,097,152 wire bytes: under the old
+    // char-counted cap this was held and answered `parse error` after
+    // the newline, never `line too long`.
+    input.write('é'.repeat(1_048_576));
+    await tick();
+    expect(
+      frames.some(
+        (f) =>
+          (f.error as { code?: number; message?: string } | undefined)?.code === -32700 &&
+          ((f.error as { message?: string }).message ?? '').includes('line too long'),
+      ),
+    ).toBe(true);
+    // Still alive afterwards.
+    input.write('{"jsonrpc":"2.0","id":8,"method":"echo","params":{"a":2}}\n');
+    await tick();
+    expect(
+      frames.some((f) => f.id === 8 && JSON.stringify(f.result) === JSON.stringify({ a: 2 })),
     ).toBe(true);
     input.end();
     await done;

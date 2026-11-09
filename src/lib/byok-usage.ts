@@ -166,18 +166,22 @@ export function isFallbackEligibleError(err: unknown): boolean {
   if (!err || typeof err !== 'object') return false;
   const msg = String((err as { message?: unknown }).message ?? '').toLowerCase();
   const code = (err as { code?: unknown }).code;
-  // HTTP status codes
-  if (typeof code === 'number' && [401, 403, 408, 429, 502, 503, 504].includes(code)) return true;
+  // HTTP status codes (500 belongs here: it is the only 5xx that was
+  // present as a message substring but absent as a numeric code, so a
+  // code-carrying 500 hard-failed instead of falling back).
+  if (
+    typeof code === 'number' &&
+    [401, 403, 408, 429, 500, 502, 503, 504].includes(code)
+  )
+    return true;
+  // Status codes in the message must match on WORD boundaries: bare
+  // `msg.includes('500')` also matched '1500 tokens' (and '1401' matched
+  // '401'), misclassifying user errors as transient endpoint failures.
+  // `\b` sits between two word characters, so the digits inside 1500/1401
+  // never match, while 'HTTP 500.' / '401 Unauthorized' still do.
+  if (/\b(401|403|408|429|500|502|503|504)\b/.test(msg)) return true;
   // Common error patterns
   return (
-    msg.includes('401') ||
-    msg.includes('403') ||
-    msg.includes('408') ||
-    msg.includes('429') ||
-    msg.includes('500') ||
-    msg.includes('502') ||
-    msg.includes('503') ||
-    msg.includes('504') ||
     msg.includes('rate limit') ||
     msg.includes('unauthorized') ||
     msg.includes('invalid api key') ||

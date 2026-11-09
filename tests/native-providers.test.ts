@@ -612,3 +612,130 @@ describe('SpyCore wire - system+task concatenation preserved', () => {
     expect('system' in (JSON.parse(chat?.body ?? '{}') as Record<string, unknown>)).toBe(false);
   });
 });
+
+// ───────────────────────── R2 pass 3: tool-use-only replies + stream cap ─────────────────────────
+
+/** One typed Anthropic SSE frame (`event:` + `data:`), same shape as anthropicSse's local helper. */
+const r2ev = (name: string, data: unknown): string => `event: ${name}\ndata: ${JSON.stringify(data)}\n\n`;
+
+describe('R2 pass 3 - tool-use-only replies surface tool_calls (R2-1)', () => {
+  test('Anthropic: a tool_use-only reply yields tool_calls, not a silent done', async () => {
+    responder = () =>
+      sseResp([
+        r2ev('message_start', { type: 'message_start', message: { usage: { input_tokens: 5, output_tokens: 1 } } }),
+        r2ev('content_block_start', {
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'tool_use', id: 'toolu_1', name: 'read_file', input: {} },
+        }),
+        r2ev('content_block_delta', {
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'input_json_delta', partial_json: '{"path":' },
+        }),
+        r2ev('content_block_delta', {
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'input_json_delta', partial_json: '"/etc/passwd"}' },
+        }),
+        r2ev('content_block_stop', { type: 'content_block_stop', index: 0 }),
+        r2ev('message_delta', { type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 9 } }),
+        r2ev('message_stop', { type: 'message_stop' }),
+      ]);
+    const { AnthropicProvider } = await import('../src/lib/providers/anthropic.js');
+    const p = new AnthropicProvider({ baseURL: 'https://api.anthropic.com', apiKey: 'sk-ant-SECRET' });
+    const id = await p.createConversation({ model: 'claude-x' });
+    const events = await collect(p.streamChat({ conversationId: id, message: 'hi', model: 'claude-x' }));
+    expect(events.map((e) => e.type)).toEqual(['usage', 'tool_calls', 'done']);
+    const calls = events.find((e) => e.type === 'tool_calls') as {
+      type: string;
+      calls: Array<{ id: string; name: string; arguments: string }>;
+    };
+    expect(calls.calls).toEqual([
+      { id: 'toolu_1', name: 'read_file', arguments: '{"path":"/etc/passwd"}' },
+    ]);
+  });
+
+  test('Google: a functionCall-only reply yields tool_calls, not a silent done', async () => {
+    responder = () =>
+      sseResp([
+        `data: ${JSON.stringify({
+          candidates: [
+            {
+              content: { parts: [{ functionCall: { name: 'read_file', args: { path: '/etc/passwd' } } }] },
+              finishReason: 'STOP',
+            },
+          ],
+        })}\n\n`,
+      ]);
+    const { GoogleProvider } = await import('../src/lib/providers/google.js');
+    const p = new GoogleProvider({ baseURL: 'https://generativelanguage.googleapis.com', apiKey: 'AIza-SECRET' });
+    const id = await p.createConversation({ model: 'gemini-2.0-flash' });
+    const events = await collect(p.streamChat({ conversationId: id, message: 'hi', model: 'gemini-2.0-flash' }));
+    expect(events.map((e) => e.type)).toEqual(['tool_calls', 'done']);
+    const calls = events.find((e) => e.type === 'tool_calls') as {
+      type: string;
+      calls: Array<{ id: string; name: string; arguments: string }>;
+    };
+    expect(calls.calls).toHaveLength(1);
+    expect(calls.calls[0]?.name).toBe('read_file');
+    expect(calls.calls[0]?.arguments).toBe('{"path":"/etc/passwd"}');
+    expect(calls.calls[0]?.id.length).toBeGreaterThan(0);
+  });
+});
+
+describe('R2 pass 3 - streamed turns are capped at 1 MB (R2-2)', () => {
+  test('OpenAI: 2 MB of text deltas ends in a cap error, never a 2 MB reply', async () => {
+    const big = 'x'.repeat(10_240);
+    const lines: string[] = [];
+    for (let i = 0; i < 200; i += 1) {
+      lines.push(`data: ${JSON.stringify({ choices: [{ delta: { content: big } }] })}\n\n`);
+    }
+    lines.push('data: [DONE]\n\n');
+    responder = () => sseResp(lines);
+    const { OpenAICompatibleProvider } = await import('../src/lib/providers/openai-compatible.js');
+    const p = new OpenAICompatibleProvider({ baseURL: 'http://127.0.0.1:11434/v1', apiKey: 'k' });
+    const id = await p.createConversation({ model: 'm' });
+    const events = await collect(p.streamChat({ conversationId: id, message: 'hi', model: 'm' }));
+    const total = events
+      .filter((e) => e.type === 'text')
+      .reduce((n, e) => n + (e as { text: string }).text.length, 0);
+    expect(total).toBeLessThanOrEqual(1_048_576);
+    const err = events.find((e) => e.type === 'error') as { type: string; message: string } | undefined;
+    expect(err?.message).toMatch(/1,048,576 byte stream cap/);
+    expect(events.some((e) => e.type === 'done')).toBe(false);
+  });
+
+  test('Anthropic: text deltas past the cap end in a cap error', async () => {
+    const big = 'y'.repeat(600_000);
+    responder = () =>
+      sseResp([
+        r2ev('message_start', { type: 'message_start', message: { usage: { input_tokens: 5, output_tokens: 1 } } }),
+        r2ev('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }),
+        r2ev('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: big } }),
+        r2ev('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: big } }),
+        r2ev('message_stop', { type: 'message_stop' }),
+      ]);
+    const { AnthropicProvider } = await import('../src/lib/providers/anthropic.js');
+    const p = new AnthropicProvider({ baseURL: 'https://api.anthropic.com', apiKey: 'sk-ant-SECRET' });
+    const id = await p.createConversation({ model: 'claude-x' });
+    const events = await collect(p.streamChat({ conversationId: id, message: 'hi', model: 'claude-x' }));
+    expect(events.map((e) => e.type)).toEqual(['text', 'error']);
+    expect((events[1] as { message: string }).message).toMatch(/1,048,576 byte stream cap/);
+  });
+
+  test('Google: text parts past the cap end in a cap error', async () => {
+    const big = 'z'.repeat(600_000);
+    responder = () =>
+      sseResp([
+        `data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: big }] } }] })}\n\n`,
+        `data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: big }] } }] })}\n\n`,
+      ]);
+    const { GoogleProvider } = await import('../src/lib/providers/google.js');
+    const p = new GoogleProvider({ baseURL: 'https://generativelanguage.googleapis.com', apiKey: 'AIza-SECRET' });
+    const id = await p.createConversation({ model: 'gemini-2.0-flash' });
+    const events = await collect(p.streamChat({ conversationId: id, message: 'hi', model: 'gemini-2.0-flash' }));
+    expect(events.map((e) => e.type)).toEqual(['text', 'error']);
+    expect((events[1] as { message: string }).message).toMatch(/1,048,576 byte stream cap/);
+  });
+});

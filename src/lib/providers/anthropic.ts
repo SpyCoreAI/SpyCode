@@ -17,9 +17,11 @@ import { EXIT_USER_ERROR, SpycoreCliError } from '../errors.js';
 import {
   BYOK_REQUEST_BODY_TIMEOUT_MS,
   BYOK_REQUEST_HEADERS_TIMEOUT_MS,
+  StreamByteBudget,
   connectionErrorMessage,
   errText,
   readErrorDetail,
+  streamCapErrorMessage,
 } from './wire.js';
 import { pruneByokSessions, trimHistoryMessages } from './history.js';
 import type {
@@ -66,8 +68,12 @@ interface AnthropicStreamData {
   type?: unknown;
   /** message_start */
   message?: { usage?: AnthropicUsage };
+  /** content_block_start: the block being opened (text | tool_use | …). */
+  content_block?: { type?: unknown; id?: unknown; name?: unknown };
+  /** content_block_start / content_block_delta: which block this is. */
+  index?: unknown;
   /** content_block_delta */
-  delta?: { type?: unknown; text?: unknown };
+  delta?: { type?: unknown; text?: unknown; partial_json?: unknown };
   /** message_delta */
   usage?: AnthropicUsage;
   /** message_delta: why the model stopped ('end_turn' | 'max_tokens' | 'stop_sequence' | 'tool_use'). */
@@ -202,8 +208,21 @@ export class AnthropicProvider implements Provider {
     let sawUsage = false;
     let usageInput = 0;
     let usageOutput = 0;
+    // One byte budget for the whole turn's streamed reply (assistant text
+    // + assembled tool-call arguments, R2-2): same 1 MB bound as the
+    // error body, counted incrementally per fragment.
+    const budget = new StreamByteBudget();
     // Why the model stopped - 'max_tokens' means the reply was cut off.
     let stopReason: string | undefined;
+    // Streamed tool_use blocks arrive as `content_block_start` (id +
+    // name) followed by `input_json_delta` fragments; assembled here and
+    // yielded as one `tool_calls` event when the turn ends, mirroring the
+    // OpenAI adapter - a tool-use-only reply used to end `done` with no
+    // text, no warning and no tool_calls (R2-1). Arguments are never
+    // echoed to the terminal (chat.ts prints names only).
+    const toolCallParts = new Map<number, { id: string; name: string; arguments: string }>();
+    const toolCalls = (): Array<{ id: string; name: string; arguments: string }> =>
+      [...toolCallParts.values()].filter((c) => c.id.length > 0 && c.name.length > 0);
     /**
      * A turn that ends in error must still leave the history alternating:
      * keep the partial assistant reply when one exists, otherwise take
@@ -227,15 +246,44 @@ export class AnthropicProvider implements Provider {
         if (typeof data !== 'object' || data === null) continue;
         const chunk = data as AnthropicStreamData;
         switch (chunk.type) {
+          case 'content_block_start': {
+            // A tool_use block opens with its id + name; the arguments
+            // arrive later as input_json_delta fragments.
+            if (chunk.content_block?.type === 'tool_use') {
+              const index = typeof chunk.index === 'number' ? chunk.index : 0;
+              const id = typeof chunk.content_block.id === 'string' ? chunk.content_block.id : '';
+              const name = typeof chunk.content_block.name === 'string' ? chunk.content_block.name : '';
+              if (id.length > 0 || name.length > 0) {
+                toolCallParts.set(index, { id, name, arguments: '' });
+              }
+            }
+            break;
+          }
           case 'content_block_delta': {
-            // Only text deltas become output (thinking/tool-input deltas are skipped).
             if (chunk.delta?.type === 'text_delta' && typeof chunk.delta.text === 'string') {
+              if (!budget.tryAdd(chunk.delta.text)) {
+                settleErroredTurn();
+                yield { type: 'error', message: streamCapErrorMessage() };
+                return;
+              }
               assistantText += chunk.delta.text;
               yield { type: 'text', text: chunk.delta.text };
               if (params.shouldStop?.()) {
                 session.messages.push({ role: 'assistant', content: assistantText });
                 return;
               }
+            } else if (chunk.delta?.type === 'input_json_delta' && typeof chunk.delta.partial_json === 'string') {
+              // Tool-input fragments are skipped as output but still
+              // assembled (and still count toward the turn's byte cap).
+              const index = typeof chunk.index === 'number' ? chunk.index : 0;
+              const cur = toolCallParts.get(index) ?? { id: '', name: '', arguments: '' };
+              if (!budget.tryAdd(chunk.delta.partial_json)) {
+                settleErroredTurn();
+                yield { type: 'error', message: streamCapErrorMessage() };
+                return;
+              }
+              cur.arguments += chunk.delta.partial_json;
+              toolCallParts.set(index, cur);
             }
             break;
           }
@@ -268,6 +316,10 @@ export class AnthropicProvider implements Provider {
           case 'message_stop': {
             session.messages.push({ role: 'assistant', content: assistantText });
             if (sawUsage) yield { type: 'usage', input: usageInput, output: usageOutput };
+            const calls = toolCalls();
+            if (calls.length > 0) {
+              yield { type: 'tool_calls', calls };
+            }
             if (stopReason === 'max_tokens') {
               yield {
                 type: 'warning',
@@ -294,6 +346,10 @@ export class AnthropicProvider implements Provider {
     // Stream ended without message_stop (unusual) - still finish gracefully.
     session.messages.push({ role: 'assistant', content: assistantText });
     if (sawUsage) yield { type: 'usage', input: usageInput, output: usageOutput };
+    const calls = toolCalls();
+    if (calls.length > 0) {
+      yield { type: 'tool_calls', calls };
+    }
     if (stopReason === 'max_tokens') {
       yield {
         type: 'warning',

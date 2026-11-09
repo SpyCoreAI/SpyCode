@@ -52,7 +52,14 @@ interface PendingOutbound {
 }
 
 export class JsonRpcEndpoint {
-  private buf = '';
+  /**
+   * Inbound bytes, accumulated as a Buffer so the line cap binds in BYTES
+   * (R2-8): the old code set the input encoding to utf8 and measured
+   * `buf.length` in UTF-16 code units, so a 1,048,576-char line of 2-byte
+   * chars (2,097,152 wire bytes) fit under the "1 MB" cap and was
+   * answered `parse error` instead of `line too long`.
+   */
+  private buf = Buffer.alloc(0);
   private nextId = 1;
   private closed = false;
   private readonly handlers = new Map<string, RequestHandler>();
@@ -80,8 +87,7 @@ export class JsonRpcEndpoint {
   /** Begin reading frames. Resolves when the input stream ends. */
   start(): Promise<void> {
     return new Promise<void>((resolve) => {
-      this.input.setEncoding('utf8');
-      this.input.on('data', (chunk: string) => this.onData(chunk));
+      this.input.on('data', (chunk: Buffer) => this.onData(chunk));
       const finish = (): void => {
         if (this.closed) return;
         this.closed = true;
@@ -154,27 +160,28 @@ export class JsonRpcEndpoint {
     }
   }
 
-  private onData(chunk: string): void {
-    this.buf += chunk;
+  private onData(chunk: Buffer): void {
+    this.buf = Buffer.concat([this.buf, chunk]);
     // A newline-less buffer past the cap is a runaway line, not a frame:
     // drop it with a parse-error reply instead of growing memory forever.
-    if (this.buf.indexOf('\n') === -1 && this.buf.length > JSONRPC_MAX_LINE_BYTES) {
-      this.buf = '';
+    // The cap is measured in BYTES (buf.length on a Buffer), not chars.
+    if (this.buf.indexOf(0x0a) === -1 && this.buf.length > JSONRPC_MAX_LINE_BYTES) {
+      this.buf = Buffer.alloc(0);
       this.send({ jsonrpc: '2.0', id: null, error: { code: JSONRPC_PARSE_ERROR, message: 'line too long' } });
       return;
     }
-    let nl = this.buf.indexOf('\n');
+    let nl = this.buf.indexOf(0x0a);
     while (nl !== -1) {
-      const line = this.buf.slice(0, nl).trim();
-      this.buf = this.buf.slice(nl + 1);
-      if (line.length > 0) {
-        if (line.length > JSONRPC_MAX_LINE_BYTES) {
+      const rawLine = this.buf.subarray(0, nl);
+      this.buf = this.buf.subarray(nl + 1);
+      if (rawLine.length > 0) {
+        if (rawLine.length > JSONRPC_MAX_LINE_BYTES) {
           this.send({ jsonrpc: '2.0', id: null, error: { code: JSONRPC_PARSE_ERROR, message: 'line too long' } });
         } else {
-          this.handleLine(line);
+          this.handleLine(rawLine.toString('utf8').trim());
         }
       }
-      nl = this.buf.indexOf('\n');
+      nl = this.buf.indexOf(0x0a);
     }
   }
 
@@ -195,15 +202,21 @@ export class JsonRpcEndpoint {
 
     // A response to one of OUR outbound requests. JSON-RPC ids may be
     // strings as well as numbers - a string id is a response, not an
-    // invalid request.
+    // invalid request. The pending map is keyed by the NUMERIC id
+    // request() generated, and Map uses SameValueZero, so a client that
+    // echoes the id as a string ("1" instead of 1) never resolved the
+    // pending request and every permission hung until the 120 s timeout
+    // (R2-7): coerce a numeric string id to its number for the lookup.
     if (
       (typeof msg.id === 'number' || typeof msg.id === 'string') &&
       !('method' in msg) &&
       (('result' in msg) || ('error' in msg))
     ) {
-      const pending = this.pending.get(msg.id);
+      const lookupId =
+        typeof msg.id === 'string' && /^\d+$/.test(msg.id) ? Number(msg.id) : msg.id;
+      const pending = this.pending.get(lookupId);
       if (!pending) return;
-      this.pending.delete(msg.id);
+      this.pending.delete(lookupId);
       clearTimeout(pending.timer);
       if ('error' in msg && msg.error !== undefined && msg.error !== null) {
         const err = msg.error as { code?: number; message?: string };

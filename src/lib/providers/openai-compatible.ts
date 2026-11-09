@@ -22,9 +22,11 @@ import { EXIT_USER_ERROR, SpycoreCliError } from '../errors.js';
 import {
   BYOK_REQUEST_BODY_TIMEOUT_MS,
   BYOK_REQUEST_HEADERS_TIMEOUT_MS,
+  StreamByteBudget,
   connectionErrorMessage,
   errText,
   readErrorDetail,
+  streamCapErrorMessage,
 } from './wire.js';
 import { pruneByokSessions, trimHistoryMessages } from './history.js';
 import type {
@@ -207,23 +209,33 @@ export class OpenAICompatibleProvider implements Provider {
     let sawUsage = false;
     let usageInput = 0;
     let usageOutput = 0;
+    // One byte budget for the whole turn's streamed reply (assistant text
+    // + assembled tool-call arguments, R2-2): the error body was capped
+    // at 1 MB while the success body was unbounded, so a misbehaving
+    // endpoint could grow memory without bound inside the 300 s timeout.
+    const budget = new StreamByteBudget();
     // Why the model stopped - surfaced as a warning when the reply was
     // cut off, instead of ending the turn `done` with no explanation.
     let finishReason: string | undefined;
     // Streamed tool calls arrive as per-index fragments (id + name on
     // the first, arguments in pieces); assembled here and yielded once
-    // the stream ends so native dispatch can run them.
+    // the stream ends so native dispatch can run them. Returns false
+    // when a fragment would take the turn past the stream cap.
     const toolCallParts = new Map<number, { id: string; name: string; arguments: string }>();
-    const absorbToolCallDeltas = (deltas: OpenAIToolCallDelta[] | undefined): void => {
-      if (!deltas) return;
+    const absorbToolCallDeltas = (deltas: OpenAIToolCallDelta[] | undefined): boolean => {
+      if (!deltas) return true;
       for (const d of deltas) {
         const index = typeof d.index === 'number' ? d.index : 0;
         const cur = toolCallParts.get(index) ?? { id: '', name: '', arguments: '' };
         if (typeof d.id === 'string' && d.id.length > 0) cur.id = d.id;
         if (typeof d.function?.name === 'string' && d.function.name.length > 0) cur.name = d.function.name;
-        if (typeof d.function?.arguments === 'string') cur.arguments += d.function.arguments;
+        if (typeof d.function?.arguments === 'string') {
+          if (!budget.tryAdd(d.function.arguments)) return false;
+          cur.arguments += d.function.arguments;
+        }
         toolCallParts.set(index, cur);
       }
+      return true;
     };
     /**
      * A turn that ends in error must still leave the history alternating:
@@ -251,10 +263,23 @@ export class OpenAICompatibleProvider implements Provider {
         const chunk = data as OpenAIStreamChunk;
         const choice = chunk.choices?.[0];
         if (typeof choice?.finish_reason === 'string') finishReason = choice.finish_reason;
-        absorbToolCallDeltas(choice?.delta?.tool_calls);
-        absorbToolCallDeltas(choice?.message?.tool_calls);
+        if (!absorbToolCallDeltas(choice?.delta?.tool_calls)) {
+          settleErroredTurn();
+          yield { type: 'error', message: streamCapErrorMessage() };
+          return;
+        }
+        if (!absorbToolCallDeltas(choice?.message?.tool_calls)) {
+          settleErroredTurn();
+          yield { type: 'error', message: streamCapErrorMessage() };
+          return;
+        }
         const delta = choice?.delta?.content;
         if (typeof delta === 'string' && delta.length > 0) {
+          if (!budget.tryAdd(delta)) {
+            settleErroredTurn();
+            yield { type: 'error', message: streamCapErrorMessage() };
+            return;
+          }
           assistantText += delta;
           yield { type: 'text', text: delta };
           if (params.shouldStop?.()) {

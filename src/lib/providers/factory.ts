@@ -75,18 +75,16 @@ export async function createByokProvider(config: ByokConfig): Promise<Provider> 
         // from one) so the next process does not retry with a revoked token.
         let currentRefreshToken = config.oauthRefreshToken;
         const refresh = async (): Promise<string> => {
-          // Belt and braces: refreshAccessToken aborts its own fetch
-          // after 30s (AbortSignal.timeout), and this race bounds the
-          // caller the same way - a hung token endpoint must fail the
-          // refresh after 30s instead of hanging provider construction -
-          // or a mid-run 401 retry - forever. Either timeout yields a
-          // timeout error; the inner one is what actually closes the
-          // fetch, so the race no longer leaves a hung request behind.
-          const tokens = await withTimeout(
-            refreshAccessToken(oauthConfig, currentRefreshToken),
-            OAUTH_REFRESH_TIMEOUT_MS,
-            'Google OAuth token refresh timed out after 30s',
-          );
+          // Single 30 s timer, owned by refreshAccessToken itself
+          // (fetchWithTimeout in oauth.ts: one setTimeout that aborts
+          // the fetch AND rejects with the friendly message): the factory
+          // used to race a second 30 s `withTimeout` around it, so which
+          // message won - the raw TimeoutError or 'Google OAuth token
+          // refresh timed out after 30s' - was a race between two timers
+          // set to the same 30 s. The inner timer is what actually closes
+          // the hung fetch, so the race added nothing but a second,
+          // competing timeout.
+          const tokens = await refreshAccessToken(oauthConfig, currentRefreshToken);
           if (tokens.refreshToken !== currentRefreshToken) {
             currentRefreshToken = tokens.refreshToken;
             if (config.sourceName) persistRotatedRefreshToken(config.sourceName, tokens.refreshToken);
@@ -129,20 +127,6 @@ export async function createByokProvider(config: ByokConfig): Promise<Provider> 
     EXIT_USER_ERROR,
     'A stored provider config lists one of: openai, anthropic, google. Re-save it with `spycore provider add`.',
   );
-}
-
-/** Bound on a Google OAuth refresh (call-site only - see the refresh closure). */
-const OAUTH_REFRESH_TIMEOUT_MS = 30_000;
-
-/** Race a promise against a timeout; the timeout error names the operation. */
-function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => reject(new Error(message)), ms);
-  });
-  return Promise.race([promise, timeout]).finally(() => {
-    if (timer) clearTimeout(timer);
-  });
 }
 
 /**

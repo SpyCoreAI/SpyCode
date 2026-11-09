@@ -443,7 +443,22 @@ async function resolveConversationId(
         `/conversations/${encodeURIComponent(opts.conversation)}`,
         { apiUrlOverride: apiUrl },
       );
-      const id = (fetched as { id?: string }).id ?? opts.conversation;
+      // Same guard as the create path (assertConversationId), but only
+      // when the server actually returned an id: `??` below guards
+      // null/undefined, so a 200 with `{ id: '' }` (or a non-string id)
+      // used to pass through, get stored as the last conversation id,
+      // and fail downstream as an empty conversation id on the next
+      // stream call instead of failing here. An ABSENT id is NOT an
+      // error: the GET envelope carries the conversation nested
+      // (`{ conversation: {...}, messages: [...] }`), so the requested
+      // id is the fallback - pinned by tests/chat-edges.test.ts
+      // ('--conversation falls back to the requested id when the fetch
+      // has none'). Only a present-but-malformed id is rejected.
+      const rawId = (fetched as { id?: unknown } | null)?.id;
+      if (rawId !== undefined && rawId !== null) {
+        assertConversationId(fetched as ConversationCreateResp);
+      }
+      const id = (fetched as { id?: string } | null)?.id ?? opts.conversation;
       return id;
     } catch (err) {
       if (isSpycoreCliError(err) && err.code === EXIT_USER_ERROR) {

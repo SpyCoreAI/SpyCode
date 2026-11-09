@@ -55,6 +55,18 @@ describe('isLocalBaseURL', () => {
     expect(isLocalBaseURL('http://127.255.255.255:8080/v1')).toBe(true);
   });
 
+  test('a hostname merely starting with 127. is not loopback (R2 pass 3)', () => {
+    // 127.0.0.1.evil.com is a DNS name, not a 127/8 address: it used to
+    // pass the MCP https gate and skip both provider-add warnings.
+    expect(isLocalBaseURL('http://127.0.0.1.evil.com:8080/v1')).toBe(false);
+    expect(isLocalBaseURL('http://127.evil.com:8080/v1')).toBe(false);
+    expect(isLocalBaseURL('http://127.0.0.999:8080/v1')).toBe(false);
+    // Controls: real 127/8 addresses are still local.
+    expect(isLocalBaseURL('http://127.0.0.1:8080/v1')).toBe(true);
+    expect(isLocalBaseURL('http://127.0.0.2:8080/v1')).toBe(true);
+    expect(isLocalBaseURL('http://127.255.255.255:8080/v1')).toBe(true);
+  });
+
   test('public hosts are not local', () => {
     expect(isLocalBaseURL('https://api.openai.com/v1')).toBe(false);
     expect(isLocalBaseURL('https://example.com')).toBe(false);
@@ -156,6 +168,43 @@ describe('resolveByokConfig', () => {
         env: { ANTHROPIC_API_KEY: '   ' },
       }),
     ).toThrow('An API key is required');
+  });
+});
+
+describe('resolveProviderSelection - stored Google OAuth without a refresh token (R2 pass 3)', () => {
+  const storedGoogleNoRefresh = {
+    name: 'g',
+    type: 'google' as const,
+    baseURL: 'https://generativelanguage.googleapis.com',
+    model: 'gemini-2.0-flash',
+    oauthClientId: 'cid-123',
+  };
+
+  test('client id present but no refresh token is diagnosed as incomplete OAuth, not a missing API key', () => {
+    expect(() =>
+      resolveProviderSelection({
+        providerFlag: 'g',
+        baseUrl: undefined,
+        model: undefined,
+        apiKeyEnv: undefined,
+        env: {},
+        stored: [storedGoogleNoRefresh],
+        defaultProvider: undefined,
+      }),
+    ).toThrow('Provider uses Google OAuth but has no refresh token stored.');
+  });
+
+  test('a resolvable key still wins: the entry can run on the key', () => {
+    const sel = resolveProviderSelection({
+      providerFlag: 'g',
+      baseUrl: undefined,
+      model: undefined,
+      apiKeyEnv: undefined,
+      env: { GEMINI_API_KEY: 'AIza-key' },
+      stored: [storedGoogleNoRefresh],
+      defaultProvider: undefined,
+    });
+    expect(sel.kind).toBe('byok');
   });
 });
 

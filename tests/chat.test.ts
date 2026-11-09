@@ -329,6 +329,38 @@ describe('chat command', () => {
     expect(stdout()).toContain('body line');
   });
 
+  test('--conversation with a server-returned empty id fails loudly instead of streaming with an empty id (R2 pass 3)', async () => {
+    const seen: string[] = [];
+    responder = (url, init) => {
+      seen.push(url);
+      if (url.includes('/conversations/cnv_x') && init.method === 'GET') {
+        // Malformed server response: success envelope, empty id.
+        return jsonResp(200, { success: true, data: { id: '', title: 'T', model: 'HERMES' } });
+      }
+      throw new Error(`unexpected ${init.method} ${url}`);
+    };
+    await expect(runChat(['chat', '--conversation', 'cnv_x', '--raw', 'Hi'])).rejects.toThrow(
+      /created a conversation without an id/,
+    );
+    // Nothing was streamed with the empty id.
+    expect(seen.some((u) => u.endsWith('/api/chat/stream'))).toBe(false);
+  });
+
+  test('--conversation with a non-string server-returned id fails the same way (R2 pass 3)', async () => {
+    const seen: string[] = [];
+    responder = (url, init) => {
+      seen.push(url);
+      if (url.includes('/conversations/cnv_x') && init.method === 'GET') {
+        return jsonResp(200, { success: true, data: { id: 42, title: 'T', model: 'HERMES' } });
+      }
+      throw new Error(`unexpected ${init.method} ${url}`);
+    };
+    await expect(runChat(['chat', '--conversation', 'cnv_x', '--raw', 'Hi'])).rejects.toThrow(
+      /created a conversation without an id/,
+    );
+    expect(seen.some((u) => u.endsWith('/api/chat/stream'))).toBe(false);
+  });
+
   test('not-logged-in path errors with the login hint', async () => {
     const { clearStoredTokenInFile } = await import('../src/lib/config.js');
     clearStoredTokenInFile();

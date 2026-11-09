@@ -104,6 +104,38 @@ describe('refreshAccessToken validates the payload (R2 L1)', () => {
   });
 });
 describe('refreshAccessToken timeout (4c)', () => {
+  test('a fetch that rejects with TimeoutError (Node 24 AbortSignal.timeout reason) maps to the friendly message (R2 pass 3)', async () => {
+    const { vi } = await import('vitest');
+    const { refreshAccessToken } = await import('../src/lib/oauth.js');
+    // On Node 24 AbortSignal.timeout() aborts with a TimeoutError
+    // DOMException, not AbortError - the old catch matched AbortError
+    // only, so the raw TimeoutError propagated to the user.
+    const err = new Error('The operation was aborted due to timeout') as Error & { name: string };
+    err.name = 'TimeoutError';
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw err;
+      }),
+    );
+    try {
+      await expect(
+        refreshAccessToken(
+          {
+            clientId: 'id',
+            authUrl: 'https://example.com/auth',
+            tokenUrl: 'https://example.com/token',
+            scopes: [],
+            redirectPort: 0,
+          },
+          'refresh-token',
+          { timeoutMs: 50 },
+        ),
+      ).rejects.toThrow(/timed out after 0\.05s/);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
   test('a hung token endpoint fails after the timeout instead of hanging forever', async () => {
     const { vi } = await import('vitest');
     const { refreshAccessToken, OAUTH_FETCH_TIMEOUT_MS } = await import(
@@ -139,6 +171,36 @@ describe('refreshAccessToken timeout (4c)', () => {
         ),
       ).rejects.toThrow(/timed out after 0.05s/);
       expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe('exchangeCodeForTokens timeout (R2 pass 3)', () => {
+  const cfg = {
+    clientId: 'id',
+    authUrl: 'https://example.com/auth',
+    tokenUrl: 'https://example.com/token',
+    scopes: [],
+    redirectPort: 0,
+  };
+
+  test('a hung token endpoint fails with the 30s bound named, not a raw TimeoutError', async () => {
+    const { vi } = await import('vitest');
+    const { exchangeCodeForTokens } = await import('../src/lib/oauth.js');
+    const err = new Error('The operation was aborted due to timeout') as Error & { name: string };
+    err.name = 'TimeoutError';
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw err;
+      }),
+    );
+    try {
+      await expect(exchangeCodeForTokens(cfg, 'code', 'verifier', 'http://127.0.0.1:0/callback')).rejects.toThrow(
+        /Token exchange timed out after 30s/,
+      );
     } finally {
       vi.unstubAllGlobals();
     }

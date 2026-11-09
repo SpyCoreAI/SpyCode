@@ -19,9 +19,11 @@ import { EXIT_USER_ERROR, SpycoreCliError } from '../errors.js';
 import {
   BYOK_REQUEST_BODY_TIMEOUT_MS,
   BYOK_REQUEST_HEADERS_TIMEOUT_MS,
+  StreamByteBudget,
   connectionErrorMessage,
   errText,
   readErrorDetail,
+  streamCapErrorMessage,
 } from './wire.js';
 import { pruneByokSessions, trimHistoryMessages } from './history.js';
 import type {
@@ -33,8 +35,13 @@ import type {
 } from './types.js';
 
 /** Typed views of the alt=sse payloads we consume. */
+interface GoogleFunctionCall {
+  name?: unknown;
+  args?: unknown;
+}
 interface GooglePart {
   text?: unknown;
+  functionCall?: GoogleFunctionCall;
 }
 interface GoogleCandidate {
   content?: { parts?: GooglePart[] };
@@ -282,6 +289,17 @@ export class GoogleProvider implements Provider {
     let sawUsage = false;
     let usageInput = 0;
     let usageOutput = 0;
+    // One byte budget for the whole turn's streamed reply (assistant text
+    // + assembled function-call arguments, R2-2): same 1 MB bound as the
+    // error body, counted incrementally per fragment.
+    const budget = new StreamByteBudget();
+    // Function calls the model emitted this turn (R2-1): a functionCall-only
+    // reply used to end `done` with no text, no warning and no tool_calls.
+    // Google carries no call id on the wire, so one is minted per call
+    // (`google-call-0`, …); the chat path prints names only, and the
+    // agent loop keys native dispatch off the id. Arguments are JSON text,
+    // never echoed to the terminal.
+    const functionCalls: Array<{ id: string; name: string; arguments: string }> = [];
     // The API reports why generation stopped per candidate; MAX_TOKENS
     // means the reply was cut off mid-thought.
     let finishReason: string | undefined;
@@ -331,12 +349,31 @@ export class GoogleProvider implements Provider {
         if (typeof reason === 'string' && reason.length > 0) finishReason = reason;
         for (const part of parts) {
           if (typeof part.text === 'string' && part.text.length > 0) {
+            if (!budget.tryAdd(part.text)) {
+              settleErroredTurn();
+              yield { type: 'error', message: streamCapErrorMessage() };
+              return;
+            }
             assistantText += part.text;
             yield { type: 'text', text: part.text };
             if (params.shouldStop?.()) {
               session.messages.push({ role: 'assistant', content: assistantText });
               return;
             }
+          }
+          const call = part.functionCall;
+          if (call && typeof call.name === 'string' && call.name.length > 0) {
+            const argsText = call.args === undefined ? '' : JSON.stringify(call.args);
+            if (!budget.tryAdd(argsText)) {
+              settleErroredTurn();
+              yield { type: 'error', message: streamCapErrorMessage() };
+              return;
+            }
+            functionCalls.push({
+              id: `google-call-${functionCalls.length}`,
+              name: call.name,
+              arguments: argsText,
+            });
           }
         }
         // A candidate that finishes blocked (SAFETY / RECITATION / …)
@@ -371,6 +408,9 @@ export class GoogleProvider implements Provider {
     // alt=sse has no terminator event - a clean stream end IS completion.
     session.messages.push({ role: 'assistant', content: assistantText });
     if (sawUsage) yield { type: 'usage', input: usageInput, output: usageOutput };
+    if (functionCalls.length > 0) {
+      yield { type: 'tool_calls', calls: functionCalls };
+    }
     if (finishReason === 'MAX_TOKENS') {
       yield {
         type: 'warning',

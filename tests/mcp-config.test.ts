@@ -143,6 +143,17 @@ describe('remote (http) entries - parsing, expansion, redaction (1.9)', () => {
     }
   });
 
+  test('a DNS name merely starting with 127. is not loopback (R2 pass 3)', async () => {
+    const { validateRemoteMcpUrl } = await import('../src/lib/agent/mcp-config.js');
+    // 127.0.0.1.evil.com passed the https gate as loopback, so a remote
+    // host got a plain-http MCP connection (with secret header values).
+    expect(validateRemoteMcpUrl('http://127.0.0.1.evil.com:9000/mcp')).toMatch(/https/);
+    expect(validateRemoteMcpUrl('http://127.evil.com:9000/mcp')).toMatch(/https/);
+    // Controls: real 127/8 loopback is still allowed over http.
+    expect(validateRemoteMcpUrl('http://127.0.0.1:9000/mcp')).toBeNull();
+    expect(validateRemoteMcpUrl('http://127.0.0.2:9000/mcp')).toBeNull();
+  });
+
   test('an http entry round-trips through the project file', () => {
     const servers: McpServerConfig[] = [
       { name: 'remote', type: 'http', url: 'https://mcp.example.com/mcp', headers: { Authorization: 'Bearer ${T}' } },

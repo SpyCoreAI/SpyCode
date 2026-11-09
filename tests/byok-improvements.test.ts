@@ -124,6 +124,20 @@ describe('B4: fallback error detection', () => {
     expect(isFallbackEligibleError(new Error('Model stream interrupted: invalid JSON'))).toBe(false);
   });
 
+  test('numeric 500 is eligible, and digit substrings no longer false-positive (R2 pass 3)', () => {
+    // The numeric list was missing 500 while the message substrings had
+    // it, so a code-carrying 500 hard-failed instead of falling back.
+    expect(isFallbackEligibleError({ code: 500, message: 'upstream server error' })).toBe(true);
+    expect(isFallbackEligibleError(new Error('Model endpoint returned HTTP 500.'))).toBe(true);
+    // Bare includes('500') matched the digits inside '1500' (and '1401'
+    // matched '401'): a user error quoting a token count was treated as
+    // a transient endpoint failure. Word-boundary matching must not.
+    expect(isFallbackEligibleError(new Error('output stopped at 1500 tokens'))).toBe(false);
+    expect(isFallbackEligibleError(new Error('limit is 1401 tokens'))).toBe(false);
+    expect(isFallbackEligibleError(new Error('limit is 5000 tokens'))).toBe(false);
+    expect(isFallbackEligibleError(new Error('Model endpoint returned HTTP 400.'))).toBe(false);
+  });
+
   test('does not flag user errors', () => {
     expect(isFallbackEligibleError(new Error('Invalid request format'))).toBe(false);
     expect(isFallbackEligibleError(null)).toBe(false);

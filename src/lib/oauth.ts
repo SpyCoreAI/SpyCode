@@ -240,6 +240,62 @@ async function readCappedErrorText(resp: Response): Promise<string> {
   return '';
 }
 
+/**
+ * A fetch aborted by its timeout signal: on Node 24 `AbortSignal.timeout()`
+ * aborts with a `TimeoutError` DOMException, NOT the `AbortError` older
+ * Node versions produced - a catch that matches only `AbortError` never
+ * fires and the raw `TimeoutError` propagates to the user. Match both.
+ */
+function isTimeoutError(err: unknown): boolean {
+  return err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError');
+}
+
+/**
+ * Fetch with a single timeout (R2-5). One `setTimeout` does both jobs: it
+ * aborts the request (so a hung endpoint does not leak a live fetch) AND
+ * rejects the race with the friendly timeout message (so the caller fails
+ * even when the transport ignores the abort signal - a test double that
+ * never settles, or a fetch that never observes the abort).
+ *
+ * A plain `setTimeout`, deliberately NOT `AbortSignal.timeout()`: the
+ * factory used to race a second 30 s `withTimeout` around the refresh, so
+ * which message won - the raw `TimeoutError` or 'Google OAuth token
+ * refresh timed out after 30s' - was a race between two timers set to the
+ * same 30 s. There is now exactly one timer, owned here, and the factory
+ * race is gone, so the message is deterministic. The `setTimeout` form
+ * also matters for tests: `AbortSignal.timeout()` is a Node internal
+ * timer vitest fake timers do not advance, while the 4b1 item-13 factory
+ * test advances 30 s of fake time.
+ */
+async function fetchWithTimeout(
+  url: string,
+  init: Omit<RequestInit, 'signal'>,
+  timeoutMs: number,
+  timeoutMessage: string,
+): Promise<Response> {
+  const ctrl = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      ctrl.abort();
+      reject(new Error(timeoutMessage));
+    }, timeoutMs);
+    // The timeout must not hold the process open on its own.
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([fetch(url, { ...init, signal: ctrl.signal }), timeout]);
+  } catch (err) {
+    // The fetch itself observed the abort (AbortError, or TimeoutError
+    // on Node 24 when the signal came from elsewhere): same friendly
+    // message, never the raw DOMException.
+    if (isTimeoutError(err)) throw new Error(timeoutMessage);
+    throw err;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export async function exchangeCodeForTokens(
   config: OAuthConfig,
   code: string,
@@ -248,19 +304,24 @@ export async function exchangeCodeForTokens(
 ): Promise<OAuthTokens> {
   // Same 30s bound as the refresh path: a hung token endpoint used to
   // stall the OAuth flow until the outer 5-minute timeout fired, and the
-  // fetch itself was never aborted.
-  const resp = await fetch(config.tokenUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      client_id: config.clientId,
-      code,
-      code_verifier: verifier,
-      grant_type: 'authorization_code',
-      redirect_uri: redirectUri,
-    }).toString(),
-    signal: AbortSignal.timeout(OAUTH_FETCH_TIMEOUT_MS),
-  });
+  // fetch itself was never aborted. The timeout error names the 30 s
+  // bound (fetchWithTimeout); a raw TimeoutError never escapes.
+  const resp = await fetchWithTimeout(
+    config.tokenUrl,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: config.clientId,
+        code,
+        code_verifier: verifier,
+        grant_type: 'authorization_code',
+        redirect_uri: redirectUri,
+      }).toString(),
+    },
+    OAUTH_FETCH_TIMEOUT_MS,
+    `Token exchange timed out after ${OAUTH_FETCH_TIMEOUT_MS / 1000}s.`,
+  );
 
   if (!resp.ok) {
     const text = await readCappedErrorText(resp);
@@ -314,11 +375,13 @@ export async function refreshAccessToken(
   opts: { timeoutMs?: number } = {},
 ): Promise<OAuthTokens> {
   const timeoutMs = opts.timeoutMs ?? OAUTH_FETCH_TIMEOUT_MS;
-  let resp: Response;
-  try {
-    // A hung token endpoint used to hang provider construction forever -
-    // the fetch had no timeout at all.
-    resp = await fetch(config.tokenUrl, {
+  // A hung token endpoint used to hang provider construction forever -
+  // the fetch had no timeout at all. Single timer, owned by
+  // fetchWithTimeout (see above): it aborts the fetch AND rejects with
+  // the friendly message naming the bound.
+  const resp = await fetchWithTimeout(
+    config.tokenUrl,
+    {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
@@ -326,16 +389,10 @@ export async function refreshAccessToken(
         refresh_token: refreshToken,
         grant_type: 'refresh_token',
       }).toString(),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-  } catch (err) {
-    if (err instanceof Error && err.name === 'AbortError') {
-      throw new Error(
-        `Token refresh timed out after ${timeoutMs / 1000}s.`,
-      );
-    }
-    throw err;
-  }
+    },
+    timeoutMs,
+    `Token refresh timed out after ${timeoutMs / 1000}s.`,
+  );
 
   if (!resp.ok) {
     const text = await readCappedErrorText(resp);

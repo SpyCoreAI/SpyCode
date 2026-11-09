@@ -17,6 +17,8 @@ import { randomBytes } from 'node:crypto';
 import { getStoredMcpServers, setStoredMcpServers } from '../config.js';
 // redact.ts imports nothing, so this cannot form a cycle with config.ts.
 import { redactFreeText, redactUrlCredentials } from '../redact.js';
+// byok-config.ts imports only errors.js, so this adds no cycle either.
+import { isLoopbackHostname } from '../providers/byok-config.js';
 
 /**
  * One environment variable handed to a server child. `value === undefined` means
@@ -118,20 +120,13 @@ const ENV_REF_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
  * Loopback hosts where plain http:// is permitted. Everything else = https.
  * Same coverage as `isLocalBaseURL` (byok-config.ts): the whole 127/8
  * block, not just 127.0.0.1 - 127.0.0.2 and friends are local too - plus
- * 0.0.0.0 and .local names (R2-6).
+ * 0.0.0.0 and .local names (R2-6). Delegates to the shared helper so the
+ * two gates cannot drift: the 127/8 test matches a real 127/8 address
+ * (four numeric labels), never a DNS name that merely starts with `127.`
+ * (e.g. `127.0.0.1.evil.com`).
  */
 function isLoopbackHost(hostname: string): boolean {
-  // URL strips the brackets from an IPv6 literal, so `[::1]` → `::1` -
-  // except on Node 24, where hostname keeps the brackets ('[::1]').
-  // Match both spellings.
-  const h = hostname.toLowerCase().replace(/^\[|\]$/g, '');
-  return (
-    h === 'localhost' ||
-    h.startsWith('127.') ||
-    h === '0.0.0.0' ||
-    h === '::1' ||
-    h.endsWith('.local')
-  );
+  return isLoopbackHostname(hostname);
 }
 
 /**

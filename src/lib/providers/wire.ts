@@ -20,6 +20,47 @@ import { truncateSafe } from '../text.js';
 export const BYOK_REQUEST_HEADERS_TIMEOUT_MS = 30_000;
 export const BYOK_REQUEST_BODY_TIMEOUT_MS = 300_000;
 
+/**
+ * Cap on one streamed BYOK turn's accumulated reply (assistant text +
+ * assembled tool-call arguments, counted in UTF-8 bytes). The error body
+ * was already capped at 1 MB while the SUCCESS body was unbounded: a
+ * misbehaving endpoint could stream gigabytes inside the 300 s body
+ * timeout, and the history trim counts messages (100), not bytes, so one
+ * giant assistant message was never trimmed and was replayed in full on
+ * every later turn. Same 1 MB bound as ERROR_BODY_MAX_BYTES, counted
+ * incrementally per fragment so the check itself is O(fragment), never
+ * O(accumulated reply).
+ */
+export const BYOK_STREAM_MAX_BYTES = ERROR_BODY_MAX_BYTES;
+
+/** Incremental byte budget for one streamed turn (see BYOK_STREAM_MAX_BYTES). */
+export class StreamByteBudget {
+  private used = 0;
+  /** Bytes accepted so far. */
+  get usedBytes(): number {
+    return this.used;
+  }
+  /**
+   * Accept `text` if it still fits under the cap. Returns false (and
+   * accepts nothing) when the fragment would take the turn past the cap -
+   * the caller then ends the turn with the cap error instead.
+   */
+  tryAdd(text: string): boolean {
+    const n = Buffer.byteLength(text, 'utf8');
+    if (this.used + n > BYOK_STREAM_MAX_BYTES) return false;
+    this.used += n;
+    return true;
+  }
+}
+
+/** Error text for a turn that trips the stream cap (names the cap). */
+export function streamCapErrorMessage(): string {
+  return (
+    `Model reply exceeded the ${BYOK_STREAM_MAX_BYTES.toLocaleString('en-US')} byte stream cap - ` +
+    'the endpoint streamed more than the allowed reply size for one turn.'
+  );
+}
+
 export function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }

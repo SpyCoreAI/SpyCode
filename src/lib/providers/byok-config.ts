@@ -56,6 +56,36 @@ export function parseProviderKind(raw: string | undefined): ProviderKind {
   );
 }
 
+/**
+ * True when a hostname is a loopback host: `localhost`, the whole 127/8
+ * block, `0.0.0.0`, `::1`, or a `.local` name. Shared by `isLocalBaseURL`
+ * and the MCP https gate (`agent/mcp-config.ts:isLoopbackHost`) so the
+ * two gates can never drift apart again.
+ *
+ * The 127/8 test matches a REAL 127/8 address only: exactly four numeric
+ * labels, the first `127`. A bare `startsWith('127.')` also matched
+ * `127.0.0.1.evil.com` (a DNS name that merely starts with those digits),
+ * which passed both the MCP https gate and the provider-add warnings for
+ * a remote plain-http host.
+ */
+export function isLoopbackHostname(hostname: string): boolean {
+  // URL strips the brackets from an IPv6 literal, so `[::1]` → `::1` -
+  // except on Node 24, where hostname keeps the brackets ('[::1]').
+  // Match both spellings.
+  const bareHost =
+    hostname.startsWith('[') && hostname.endsWith(']')
+      ? hostname.slice(1, -1)
+      : hostname;
+  const h = bareHost.toLowerCase();
+  if (h === 'localhost' || h === '0.0.0.0' || h === '::1' || h.endsWith('.local')) return true;
+  const labels = h.split('.');
+  return (
+    labels.length === 4 &&
+    labels[0] === '127' &&
+    labels.every((label) => /^\d{1,3}$/.test(label) && Number(label) <= 255)
+  );
+}
+
 /** True when the base URL points at a local server (drives the "· local" label). */
 export function isLocalBaseURL(baseURL: string): boolean {
   let host: string;
@@ -64,18 +94,7 @@ export function isLocalBaseURL(baseURL: string): boolean {
   } catch {
     return false;
   }
-  // URL strips the brackets from an IPv6 literal, so `[::1]` → `::1` -
-  // except on Node 24, where hostname keeps the brackets ('[::1]').
-  // Match both spellings. The whole 127/8 block is loopback, not just
-  // 127.0.0.1: 127.0.0.2 and friends are local too.
-  const bareHost = host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
-  return (
-    bareHost === 'localhost' ||
-    bareHost.startsWith('127.') ||
-    bareHost === '0.0.0.0' ||
-    bareHost === '::1' ||
-    bareHost.endsWith('.local')
-  );
+  return isLoopbackHostname(host);
 }
 
 /** The routing line for a BYOK run - the user's OWN model + endpoint. */
@@ -282,6 +301,27 @@ export function resolveProviderSelection(opts: {
     const baseURL = ((opts.baseUrl ?? '').trim() || stored.baseURL || BYOK_TYPE_DEFAULTS[type].baseURL)
       .replace(/\/+$/, '');
     const { apiKey, consultedVar } = resolveStoredKey(opts.apiKeyEnv, stored, opts.env);
+    // A stored Google OAuth entry with a client id but no refresh token
+    // is an INCOMPLETE OAuth config, not a missing-key config: without
+    // this the `requireKey` below throws "An API key is required", and
+    // the factory's correct re-authenticate branch (factory.ts) is never
+    // reached - every CLI path resolves here first, so that branch is
+    // dead via every CLI path and survives only as a defensive guard for
+    // direct createByokProvider callers. Diagnose it here, with the
+    // factory's wording. (A resolvable key still wins: the entry can
+    // run on the key, so only the no-key shape is re-diagnosed.)
+    if (
+      type === 'google' &&
+      stored.oauthClientId &&
+      !stored.oauthRefreshToken &&
+      !apiKey
+    ) {
+      throw new SpycoreCliError(
+        'Provider uses Google OAuth but has no refresh token stored.',
+        EXIT_USER_ERROR,
+        'Re-authenticate with `spycore provider add --type google --oauth`.',
+      );
+    }
     // For OAuth providers, the API key may be absent; the refresh token is used instead.
     // Only require a key if there's no OAuth refresh token.
     if (!stored.oauthRefreshToken) {

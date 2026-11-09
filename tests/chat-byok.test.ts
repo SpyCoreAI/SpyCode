@@ -253,6 +253,76 @@ describe('BYOK chat (logged out)', () => {
     expect(payload.message).toBe('');
     expect(payload.toolCalls).toEqual(['read_file']);
   });
+
+  test('an Anthropic tool_use-only reply is explained on stderr, not a bare blank line (R2 pass 3)', async () => {
+    const { setStoredProviders } = await import('../src/lib/config.js');
+    setStoredProviders([
+      { name: 'local', type: 'anthropic', baseURL: 'https://api.anthropic.com', model: 'claude-x', apiKey: 'sk-test' },
+    ]);
+    const ev = (name: string, data: unknown): string => `event: ${name}\ndata: ${JSON.stringify(data)}\n\n`;
+    responder = (url) => {
+      if (!url.includes('api.anthropic.com')) throw new Error(`unexpected ${url}`);
+      return {
+        statusCode: 200,
+        headers: { 'content-type': 'text/event-stream' },
+        body: Readable.from([
+          Buffer.from(
+            [
+              ev('message_start', { type: 'message_start', message: { usage: { input_tokens: 5, output_tokens: 1 } } }),
+              ev('content_block_start', {
+                type: 'content_block_start',
+                index: 0,
+                content_block: { type: 'tool_use', id: 'toolu_1', name: 'read_file', input: {} },
+              }),
+              ev('content_block_delta', {
+                type: 'content_block_delta',
+                index: 0,
+                delta: { type: 'input_json_delta', partial_json: '{"path":"/etc/passwd"}' },
+              }),
+              ev('message_delta', { type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 9 } }),
+              ev('message_stop', { type: 'message_stop' }),
+            ].join(''),
+            'utf8',
+          ),
+        ]),
+      };
+    };
+    await runChat(['chat', '--provider', 'local', 'hi']);
+    expect(stderr()).toMatch(/tried to call tools \(read_file\)/);
+    expect(stderr()).not.toContain('/etc/passwd');
+    expect(stdout()).toBe('\n');
+  });
+
+  test('a Google functionCall-only reply is explained on stderr, not a bare blank line (R2 pass 3)', async () => {
+    const { setStoredProviders } = await import('../src/lib/config.js');
+    setStoredProviders([
+      { name: 'local', type: 'google', baseURL: 'https://generativelanguage.googleapis.com', model: 'gemini-2.0-flash', apiKey: 'AIza-test' },
+    ]);
+    responder = (url) => {
+      if (!url.includes('generativelanguage.googleapis.com')) throw new Error(`unexpected ${url}`);
+      return {
+        statusCode: 200,
+        headers: { 'content-type': 'text/event-stream' },
+        body: Readable.from([
+          Buffer.from(
+            `data: ${JSON.stringify({
+              candidates: [
+                {
+                  content: { parts: [{ functionCall: { name: 'read_file', args: { path: '/etc/passwd' } } }] },
+                  finishReason: 'STOP',
+                },
+              ],
+            })}\n\n`,
+            'utf8',
+          ),
+        ]),
+      };
+    };
+    await runChat(['chat', '--provider', 'local', 'hi']);
+    expect(stderr()).toMatch(/tried to call tools \(read_file\)/);
+    expect(stderr()).not.toContain('/etc/passwd');
+    expect(stdout()).toBe('\n');
+  });
 });
 
 describe('chat --new on the SpyCore path', () => {
