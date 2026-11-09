@@ -3,7 +3,7 @@ import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
-import { freshConfigDir } from './helpers.js';
+import { freshConfigDir, isExactHost } from './helpers.js';
 
 // BYOK chat (items 17-19): the --provider path bypasses the SpyCore login
 // gate, wires --new on the SpyCore path, and honors --attach/--no-stream
@@ -152,7 +152,7 @@ async function runChat(argv: string[]): Promise<void> {
 /** BYOK provider answers; any SpyCore URL is a failure (logged-out path must not touch it). */
 function byokResponder(): Responder {
   return (url) => {
-    if (url.includes('127.0.0.1:11434')) return openaiSse(['hello']);
+    if (isExactHost(url, '127.0.0.1:11434')) return openaiSse(['hello']);
     throw new Error(`unexpected ${url} - BYOK chat must not touch SpyCore`);
   };
 }
@@ -204,7 +204,7 @@ describe('BYOK chat (logged out)', () => {
 
   test('a truncated BYOK reply warns, and usage tokens print (R2 L7)', async () => {
     responder = (url) => {
-      if (url.includes('127.0.0.1:11434')) return openaiSseTruncated();
+      if (isExactHost(url, '127.0.0.1:11434')) return openaiSseTruncated();
       throw new Error(`unexpected ${url} - BYOK chat must not touch SpyCore`);
     };
     await runChat(['chat', '--provider', 'local', 'hi']);
@@ -216,7 +216,7 @@ describe('BYOK chat (logged out)', () => {
 
   test('a truncated BYOK reply carries usage + warnings in --json (R2 L7)', async () => {
     responder = (url) => {
-      if (url.includes('127.0.0.1:11434')) return openaiSseTruncated();
+      if (isExactHost(url, '127.0.0.1:11434')) return openaiSseTruncated();
       throw new Error(`unexpected ${url} - BYOK chat must not touch SpyCore`);
     };
     await runChat(['--json', 'chat', '--provider', 'local', 'hi']);
@@ -232,7 +232,7 @@ describe('BYOK chat (logged out)', () => {
 
   test('a reply of only tool calls is explained on stderr instead of a bare blank line (R2-8)', async () => {
     responder = (url) => {
-      if (url.includes('127.0.0.1:11434')) return openaiSseToolCalls();
+      if (isExactHost(url, '127.0.0.1:11434')) return openaiSseToolCalls();
       throw new Error(`unexpected ${url} - BYOK chat must not touch SpyCore`);
     };
     await runChat(['chat', '--provider', 'local', 'hi']);
@@ -245,7 +245,7 @@ describe('BYOK chat (logged out)', () => {
 
   test('tool calls are named in the --json payload (R2-8)', async () => {
     responder = (url) => {
-      if (url.includes('127.0.0.1:11434')) return openaiSseToolCalls();
+      if (isExactHost(url, '127.0.0.1:11434')) return openaiSseToolCalls();
       throw new Error(`unexpected ${url} - BYOK chat must not touch SpyCore`);
     };
     await runChat(['--json', 'chat', '--provider', 'local', 'hi']);
@@ -261,7 +261,7 @@ describe('BYOK chat (logged out)', () => {
     ]);
     const ev = (name: string, data: unknown): string => `event: ${name}\ndata: ${JSON.stringify(data)}\n\n`;
     responder = (url) => {
-      if (!url.includes('api.anthropic.com')) throw new Error(`unexpected ${url}`);
+      if (!isExactHost(url, 'api.anthropic.com')) throw new Error(`unexpected ${url}`);
       return {
         statusCode: 200,
         headers: { 'content-type': 'text/event-stream' },
@@ -293,13 +293,32 @@ describe('BYOK chat (logged out)', () => {
     expect(stdout()).toBe('\n');
   });
 
+  test('a wrong-host Anthropic URL carrying the hostname as a substring is rejected (R2-CI1)', async () => {
+    const { setStoredProviders } = await import('../src/lib/config.js');
+    setStoredProviders([
+      { name: 'local', type: 'anthropic', baseURL: 'https://evil.example/?api.anthropic.com', model: 'claude-x', apiKey: 'sk-test' },
+    ]);
+    responder = (url) => {
+      if (!isExactHost(url, 'api.anthropic.com')) throw new Error(`unexpected ${url}`);
+      // Unreachable while the guard works: the host is evil.example.
+      return openaiSse(['hello']);
+    };
+    await expect(runChat(['chat', '--provider', 'local', 'hi'])).rejects.toThrow(
+      /unexpected https:\/\/evil\.example/,
+    );
+    expect(requests).toHaveLength(1);
+    // The substring IS present in the requested URL - the mock must still refuse it.
+    expect(requests[0]?.url).toContain('api.anthropic.com');
+    expect(new URL(requests[0]?.url ?? '').hostname).toBe('evil.example');
+  });
+
   test('a Google functionCall-only reply is explained on stderr, not a bare blank line (R2 pass 3)', async () => {
     const { setStoredProviders } = await import('../src/lib/config.js');
     setStoredProviders([
       { name: 'local', type: 'google', baseURL: 'https://generativelanguage.googleapis.com', model: 'gemini-2.0-flash', apiKey: 'AIza-test' },
     ]);
     responder = (url) => {
-      if (!url.includes('generativelanguage.googleapis.com')) throw new Error(`unexpected ${url}`);
+      if (!isExactHost(url, 'generativelanguage.googleapis.com')) throw new Error(`unexpected ${url}`);
       return {
         statusCode: 200,
         headers: { 'content-type': 'text/event-stream' },
@@ -322,6 +341,25 @@ describe('BYOK chat (logged out)', () => {
     expect(stderr()).toMatch(/tried to call tools \(read_file\)/);
     expect(stderr()).not.toContain('/etc/passwd');
     expect(stdout()).toBe('\n');
+  });
+
+  test('a wrong-host Google URL carrying the hostname as a substring is rejected (R2-CI1)', async () => {
+    const { setStoredProviders } = await import('../src/lib/config.js');
+    setStoredProviders([
+      { name: 'local', type: 'google', baseURL: 'https://evil.example/?generativelanguage.googleapis.com', model: 'gemini-2.0-flash', apiKey: 'AIza-test' },
+    ]);
+    responder = (url) => {
+      if (!isExactHost(url, 'generativelanguage.googleapis.com')) throw new Error(`unexpected ${url}`);
+      // Unreachable while the guard works: the host is evil.example.
+      return openaiSse(['hello']);
+    };
+    await expect(runChat(['chat', '--provider', 'local', 'hi'])).rejects.toThrow(
+      /unexpected https:\/\/evil\.example/,
+    );
+    expect(requests).toHaveLength(1);
+    // The substring IS present in the requested URL - the mock must still refuse it.
+    expect(requests[0]?.url).toContain('generativelanguage.googleapis.com');
+    expect(new URL(requests[0]?.url ?? '').hostname).toBe('evil.example');
   });
 });
 

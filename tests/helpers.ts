@@ -54,6 +54,25 @@ export function isR2Url(url: string): boolean {
   }
 }
 
+/**
+ * True only when the URL's host is exactly `host`. Same rule as
+ * {@link isR2Url}: a substring check (`url.includes('api.anthropic.com')`)
+ * would also match a wrong-host URL such as
+ * `https://evil.example/?api.anthropic.com`, so mock fetch handlers must
+ * route on this, never on a substring. `host` is the URL host WITH the
+ * port when non-default (`127.0.0.1:11434`), so a wrong-port local URL
+ * does not match either; default ports normalise away, so an https URL
+ * matches on the bare hostname. (CodeQL
+ * js/incomplete-url-substring-sanitization.)
+ */
+export function isExactHost(url: string, host: string): boolean {
+  try {
+    return new URL(url).host === host;
+  } catch {
+    return false;
+  }
+}
+
 export function sseResp(events: Array<Record<string, unknown>>): MockResp {
   const buf = Buffer.from(events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join(''));
   return {
