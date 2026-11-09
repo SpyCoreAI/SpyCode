@@ -283,7 +283,12 @@ describe('item 3 - writeProjectMcpServers is atomic at 0600', () => {
     writeProjectMcpServers(workDir, [{ name: 'srv', command: 'node', args: ['x.js'] }]);
     const file = fp('.spycore/mcp.json');
     expect(existsSync(file)).toBe(true);
-    expect(statSync(file).mode & 0o777).toBe(0o600);
+    // Windows has no POSIX file modes: stat reports 0o666 whatever the
+    // chmod, so the 0600 assertion is POSIX-only. The atomicity and
+    // no-temp assertions still run on Windows.
+    if (process.platform !== 'win32') {
+      expect(statSync(file).mode & 0o777).toBe(0o600);
+    }
     expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({
       servers: [{ name: 'srv', command: 'node', args: ['x.js'] }],
     });
