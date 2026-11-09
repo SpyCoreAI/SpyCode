@@ -31,7 +31,8 @@
  * 2. Expansions are NOT expanded. `$(…)` / `` `…` `` / `${…}` / `$VAR` stay in
  * the word verbatim, AND the interior of a command substitution is emitted
  * separately in `substitutions` so it can be screened as its own command
- * list. That is purely additive.
+ * list. That is purely additive. A process substitution `<(…)` / `>(…)`
+ * is emitted the same way: its interior is a command the shell runs.
  * 3. `#` is NEVER treated as a comment. Stripping from `#` would delete the
  * payload of `X=1#; rm -rf /`, where a real shell runs the `rm`. A parser
  * guarding a security property must choose the direction that can only
@@ -77,7 +78,7 @@ export interface SimpleCommand {
 
 export interface ParsedShell {
   commands: SimpleCommand[];
-  /** Interiors of every `$( … )` / `` ` … ` `` , for recursive screening. */
+  /** Interiors of every `$( … )` / `` ` … ` `` / `<( … )` / `>( … )`, for recursive screening. */
   substitutions: string[];
   /**
    * Operators that terminated an EMPTY command - a leading `(`, a `;;`, a
@@ -606,6 +607,17 @@ function substitutionInteriorsOutsideSingleQuotes(text: string, out: string[]): 
       k = end;
       continue;
     }
+    // R1 pass 3 - process substitution `<(...)` / `>(...)` in a parameter
+    // expansion's word is a command context too: a real shell runs the
+    // interior when the word is expanded, exactly as it runs `$(...)`
+    // there. Same single-quote skip as above (measured for `$(...)`).
+    if ((c === '<' || c === '>') && text[k + 1] === '(') {
+      const end = matchClosing(text, k + 2, '(', ')');
+      if (end === -1) return;
+      out.push(text.slice(k + 2, end));
+      k = end;
+      continue;
+    }
     if (c === '`') {
       const end = text.indexOf('`', k + 1);
       if (end === -1) return;
@@ -985,6 +997,34 @@ export function parseShell(input: string): ParsedShell {
       continue;
     }
 
+    // ── process substitution: kept LITERAL in the word, interior emitted too ──
+    // R1 pass 3 - `<(...)` / `>(...)` EXECUTES its interior unconditionally
+    // (`cat <(rm -rf /)` runs `rm`, `tee >(rm -rf /)` runs `rm`), so the
+    // interior is a nested command exactly like `$(...)` and is emitted in
+    // `substitutions` for the same recursive screening. The span stays in
+    // the word verbatim, so CONSERVATION is unchanged. Deliberately NOT
+    // handled inside the double-quote arm above: measured on bash, a
+    // process substitution inside `"…"` is literal text and does not run
+    // (`echo "<(echo X)"` prints the span), unlike `$(...)` which does.
+    // An unterminated `<(` fails closed exactly as `$(` does.
+    if ((ch === '<' || ch === '>') && input[i + 1] === '(') {
+      const end = matchClosing(input, i + 2, '(', ')');
+      if (end === -1) {
+        if (spanEnd(input, i + 2, '(', ')') !== -1) boundExceeded = true;
+        confident = false;
+        value += input.slice(i);
+        raw += input.slice(i);
+        started = true;
+        i = input.length;
+        continue;
+      }
+      substitutions.push(input.slice(i + 2, end));
+      value += input.slice(i, end + 1);
+      raw += input.slice(i, end + 1);
+      started = true;
+      i = end + 1;
+      continue;
+    }
     // ── command substitution: kept LITERAL in the word, interior emitted too ──
     if (ch === '$' && input[i + 1] === '(') {
       const end = matchClosing(input, i + 2, '(', ')');

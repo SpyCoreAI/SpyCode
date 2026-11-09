@@ -78,19 +78,17 @@ import { join, relative, resolve, sep } from 'node:path';
 import { containmentBound, realRoot } from '../path-containment.js';
 import type { RecordedChange } from './checkpoint.js';
 import { loadSecretGuard } from './secrets.js';
-import { looksBinary } from './tool-core.js';
+import { ALWAYS_IGNORE_GLOBS, looksBinary } from './tool-core.js';
 
-/** Directory names always excluded - mirrors `tools.ts` ALWAYS_IGNORE_GLOBS. */
-const ALWAYS_IGNORE_GLOBS = [
-  '**/node_modules',
-  '**/node_modules/**',
-  '**/.git',
-  '**/.git/**',
-  '**/build',
-  '**/build/**',
-  '**/dist',
-  '**/dist/**',
-];
+/**
+ * R1 pass 3 - the ignore globs are SHARED from `tool-core.ts`, not copied
+ * here. This file used to carry its own literal copy (node_modules, .git,
+ * build, dist in every casing), which the R1-7 fix converted in
+ * `tool-core.ts` but never converted here - so on a case-insensitive
+ * filesystem a `Node_Modules` / `BUILD` tree was descended, hashed and
+ * journaled while the tools themselves ignored it. Importing the one
+ * constant means the two copies cannot drift again.
+ */
 
 /** Most files a workspace may hold before observation is declined. */
 export const DELTA_MAX_FILES = 20_000;

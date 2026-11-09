@@ -15,7 +15,11 @@
  * what Zod's `.string().max()` measures on the server. Fastify's ajv
  * `maxLength` counts code points, which is always ≤ `.length`, so honoring
  * `.length` satisfies both validators.
+ *
+ * The one import below is `text.ts`, itself a zero-import leaf - it pulls
+ * in nothing, so the leaf property above is preserved.
  */
+import { truncateSafe } from './text.js';
 
 /**
  * The server's hard cap on the stream `message` field AND on each
@@ -48,6 +52,8 @@ export function clampToWireMax(text: string, maxChars: number = WIRE_MESSAGE_MAX
   if (text.length <= maxChars) return text;
   const marker = resultTruncMarker(maxChars);
   const keep = maxChars - marker.length;
-  if (keep <= 0) return text.slice(0, maxChars);
-  return `${text.slice(0, keep)}${marker}`;
+  // R1 pass 3 - `truncateSafe` on BOTH branches: a raw slice put a lone
+  // surrogate on the wire whenever the cut landed mid-emoji.
+  if (keep <= 0) return truncateSafe(text, maxChars);
+  return `${truncateSafe(text, keep)}${marker}`;
 }

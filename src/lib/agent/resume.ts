@@ -29,6 +29,7 @@ import {
   type RunRecorder,
 } from './checkpoint.js';
 import { sanitizeForDisplay } from '../sanitize-display.js';
+import { clip } from '../text.js';
 import { EXIT_USER_ERROR, SpycoreCliError } from '../errors.js';
 
 export interface ResumeTarget {
@@ -159,7 +160,9 @@ function ago(iso: string): string {
 }
 
 function truncate(s: string, n: number): string {
-  return s.length > n ? `${s.slice(0, n - 1)}…` : s;
+  // R1 pass 3 - `clip` (truncateSafe under it), not a raw slice: the cut
+  // must not split a surrogate pair. Length shape unchanged (n-1 + `…`).
+  return clip(s, n);
 }
 
 export interface ResumeBannerInput {

@@ -121,7 +121,41 @@ function isFlag(arg: string, flag: string): boolean {
   return arg.toLowerCase() === flag;
 }
 
-/** Screen one PowerShell `-c` payload for destructive verbs. */
+/**
+ * R1 pass 3 - PowerShell binds a parameter by any unambiguous PREFIX of its
+ * name (Microsoft Learn, "Using aliases"), so `-r`, `-re`, `-rec` … all bind
+ * to `-Recurse` on `Remove-Item` (its only R-initial parameter; the others
+ * are `-Path`, `-LiteralPath`, `-Filter`, `-Include`, `-Exclude`, `-Force`,
+ * `-Credential` plus the common parameters, none starting with `R`). The
+ * test is a prefix of `recurse`, not a bare `/^-r/`: a bare `-r` test would
+ * over-block if a future PowerShell added another R parameter, while the
+ * prefix test stays correct. An optional `:<value>` suffix (`-Recurse:$true`)
+ * is stripped first; the VALUE is not judged - the old code blocked
+ * `-Recurse:$false` too, and loosening that is not this fix's business.
+ */
+function isRecurseArg(arg: string): boolean {
+  const name = arg.split(':')[0] as string;
+  if (!name.startsWith('-')) return false;
+  const rest = name.slice(1).toLowerCase();
+  return rest.length >= 1 && 'recurse'.startsWith(rest);
+}
+
+/**
+ * R1 pass 3 - the same prefix class at the LAUNCHER flag: `powershell
+ * -Command` is itself a PowerShell parameter, so its unambiguous prefixes
+ * (`-c`, `-co`, `-com`, …) bind to it, and `-en…` binds to
+ * `-EncodedCommand`. `-e` alone is NOT accepted for the encoded form: it is
+ * also a prefix of `-ExecutionPolicy`, i.e. ambiguous, so it binds to
+ * neither. `-c` is the documented short form and stays accepted as-is.
+ * Returns `'command'`, `'encoded'`, or null.
+ */
+function psCommandFlag(flag: string): 'command' | 'encoded' | null {
+  if (!flag.startsWith('-')) return null;
+  const rest = flag.slice(1).toLowerCase();
+  if (rest.length >= 1 && 'command'.startsWith(rest)) return 'command';
+  if (rest.length >= 2 && 'encodedcommand'.startsWith(rest)) return 'encoded';
+  return null;
+}
 function screenPowerShellPayload(payload: string): string | null {
   const winHit = screenWindowsCommand(payload);
   if (winHit) return winHit;
@@ -142,7 +176,7 @@ function screenPowerShellPayload(payload: string): string | null {
     for (let j = i + 1; j < tokens.length; j += 1) {
       const arg = (tokens[j] as string).toLowerCase();
       if (PS_RECURSIVE_HEADS.has(arg) || PS_ALWAYS_BLOCK_HEADS.has(arg)) break;
-      if (/^-rec/.test(arg)) return `${head} -Recurse (recursive delete via PowerShell)`;
+      if (isRecurseArg(arg)) return `${head} -Recurse (recursive delete via PowerShell)`;
     }
   }
   return null;
@@ -175,11 +209,11 @@ function screenCmdSegment(tokens: string[]): string | null {
   // `-EncodedCommand` is different by definition - exactly one base64 token
   // - so it keeps the single-token reading.
   if (head === 'powershell' || head === 'pwsh') {
-    const ci = args.findIndex((a) => /^-(c|command|enc|encodedcommand)$/i.test(a));
+    const ci = args.findIndex((a) => psCommandFlag(a) !== null);
     if (ci >= 0 && args[ci + 1] !== undefined) {
-      const flag = (args[ci] as string).toLowerCase();
+      const kind = psCommandFlag(args[ci] as string);
       const payload =
-        flag === '-c' || flag === '-command' ? args.slice(ci + 1).join(' ') : (args[ci + 1] as string);
+        kind === 'command' ? args.slice(ci + 1).join(' ') : (args[ci + 1] as string);
       if (payload.length > 0) return screenPowerShellPayload(payload);
     }
     return null;

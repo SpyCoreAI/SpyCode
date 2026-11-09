@@ -46,6 +46,7 @@
  * pulls them in.
  */
 import { resultTruncMarker } from '../wire-limits.js';
+import { clip, truncateSafe } from '../text.js';
 import type { ToolDecl } from '../providers/types.js';
 import {
   optString,
@@ -344,7 +345,9 @@ export async function dispatchTool(
     // Surface the real reason (file not found / blocked / …) in the summary
     // for expected ToolErrors so the UI line is informative.
     const summary =
-      err instanceof ToolError ? (message.length > 60 ? `${message.slice(0, 60)}…` : message) : 'error';
+      err instanceof ToolError
+        ? (message.length > 60 ? `${truncateSafe(message, 60)}…` : message)
+        : 'error';
     return { ok: false, summary, content: `Error: ${message}` };
   }
 }
@@ -358,7 +361,10 @@ function capContent(res: ToolResult, maxChars: number): ToolResult {
   if (res.content.length <= maxChars) return res;
   return {
     ...res,
-    content: `${res.content.slice(0, maxChars)}${resultTruncMarker(maxChars)}`,
+    // R1 pass 3 - `truncateSafe`, not a raw slice: a cut landing between
+    // a surrogate pair put a lone surrogate in EVERY tool result fed to
+    // the model. The marker rides on top, as before.
+    content: `${truncateSafe(res.content, maxChars)}${resultTruncMarker(maxChars)}`,
   };
 }
 
@@ -403,7 +409,7 @@ function parametersToJsonSchema(p: ToolParameters): Record<string, unknown> {
 function toToolDecl(t: ToolDefinition): ToolDecl {
   const description =
     t.description.length > TOOL_DESCRIPTION_CAP
-      ? `${t.description.slice(0, TOOL_DESCRIPTION_CAP - 1)}…`
+      ? clip(t.description, TOOL_DESCRIPTION_CAP)
       : t.description;
   // MCP wrappers carry the server's real JSON Schema; built-ins derive theirs.
   const parameters = t.jsonSchema ?? parametersToJsonSchema(t.parameters);
@@ -462,11 +468,14 @@ export function describeCallArg(tool: string, args: Record<string, unknown>): st
   if (tool === 'load_skill') return optString(args, 'name') ?? '';
   if (tool === 'web_search') {
     const q = optString(args, 'query') ?? '';
-    return `"${q.length > 80 ? `${q.slice(0, 80)}…` : q}"`;
+    // R1 pass 3 - `truncateSafe`, not a raw slice: the cut must not split
+    // a surrogate pair. Length shape unchanged (80 chars + `…`, pinned by
+    // agent-delegate.test.ts for the delegate arm below).
+    return `"${q.length > 80 ? `${truncateSafe(q, 80)}…` : q}"`;
   }
   if (tool === 'fetch_url') {
     const u = optString(args, 'url') ?? '';
-    return u.length > 80 ? `${u.slice(0, 80)}…` : u;
+    return u.length > 80 ? `${truncateSafe(u, 80)}…` : u;
   }
   if (tool === 'grep') {
     const pat = optString(args, 'pattern') ?? '';
@@ -475,11 +484,11 @@ export function describeCallArg(tool: string, args: Record<string, unknown>): st
   }
   if (tool === 'run_command') {
     const cmd = optString(args, 'command') ?? '';
-    return cmd.length > 80 ? `${cmd.slice(0, 80)}…` : cmd;
+    return cmd.length > 80 ? `${truncateSafe(cmd, 80)}…` : cmd;
   }
   if (tool === DELEGATE_TOOL_NAME) {
     const t = optString(args, 'task') ?? '';
-    return t.length > 80 ? `${t.slice(0, 80)}…` : t;
+    return t.length > 80 ? `${truncateSafe(t, 80)}…` : t;
   }
   // MCP tools (`mcp__server__tool`): show NO args. The label rides the
   // --json event stream, which users redirect to files/CI logs, and MCP

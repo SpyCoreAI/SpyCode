@@ -17,6 +17,7 @@ import { DEFAULT_LIMITS, type ToolContext } from './tools.js';
 import { createGuardianBreaker } from './guardian.js';
 import { resolveDelegateDepth } from './run-delegate.js';
 import { roleForDepth } from './delegate.js';
+import { truncateSafe } from '../text.js';
 
 /** The run's installed skills, by name and as the system-prompt catalog section. */
 export function loadRunSkills(
@@ -127,7 +128,9 @@ export function createToolContext(
     // surfaced as a rule_notice event - an auto-approval is never silent.
     commandRules: opts.commandRules,
     onCommandRuleNotice: (n) => {
-      const cmd = n.command.length > 80 ? `${n.command.slice(0, 80)}…` : n.command;
+      // R1 pass 3 - `truncateSafe`, not a raw slice: the cut must not
+      // split a surrogate pair. Length shape unchanged (80 chars + `…`).
+      const cmd = n.command.length > 80 ? `${truncateSafe(n.command, 80)}…` : n.command;
       emit(
         n.kind === 'deny'
           ? {

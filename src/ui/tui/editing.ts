@@ -6,6 +6,8 @@
  * here are total and unit-tested - the React side only calls them.
  */
 
+import { truncateSafe } from '../../lib/text.js';
+
 export interface ComposerState {
   value: string;
   cursor: number;
@@ -25,7 +27,9 @@ export const PASTE_LINE_THRESHOLD = 3;
 
 export function clampComposerState(s: ComposerState): ComposerState {
   if (s.value.length <= COMPOSER_MAX_CHARS) return s;
-  const value = s.value.slice(0, COMPOSER_MAX_CHARS);
+  // R1 pass 3 - `truncateSafe`, not a raw slice: a cut landing mid-emoji
+  // corrupted the user's own typed/pasted text at the cap.
+  const value = truncateSafe(s.value, COMPOSER_MAX_CHARS);
   return { value, cursor: Math.min(s.cursor, value.length) };
 }
 

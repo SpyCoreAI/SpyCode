@@ -48,7 +48,7 @@ import type { ApprovalRequest, RequestApproval } from './approval.js';
 import { APPROVAL_ANTI_SPAM_TEXT, resolveApproval } from './approval.js';
 import { MAX_RESULT_CHARS } from './tool-core.js';
 import { WIRE_MESSAGE_MAX_CHARS } from '../wire-limits.js';
-import { truncateSafe } from '../text.js';
+import { clip, truncateSafe } from '../text.js';
 import { redactFreeText } from '../redact.js';
 
 /**
@@ -465,6 +465,20 @@ function mcpTruncMarker(maxChars: number): string {
 const MCP_TRUNC_MARKER_MAX_CHARS = mcpTruncMarker(WIRE_MESSAGE_MAX_CHARS).length;
 
 /**
+ * R1 pass 3 - per-name budget for the frame line. The frame names the
+ * server and the tool, and neither is length-bounded anywhere upstream
+ * (`sanitizeServerName` only fixes the charset; the tool name comes from
+ * the remote server's `listTools` result). A ~27 KB name used to make the
+ * frame alone exceed `MAX_RESULT_CHARS`, so `capContent` at dispatch cut
+ * the closing `</spycode-mcp-content>` off - the exact defect R1-5 was
+ * filed to close, surviving for the names. Capping each name to 200 chars
+ * (with a visible `…` via `clip`) bounds the frame to ~650 chars, so the
+ * body cap derived below always leaves room for the whole wrapped block.
+ * 200 is far above any legitimate server/tool name and far below the cap.
+ */
+const MCP_FRAME_NAME_MAX_CHARS = 200;
+
+/**
  * R1-5 - cap on the MCP body fed to the model per call, DERIVED so that a
  * fully-saturated wrapped block is exactly `MAX_RESULT_CHARS` - the same
  * derivation as `WEB_CONTENT_MAX_CHARS`:
@@ -478,8 +492,9 @@ const MCP_TRUNC_MARKER_MAX_CHARS = mcpTruncMarker(WIRE_MESSAGE_MAX_CHARS).length
  * `</spycode-mcp-content>` delimiter - the invariant this cap exists to
  * hold. Without it any MCP result over ~27.5 KB was truncated mid-frame
  * with the closing tag cut off, leaving the model to misattribute trailing
- * MCP text. Clamped at 0: absurdly long server/tool names still frame,
- * with an empty body, rather than producing a negative cap.
+ * MCP text. Clamped at 0: with the R1-pass-3 name cap the frame itself is
+ * bounded well under `MAX_RESULT_CHARS`, so the clamp is a belt-and-braces
+ * floor, not the thing holding the invariant - the name cap is.
  */
 function mcpContentMaxChars(serverName: string, toolName: string): number {
   const frameChars = frameMcpContent('', serverName, toolName).length;
@@ -497,12 +512,19 @@ function mcpContentMaxChars(serverName: string, toolName: string): number {
  * can tell whose data this is.
  */
 export function wrapMcpToolResult(text: string, serverName: string, toolName: string): string {
+  // R1 pass 3 - cap the frame NAMES before deriving the body cap: the
+  // names are untrusted, unbounded input (see MCP_FRAME_NAME_MAX_CHARS),
+  // and deriving the cap from uncapped names is what let a long name
+  // sever the closing sentinel. The truncation is visible (`…`) in the
+  // frame line, so the model can tell the name was cut.
+  const server = clip(serverName, MCP_FRAME_NAME_MAX_CHARS);
+  const tool = clip(toolName, MCP_FRAME_NAME_MAX_CHARS);
   let body = neutralizeMcpSentinels(redactFreeText(text));
-  const maxChars = mcpContentMaxChars(serverName, toolName);
+  const maxChars = mcpContentMaxChars(server, tool);
   if (body.length > maxChars) {
     body = `${truncateSafe(body, maxChars)}${mcpTruncMarker(maxChars)}`;
   }
-  return frameMcpContent(body, serverName, toolName);
+  return frameMcpContent(body, server, tool);
 }
 
 // ─────────────────────── prompt catalogue ───────────────────────

@@ -137,8 +137,22 @@ export function matchExcerpt(
   if (q.length === 0 || text.length === 0) return null;
   const at = text.toLowerCase().indexOf(q);
   if (at === -1) return null;
-  const start = Math.max(0, at - radius);
-  const end = Math.min(text.length, at + q.length + radius);
+  let start = Math.max(0, at - radius);
+  let end = Math.min(text.length, at + q.length + radius);
+  // R1 pass 3 - never split a surrogate pair at the window edges: when
+  // the cut would land between a high and low surrogate, widen the window
+  // by one code unit to keep the character whole (the radius is
+  // approximate display context, not a budget).
+  if (start > 0) {
+    const prev = text.charCodeAt(start - 1);
+    const first = text.charCodeAt(start);
+    if (prev >= 0xd800 && prev <= 0xdbff && first >= 0xdc00 && first <= 0xdfff) start -= 1;
+  }
+  if (end < text.length) {
+    const last = text.charCodeAt(end - 1);
+    const next = text.charCodeAt(end);
+    if (last >= 0xd800 && last <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) end += 1;
+  }
   return {
     before: `${start > 0 ? '…' : ''}${text.slice(start, at)}`,
     match: text.slice(at, at + q.length),

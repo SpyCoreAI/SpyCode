@@ -55,6 +55,9 @@ import {
   sanitizeForDisplay,
 } from '../../lib/sanitize-display.js';
 import {
+  truncateSafe,
+} from '../../lib/text.js';
+import {
   loadSecretGuardSync,
 } from '../../lib/agent/secrets.js';
 import {
@@ -987,7 +990,9 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
       abortRef.current = null;
       setPhaseBoth('idle');
       ringBell();
-      notifyUser('SpyCode shell complete', `$ ${command.slice(0, 80)}`);
+      // R1 pass 3 - `truncateSafe`, not a raw slice: the notification must
+      // not carry a lone surrogate when the cut lands mid-emoji.
+      notifyUser('SpyCode shell complete', `$ ${truncateSafe(command, 80)}`);
       drainQueue();
     }
   };

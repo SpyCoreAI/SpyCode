@@ -47,6 +47,13 @@ export function runShellCommand(
         maxBuffer: 10 * 1024 * 1024,
         windowsHide: true,
         signal,
+        // Raw bytes, not pre-decoded strings: with the default `utf8`
+        // encoding Node decodes each chunk through its own StringDecoder
+        // and hands this code strings, so a byte budget counted in
+        // `out.length` was really a UTF-16-unit budget under a BYTES name
+        // (262,144 astral chars ≈ 1 MiB of UTF-8). Taking Buffers makes
+        // the code own the bytes and the single decode below.
+        encoding: 'buffer',
       });
     } catch {
       resolve({
@@ -58,7 +65,28 @@ export function runShellCommand(
       });
       return;
     }
-    let out = '';
+    // R1 pass 3 - accumulate RAW BYTES, decode ONCE at settle. The old
+    // code decoded each `data` chunk independently AND counted the budget
+    // in UTF-16 code units against a constant named MAX_RAW_BYTES. (As
+    // written, `execFile`'s default utf8 encoding meant Node's own
+    // StringDecoder had already joined sequences split across chunk
+    // events before this code saw them, so the U+FFFD half of the finding
+    // did not reproduce through this path - but the budget half did: the
+    // cap admitted up to ~1 MiB of astral text under a 256 KiB name.
+    // Taking Buffers via `encoding: 'buffer'` above makes this code own
+    // both the bytes and the decode, so neither half can regress.)
+    // Chunks are sliced in BYTES here; the single `toString('utf8')` in
+    // `finish` is what makes chunk boundaries invisible. (A sequence cut
+    // by the byte cap itself still ends as U+FFFD - the bytes past the cap
+    // are gone, so no decoder could complete it.)
+    const outChunks: Buffer[] = [];
+    let outBytes = 0;
+    const takeChunk = (d: Buffer): void => {
+      if (outBytes >= MAX_RAW_BYTES) return;
+      const take = d.subarray(0, MAX_RAW_BYTES - outBytes);
+      outChunks.push(Buffer.from(take));
+      outBytes += take.length;
+    };
     let settled = false;
     let drainTimer: ReturnType<typeof setTimeout> | null = null;
     // Settle once, on whatever arrives first. 'close' waits for EVERY
@@ -70,6 +98,7 @@ export function runShellCommand(
       settled = true;
       if (drainTimer) clearTimeout(drainTimer);
       releaseChildStdio(child);
+      const out = Buffer.concat(outChunks).toString('utf8');
       const capped = capShellOutput(out);
       if (spawnError) {
         resolve({
@@ -102,10 +131,10 @@ export function runShellCommand(
     child.stdout?.on('data', (d: Buffer) => {
       // Cap during accumulation: maxBuffer is dead config without a callback,
       // so bound it here to avoid OOM on runaway commands (`!yes`).
-      if (out.length < MAX_RAW_BYTES) out += d.toString('utf8').slice(0, MAX_RAW_BYTES - out.length);
+      takeChunk(d);
     });
     child.stderr?.on('data', (d: Buffer) => {
-      if (out.length < MAX_RAW_BYTES) out += d.toString('utf8').slice(0, MAX_RAW_BYTES - out.length);
+      takeChunk(d);
     });
     child.on('error', (err) => {
       finish(null, null, err.message);
