@@ -1612,11 +1612,21 @@ export function candidateArgvs(cmd: SimpleCommand): ShellWord[][] {
   // This is the same rule the rest of this function follows: we do not know
   // what the word will become, so every candidate is offered. It can only ever
   // add readings, which is the direction a guard must err in.
-  const written = primary[0];
-  if (written !== undefined && hasExpansion(written.value)) {
-    const resolved = stripExpansions(written.value);
-    if (resolved === '') offer(primary.slice(1));
-    else if (resolved !== written.value) offer([{ ...written, value: resolved }, ...primary.slice(1)]);
+  //
+  // R1-1 - THE STRIP APPLIES TO EVERY CANDIDATE HEAD, NOT JUST THE PRIMARY.
+  // It used to read only `primary[0]`, so an expansion head sitting behind a
+  // non-wrapper prefix was never resolved: `arch -arm64 $(echo)rm -rf /` and
+  // `ssh-agent $(echo)rm -rf /` offered the suffix `[$(echo)rm, -rf, /]`
+  // whose head no rule matches, and the `rm` reading was never offered. The
+  // strip is now offered for the head of EVERY candidate already in `out`
+  // (primary, suffixes, packed words) - the same two readings per head, and
+  // the dedup in `offer` keeps the primary's reading from doubling.
+  for (const cand of [...out]) {
+    const head = cand[0];
+    if (head === undefined || !hasExpansion(head.value)) continue;
+    const resolved = stripExpansions(head.value);
+    if (resolved === '') offer(cand.slice(1));
+    else if (resolved !== head.value) offer([{ ...head, value: resolved }, ...cand.slice(1)]);
   }
 
   return out;

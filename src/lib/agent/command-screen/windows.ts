@@ -166,10 +166,21 @@ function screenCmdSegment(tokens: string[]): string | null {
   // `powershell -c <payload>` / `pwsh -Command <payload>` - the payload is
   // PowerShell, screened for its own destructive verbs (Remove-Item
   // -Recurse, Format-Volume) as well as the cmd.exe forms it may carry.
+  //
+  // R1-2 - `-c`/`-Command` takes the REST of the line as the script:
+  // PowerShell joins the remaining arguments with spaces, so an unquoted
+  // `powershell -c Remove-Item -Recurse C:\` really runs the whole payload
+  // and screening only the first token (`Remove-Item`, bare, no flags) missed
+  // it. The `cmd /c` arm above already joins; this arm now does the same.
+  // `-EncodedCommand` is different by definition - exactly one base64 token
+  // - so it keeps the single-token reading.
   if (head === 'powershell' || head === 'pwsh') {
     const ci = args.findIndex((a) => /^-(c|command|enc|encodedcommand)$/i.test(a));
     if (ci >= 0 && args[ci + 1] !== undefined) {
-      return screenPowerShellPayload(args[ci + 1] as string);
+      const flag = (args[ci] as string).toLowerCase();
+      const payload =
+        flag === '-c' || flag === '-command' ? args.slice(ci + 1).join(' ') : (args[ci + 1] as string);
+      if (payload.length > 0) return screenPowerShellPayload(payload);
     }
     return null;
   }

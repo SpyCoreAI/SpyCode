@@ -34,6 +34,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync
 import { dirname, join, basename } from 'node:path';
 import { getConfigPath } from '../config.js';
 import { redactFreeText } from '../redact.js';
+import { truncateSafe } from '../text.js';
 import { APPROVAL_ANTI_SPAM_TEXT, resolveApproval } from './approval.js';
 import { computeFileDiff } from './diff.js';
 import { optString, registerTool, reqString, ToolError, type ToolContext } from './tool-core.js';
@@ -178,7 +179,7 @@ function cleanEntryLines(lines: string[]): string[] {
   return lines
     .map((l) => redactFreeText(l).trim())
     .filter((l) => l.length > 0)
-    .map((l) => (l.length > DURABLE_MEMORY_ENTRY_CAP_CHARS ? `${l.slice(0, DURABLE_MEMORY_ENTRY_CAP_CHARS)}…` : l));
+    .map((l) => (l.length > DURABLE_MEMORY_ENTRY_CAP_CHARS ? `${truncateSafe(l, DURABLE_MEMORY_ENTRY_CAP_CHARS)}…` : l));
 }
 
 /** The file content after appending `addition` (already bulleted) to `current`. */

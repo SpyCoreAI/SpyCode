@@ -6,14 +6,17 @@ import {
   commandBasename,
   COMMAND_WRAPPERS,
   effectiveWords,
+  hasExpansion,
   HERESTRING_OP,
   parseShell,
+  stripExpansions,
   type ShellWord,
   type SimpleCommand,
 } from '../shell-parse.js';
 import { osFold } from '../../os-fold.js';
 import {
   COMMAND_CARRIERS,
+  COMMAND_LAUNCHERS,
   DEVICE_WRITE_VERBS,
   DOWNLOADERS,
   FORCE_FLAG,
@@ -460,8 +463,20 @@ function screenNested(text: string, depth: number, nested = false): string | nul
  * The operand is read the way `deviceWriteTargets` reads it, including the
  * `NAME=value` form: the first build asked `isRawDevice` on the raw word,
  * missed `of=/dev/sda`, and left 36 of those under-blocks standing.
+ *
+ * R1-1 - a third exempt class, HEAD-ONLY: a censused LAUNCHER
+ * (`COMMAND_LAUNCHERS`) as the effective head executes its operands -
+ * `arch -arm64 rm -rf /` really runs `rm` - so the invented readings are
+ * offered for it. Head-only on purpose: a launcher name as a DATA word
+ * (`echo arch rm -rf /`) is still a mention, and scanning every word the
+ * way the two classes above do would read that mention as a command. The
+ * head is read the way the shell reads it - wrappers stripped, expansions
+ * resolved - so `sudo arch -arm64 rm -rf /` and `$(echo)arch rm -rf /`
+ * lift too.
  */
 function headMayExecOperands(cmd: SimpleCommand): boolean {
+  const head = effectiveWords(cmd)[0];
+  if (head !== undefined && COMMAND_LAUNCHERS.has(osFold(commandBasename(stripExpansions(head.value))))) return true;
   for (const w of cmd.words) {
     const n = osFold(commandBasename(w.value));
     if (COMMAND_WRAPPERS.has(n) || COMMAND_CARRIERS.has(n) || INTERPRETERS.has(n) || SHELLS.has(n)) return true;
@@ -470,6 +485,31 @@ function headMayExecOperands(cmd: SimpleCommand): boolean {
     if (isRawDevice(operand) || sensitiveTarget(operand)) return true;
   }
   return false;
+}
+
+/**
+ * R1-1 - THE READINGS OFFERED FOR A SUBSTITUTION INTERIOR WHOSE HEAD DOES
+ * NOT EXECUTE ITS OPERANDS.
+ *
+ * The effective argv, PLUS the expansion-strip reading of its head. The
+ * head word IS the command once the shell resolves it - `$(echo)rm` IS
+ * `rm` - so the stripped reading is the head's own identity, not an
+ * invented suffix, and offering it cannot turn a mention into a command:
+ * a mention head (`echo`, `printf`, `mynote`) carries no expansion to
+ * strip. The two readings mirror F-2c-42's primary-head strip, applied to
+ * the effective head because `nested` is what the suppression guards.
+ */
+function nestedReadings(cmd: SimpleCommand): ShellWord[][] {
+  const primary = effectiveWords(cmd);
+  const head = primary[0];
+  if (head === undefined || !hasExpansion(head.value)) return [primary];
+  const resolved = stripExpansions(head.value);
+  if (resolved === '') {
+    const tail = primary.slice(1);
+    return tail.length > 0 ? [primary, tail] : [primary];
+  }
+  if (resolved === head.value) return [primary];
+  return [primary, [{ ...head, value: resolved }, ...primary.slice(1)]];
 }
 
 function screenCommands(commands: SimpleCommand[], depth: number, nested = false): string | null {
@@ -497,7 +537,16 @@ function screenCommands(commands: SimpleCommand[], depth: number, nested = false
     // reading FIRST - so the adjacency-sensitive rules still see the real
     // sequence - and then every suffix. See its header for why this is not an
     // option-arity table.
-    for (const words of (nested && !headMayExecOperands(cmd) ? [effectiveWords(cmd)] : candidateArgvs(cmd))) {
+    // R1-1 - inside a substitution the invented readings stay suppressed
+    // UNLESS `headMayExecOperands` lifts them (a modelled executor, a
+    // censused launcher head, or a device/sensitive object) - a mention
+    // under an unlisted head (`mynote`, `printf`, `logger`, a glued
+    // `aecho`) is data, and offering every suffix for it refuses the
+    // differential's whole capability half. The one reading that IS
+    // offered for a suppressed interior is the expansion-strip of its
+    // head (`nestedReadings`): the head word is the command once the
+    // shell resolves it, so `$($(echo)rm -rf /)` really runs `rm`.
+    for (const words of (nested && !headMayExecOperands(cmd) ? nestedReadings(cmd) : candidateArgvs(cmd))) {
       const hit = screenArgv(words, cmd, commands, i, depth);
       if (hit) return hit;
     }

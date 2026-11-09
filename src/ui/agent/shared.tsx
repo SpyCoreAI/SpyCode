@@ -12,6 +12,7 @@ import { Banner, Notice, type NoticeVariant } from '../components/index.js';
 import { Markdown, parseMarkdown } from '../markdown/index.js';
 import { useTheme } from '../theme/theme.js';
 import { sanitizeForDisplay } from '../../lib/sanitize-display.js';
+import { truncateSafe } from '../../lib/text.js';
 import { splitHighlight, type TranscriptSearchRender } from '../tui/transcript-search.js';
 import type { DiffLine } from '../../lib/agent/diff.js';
 import type {
@@ -73,7 +74,7 @@ export function statLabel(added: number, removed: number): string {
 /** Clamp a single display line to the content width. */
 export function clamp(s: string, width: number): string {
   const max = Math.max(8, width);
-  return s.length > max ? `${s.slice(0, max - 1)}…` : s;
+  return s.length > max ? `${truncateSafe(s, max - 1)}…` : s;
 }
 
 /** One diff line, marker-prefixed and width-clamped, colored by kind. The
@@ -140,7 +141,7 @@ const MCP_ARGS_MAX_STRING = 4000;
  * longer than MCP_ARGS_MAX_STRING are cut with a visible marker. */
 function capArgsValue(value: unknown, depth: number): unknown {
   if (typeof value === 'string') {
-    return value.length > MCP_ARGS_MAX_STRING ? `${value.slice(0, MCP_ARGS_MAX_STRING)}…[truncated]` : value;
+    return value.length > MCP_ARGS_MAX_STRING ? `${truncateSafe(value, MCP_ARGS_MAX_STRING)}…[truncated]` : value;
   }
   if (depth >= MCP_ARGS_MAX_DEPTH) {
     if (Array.isArray(value)) return '[…]';

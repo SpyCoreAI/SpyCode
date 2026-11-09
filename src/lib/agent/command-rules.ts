@@ -45,6 +45,7 @@ import {
   isWorkspaceTrusted,
 } from '../config.js';
 import { sanitizeForDisplay } from '../sanitize-display.js';
+import { truncateSafe } from '../text.js';
 // The screener comes from command-screen.ts, a leaf module. builtin-tools.ts
 // imports evaluateCommandRules from here, so taking the screener from
 // tools.ts (which imports builtin-tools.ts) would close a runtime import cycle.
@@ -456,7 +457,7 @@ function readRuleFile(path: string, label: string, notices: string[]): RawRuleFi
 
 const shortEntry = (entry: unknown): string => {
   const flat = sanitizeForDisplay(String(entry)).replace(/\s+/g, ' ').trim();
-  return flat.length > 60 ? `${flat.slice(0, 59)}…` : flat;
+  return flat.length > 60 ? `${truncateSafe(flat, 59)}…` : flat;
 };
 
 export interface LoadedCommandRules {

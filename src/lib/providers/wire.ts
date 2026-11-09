@@ -7,6 +7,7 @@
  */
 import { ERROR_BODY_MAX_BYTES } from '../sse.js';
 import { redactUrlCredentials } from '../redact.js';
+import { truncateSafe } from '../text.js';
 
 
 /**
@@ -120,5 +121,5 @@ export async function readErrorDetail(body: unknown): Promise<string | undefined
 
 export function clip(s: string): string {
   const t = s.trim().replace(/\s+/g, ' ');
-  return t.length > 200 ? `${t.slice(0, 200)}…` : t;
+  return t.length > 200 ? `${truncateSafe(t, 200)}…` : t;
 }

@@ -264,17 +264,27 @@ export class ToolError extends Error {}
 
 /** Directory names that are ALWAYS excluded, regardless of .gitignore. */
 export const ALWAYS_IGNORE_NAMES = new Set(['node_modules', '.git', 'build', 'dist']);
+/**
+ * R1-7 - a literal segment as a case-insensitive micromatch class: `build`
+ * becomes `[bB][uU][iI][lL][dD]`, so the pattern matches `BUILD`, `Build`
+ * and every other casing. The class is baked into the PATTERN, not applied
+ * at the call site, so every consumer of this constant inherits it - a
+ * `caseSensitiveMatch: false` option would only fix the call sites that
+ * remember to pass it, and would also change how the user's own pattern
+ * matches. Non-letters (`_`, `.`) pass through unchanged.
+ */
+function ciSegment(seg: string): string {
+  return [...seg].map((c) => {
+    const lo = c.toLowerCase();
+    const hi = c.toUpperCase();
+    return lo === hi ? c : `[${lo}${hi}]`;
+  }).join('');
+}
 /** Glob ignore patterns mirroring ALWAYS_IGNORE_NAMES (for globby calls). */
-export const ALWAYS_IGNORE_GLOBS = [
-  '**/node_modules',
-  '**/node_modules/**',
-  '**/.git',
-  '**/.git/**',
-  '**/build',
-  '**/build/**',
-  '**/dist',
-  '**/dist/**',
-];
+export const ALWAYS_IGNORE_GLOBS = [...ALWAYS_IGNORE_NAMES].flatMap((d) => [
+  `**/${ciSegment(d)}`,
+  `**/${ciSegment(d)}/**`,
+]);
 
 /** Convert a path to forward-slash form for glob patterns / display. */
 export function toPosix(p: string): string {
@@ -550,7 +560,7 @@ export async function gitignoreCheckFor(ctx: ToolContext): Promise<(abs: string)
 /** A path is "ignored" if any segment is an excluded dir or git ignores it. */
 export async function isIgnoredPath(ctx: ToolContext, abs: string): Promise<boolean> {
   const rel = relative(ctx.cwd, abs);
-  if (rel.split(/[\\/]/).some((seg) => ALWAYS_IGNORE_NAMES.has(seg))) return true;
+  if (rel.split(/[\\/]/).some((seg) => ALWAYS_IGNORE_NAMES.has(seg.toLowerCase()))) return true;
   return (await gitignoreCheckFor(ctx))(abs);
 }
 

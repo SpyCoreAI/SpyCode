@@ -34,6 +34,45 @@ export const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'csh', 'tcsh'
 export const DOWNLOADERS = new Set(['curl', 'wget', 'fetch', 'aria2c', 'axel', 'httpie', 'http', 'https']);
 
 /**
+ * R1-1 - LAUNCHERS: BINARIES THAT TAKE A COMMAND AS AN OPERAND AND RUN IT.
+ *
+ * The census the differential corpus already carries, in two inventories:
+ * the macOS names (`arch`, `sandbox-exec`, `ssh-agent`, `lockf`,
+ * `postlock`, `plockstat`, `screen`, `login`) were read off every man1/man8
+ * page on the host, testing each SYNOPSIS for a command operand followed by
+ * an args ellipsis; the Linux names are the analyst-supplied util-linux /
+ * coreutils / systemd / container inventory. Each was verified to be in
+ * NONE of the four lists above (wrappers, carriers, interpreters, shells) -
+ * which is why the top level screens them WITHOUT a list, by offering every
+ * suffix as a candidate argv (F-11).
+ *
+ * This set exists ONLY for the nested gate (`headMayExecOperands`): inside
+ * a substitution the suffix readings are suppressed for a MENTION, so the
+ * screen must know which heads EXECUTE their operands, and there a list is
+ * unavoidable - an unlisted data head (`mynote`, `printf`, `logger`) and an
+ * unlisted executor (`gtimeout`, `proxychains`) are indistinguishable as
+ * strings, and the corpus requires the former to stay a mention. The set
+ * is consulted HEAD-ONLY there, never for `effectiveWords` or the carrier
+ * arm, so the four lists above - and the differential legs that pin those
+ * names as unmodelled there - are untouched.
+ *
+ * RESIDUE, STATED: a launcher NOT in this census (`gtimeout`,
+ * `proxychains`) with a VERB-keyed core inside a substitution is still
+ * permitted - the same residue the corpus's own head-axis LIVE leg accepts,
+ * which pins object-keyed cores for unlisted executors only. Closing it
+ * needs a wider census, not a wider rule.
+ */
+export const COMMAND_LAUNCHERS = new Set([
+  // macOS census (man1/man8 SYNOPSIS).
+  'arch', 'sandbox-exec', 'ssh-agent', 'lockf', 'postlock', 'plockstat', 'screen', 'login',
+  // Linux inventory (util-linux / coreutils / systemd / containers).
+  'setarch', 'taskset', 'chrt', 'numactl', 'systemd-run', 'setpriv', 'capsh', 'choom',
+  'eatmydata', 'firejail', 'bwrap', 'proot', 'catchsegv', 'strace', 'ltrace', 'valgrind',
+  'torsocks', 'proxychains4', 'schroot', 'cgexec', 'daemonize', 'start-stop-daemon',
+  'runcon', 'pkexec', 'systemd-nspawn',
+]);
+
+/**
  * F-2c-30 - THE CARRIER CLASS: A COMMAND WHOSE OPERAND IS ITSELF A COMMAND.
  *
  * `sh -c`, `eval` and the `COMMAND_WRAPPERS` prefix are three instances of ONE

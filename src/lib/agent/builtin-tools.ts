@@ -36,6 +36,7 @@ import { randomBytes } from 'node:crypto';
 import { loadSecretGuard } from './secrets.js';
 import { isInsideReal } from '../path-containment.js';
 import { redactFreeText } from '../redact.js';
+import { truncateSafe, truncateSafeTail } from '../text.js';
 import { matchesCatastrophic } from './command-screen.js';
 import { findInvisibleUnicode, invisibleUnicodeNotice } from './command-screen.js';
 import { buildSubprocessEnv } from '../spawn-env.js';
@@ -170,7 +171,7 @@ export const listDirTool: ToolDefinition = {
     const dirents = readdirSync(abs, { withFileTypes: true });
     const entries: string[] = [];
     for (const d of dirents) {
-      if (ALWAYS_IGNORE_NAMES.has(d.name)) continue;
+      if (ALWAYS_IGNORE_NAMES.has(d.name.toLowerCase())) continue;
       const childAbs = join(abs, d.name);
       if (ignored(childAbs)) continue;
       // Hide secret paths. For directories, also probe a child so subtree
@@ -236,7 +237,7 @@ function escapingSymlinkDirIgnores(cwd: string): string[] {
       for (const d of dirents) {
         seenEntries += 1;
         if (seenEntries > MAX_SYMLINK_SCAN_ENTRIES) return ignores;
-        if (ALWAYS_IGNORE_NAMES.has(d.name)) continue;
+        if (ALWAYS_IGNORE_NAMES.has(d.name.toLowerCase())) continue;
         const abs = join(dir, d.name);
         if (d.isSymbolicLink()) {
           let real: string;
@@ -462,7 +463,7 @@ export const grepTool: ToolDefinition = {
           break;
         }
         if (surfaced.length < ctx.limits.maxMatches && bytes < ctx.limits.maxResultChars) {
-          const trimmed = line.length > 200 ? `${line.slice(0, 200)}…` : line;
+          const trimmed = line.length > 200 ? `${truncateSafe(line, 200)}…` : line;
           const entry = `${f}:${i + 1}:${trimmed}`;
           surfaced.push(entry);
           bytes += entry.length + 1;
@@ -506,7 +507,7 @@ export const repoMapTool: ToolDefinition = {
     const topDirs: string[] = [];
     const topFiles: string[] = [];
     for (const d of readdirSync(ctx.cwd, { withFileTypes: true })) {
-      if (ALWAYS_IGNORE_NAMES.has(d.name)) continue;
+      if (ALWAYS_IGNORE_NAMES.has(d.name.toLowerCase())) continue;
       if (ignored(join(ctx.cwd, d.name))) continue;
       if (!inside(d.name)) continue;
       if (isSecret(join(ctx.cwd, d.name))) continue;
@@ -558,7 +559,7 @@ export const repoMapTool: ToolDefinition = {
           scripts?: Record<string, unknown>;
         };
         const scripts = pj.scripts && typeof pj.scripts === 'object' ? Object.keys(pj.scripts) : [];
-        const desc = typeof pj.description === 'string' ? ` - "${pj.description.slice(0, 120)}"` : '';
+        const desc = typeof pj.description === 'string' ? ` - "${truncateSafe(pj.description, 120)}"` : '';
         const name = typeof pj.name === 'string' ? pj.name : '(unnamed)';
         pkgInfo = `package.json: ${name}${desc}`;
         if (scripts.length > 0) pkgInfo += `\n  scripts: ${scripts.slice(0, 14).join(', ')}`;
@@ -890,7 +891,7 @@ function neutralizeWebSentinels(text: string): string {
 export function wrapUntrustedWebContent(inner: string): string {
   let body = neutralizeWebSentinels(sanitizeForDisplay(inner));
   if (body.length > WEB_CONTENT_MAX_CHARS) {
-    body = `${body.slice(0, WEB_CONTENT_MAX_CHARS)}${webTruncMarker(WEB_CONTENT_MAX_CHARS)}`;
+    body = `${truncateSafe(body, WEB_CONTENT_MAX_CHARS)}${webTruncMarker(WEB_CONTENT_MAX_CHARS)}`;
   }
   return frameWebContent(body);
 }
@@ -936,7 +937,7 @@ export const webSearchTool: ToolDefinition = {
     let results: Array<{ title?: unknown; url?: unknown; content?: unknown }>;
     try {
       results = await api.post('/search', {
-        body: { query: query.slice(0, 500), maxResults },
+        body: { query: truncateSafe(query, 500), maxResults },
         apiUrlOverride: ctx.apiUrlOverride,
       });
     } catch (err) {
@@ -1156,8 +1157,20 @@ export const writeFileTool: ToolDefinition = {
     const isSecret = await secretGuardFor(ctx);
     if (isSecret(abs)) throw new ToolError(`blocked: sensitive path "${rel}"`);
     const exists = existsSync(abs);
-    if (exists && statSync(abs).isDirectory()) {
+    const existingStat = exists ? statSync(abs) : null;
+    if (existingStat?.isDirectory()) {
       throw new ToolError(`"${rel}" is a directory`);
+    }
+    // R1-4 - the same 5 MB cap `read_file` enforces, on the read side of the
+    // write: the old text is read whole, diffed whole and journaled whole,
+    // so an unbounded read here stalled the run and journaled the file twice
+    // over. Refuse, like `read_file` refuses, instead of truncating - a
+    // partial old text would make the diff and the journal lie about what
+    // was replaced.
+    if (existingStat && existingStat.size > ctx.limits.maxFileBytes) {
+      throw new ToolError(
+        `file too large to write (${fmtBytes(existingStat.size)}); split the file or write a smaller one`,
+      );
     }
     const oldBuf = exists ? readFileSync(abs) : Buffer.alloc(0);
     // F-19 - REFUSE AN EXISTING BINARY, AS `edit_file` ALWAYS HAS.
@@ -1216,7 +1229,16 @@ export const editFileTool: ToolDefinition = {
     const isSecret = await secretGuardFor(ctx);
     if (isSecret(abs)) throw new ToolError(`blocked: sensitive path "${rel}"`);
     if (!existsSync(abs)) throw new ToolError(`file not found: ${rel}`);
-    if (!statSync(abs).isFile()) throw new ToolError(`"${rel}" is not a regular file`);
+    const existingStat = statSync(abs);
+    if (!existingStat.isFile()) throw new ToolError(`"${rel}" is not a regular file`);
+    // R1-4 - the same 5 MB cap `read_file` enforces, on the read side of the
+    // edit (see `write_file` above): refuse rather than read, diff and
+    // journal a whole multi-megabyte file.
+    if (existingStat.size > ctx.limits.maxFileBytes) {
+      throw new ToolError(
+        `file too large to edit (${fmtBytes(existingStat.size)}); split the file or use a shell command for a targeted change`,
+      );
+    }
     const buf = readFileSync(abs);
     if (looksBinary(buf)) throw new ToolError(`"${rel}" appears to be binary; refusing to edit`);
     const current = buf.toString('utf8');
@@ -1433,7 +1455,7 @@ export function tailLines(text: string, n: number, maxBytes = 4000): string {
   const lines = text.replace(/\n+$/, '').split('\n');
   const tail = lines.length > n ? lines.slice(lines.length - n) : lines;
   let out = tail.join('\n');
-  if (out.length > maxBytes) out = `…${out.slice(out.length - maxBytes)}`;
+  if (out.length > maxBytes) out = `…${truncateSafeTail(out, maxBytes)}`;
   return out;
 }
 

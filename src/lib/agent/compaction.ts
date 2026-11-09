@@ -14,6 +14,7 @@
  * Stage 1 is pure and pinned by tests; stage 2's model call lives in the
  * TUI's runCompact (it owns the provider + transcript state).
  */
+import { truncateSafe } from '../text.js';
 
 /**
  * Minimal structural shape stage 1 needs. TuiApp's transcript items satisfy
@@ -57,13 +58,7 @@ export interface PruneResult {
  */
 function capText(text: string, cap: number): string {
   if (text.length <= cap) return text;
-  let end = cap;
-  if (end > 0) {
-    const last = text.charCodeAt(end - 1);
-    const next = text.charCodeAt(end);
-    if (last >= 0xd800 && last <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) end -= 1;
-  }
-  return `${text.slice(0, end)}… [pruned]`;
+  return `${truncateSafe(text, cap)}… [pruned]`;
 }
 
 /**

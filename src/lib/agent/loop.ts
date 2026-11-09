@@ -12,6 +12,7 @@
  * UI, a plain-text renderer, or `--json`) can present progress identically.
  */
 import { EXIT_USER_ERROR, SpycoreCliError } from '../errors.js';
+import { truncateSafe } from '../text.js';
 import { WIRE_MESSAGE_MAX_CHARS, clampToWireMax } from '../wire-limits.js';
 import { SpyCoreProvider } from '../providers/spycore.js';
 import type { Provider, ProviderEvent, ToolDecl, ToolResultDecl } from '../providers/types.js';
@@ -539,7 +540,7 @@ function formatResultForModel(
   const argsJson = JSON.stringify(args);
   const shownArgs =
     argsJson.length > CALL_ARGS_MAX_CHARS
-      ? `${argsJson.slice(0, CALL_ARGS_MAX_CHARS)}… [arguments truncated]`
+      ? `${truncateSafe(argsJson, CALL_ARGS_MAX_CHARS)}… [arguments truncated]`
       : argsJson;
   const header = `Tool ${index + 1}/${total}: ${tool}(${shownArgs}) → ${ok ? 'OK' : 'ERROR'} (${summary})`;
   return `${header}\n${content}`;
@@ -570,7 +571,7 @@ function fitResultBlock(block: string, budget: number, k: number): string {
   if (block.length <= budget) return block;
   const marker = blockTruncMarker(k);
   const keep = budget - marker.length;
-  if (keep > 0) return `${block.slice(0, keep)}${marker}`;
+  if (keep > 0) return `${truncateSafe(block, keep)}${marker}`;
   const omit = blockOmitMarker(k);
   return omit.length <= budget ? omit : '';
 }
@@ -619,7 +620,7 @@ export function assembleFencedContinuation(
   // is ≤ maxChars. The slice is a mathematical backstop for the degenerate
   // case where the joiners alone exceed the cap (thousands of calls in a turn).
   const message = `${head}${fitted.join('\n\n')}${tail}`;
-  return { message: message.length > maxChars ? message.slice(0, maxChars) : message, clamped: true };
+  return { message: message.length > maxChars ? truncateSafe(message, maxChars) : message, clamped: true };
 }
 const RECOVER_HINT =
   'No valid tool call was found. To call a tool, emit a fenced block tagged spycore:tool whose body is {"tool": <name>, "args": { ... }}. If you are finished, reply with your final answer as plain text and no fenced block.';
@@ -1171,6 +1172,15 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentResult> {
   // but kept as the backstop so the loop can never fall off its end.
   return finishTurnLimit(summaryTurn, '');
   } finally {
+    // R1-3 - the journal is persisted on EVERY exit, not only the graceful
+    // ones. `result()` persists, but a non-abort provider throw re-throws
+    // past it (and any other unexpected throw out of the loop does the same),
+    // so for a caller without an external recorder - ACP is the only one -
+    // the run's file changes were never journaled and `rewind` could not see
+    // them. `persist()` is idempotent (guarded by `persisted`) and a no-op
+    // with an external recorder or zero changes, so this costs nothing on
+    // the paths that already persisted; `saveSession` itself never throws.
+    persist();
     if (mcpBridge) await mcpBridge.shutdown();
     // M1: LSP servers were promised graceful shutdown (manager.ts docstring)
     // but shutdownLspManagers() was never called - wire it here so long-lived

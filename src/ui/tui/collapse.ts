@@ -6,6 +6,8 @@
  * tails, pasted blobs); the one-line summary rows always keep their names.
  */
 
+import { truncateSafe } from '../../lib/text.js';
+
 /** Split capped output into shown lines + a hidden count. Pure. */
 export function collapseLines(
   lines: string[],
@@ -28,7 +30,7 @@ export function echoForTranscript(
   const lines = text.split('\n');
   if (lines.length <= maxLines && text.length <= maxChars) return text;
   const first = lines[0]!.trim();
-  const head = first.length > maxChars ? `${first.slice(0, maxChars - 1)}…` : first;
+  const head = first.length > maxChars ? `${truncateSafe(first, maxChars - 1)}…` : first;
   const extra = lines.length - 1;
   return `${head}  [+${extra} more line${extra === 1 ? '' : 's'} - full text sent]`;
 }
@@ -46,7 +48,7 @@ export function capShellOutput(
   let text = output;
   let truncated = false;
   if (text.length > maxChars) {
-    text = text.slice(0, maxChars);
+    text = truncateSafe(text, maxChars);
     truncated = true;
   }
   const lines = text.split('\n');

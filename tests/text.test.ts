@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { clip, clipOneLine, isObject, shortId } from '../src/lib/text.js';
+import { clip, clipOneLine, isObject, shortId, truncateSafe, truncateSafeTail } from '../src/lib/text.js';
 
 describe('isObject', () => {
   test('plain objects are objects', () => {
@@ -65,6 +65,48 @@ describe('clip', () => {
   test('max of 0 yields only the ellipsis for non-empty input', () => {
     expect(clip('x', 0)).toBe('…');
     expect(clip('', 0)).toBe('');
+  });
+});
+
+describe('truncateSafe', () => {
+  test('strings at or under the max pass through untouched', () => {
+    expect(truncateSafe('hello', 5)).toBe('hello');
+    expect(truncateSafe('hello', 10)).toBe('hello');
+    expect(truncateSafe('', 0)).toBe('');
+  });
+
+  test('a cut landing between a surrogate pair backs off by one, never splitting it', () => {
+    // 'a' + U+1F600 (two UTF-16 units) + 'b': the pair occupies units 1-2.
+    const s = 'a\u{1F600}b';
+    expect(truncateSafe(s, 2)).toBe('a');
+    expect(truncateSafe(s, 3)).toBe('a\u{1F600}');
+    expect(truncateSafe(s, 4)).toBe('a\u{1F600}b');
+    expect(truncateSafe(s, 2)).not.toContain('\uFFFD');
+  });
+
+  test('a cut elsewhere is exact', () => {
+    expect(truncateSafe('abcdef', 3)).toBe('abc');
+    expect(truncateSafe('abcdef', 0)).toBe('');
+  });
+
+  test('clip never leaves a lone surrogate at the boundary', () => {
+    // max 2 reserves one slot for the ellipsis: the cut lands inside the pair.
+    expect(clip('a\u{1F600}b', 2)).toBe('a…');
+    expect(clipOneLine('a\u{1F600}b', 2)).toBe('a…');
+  });
+});
+
+describe('truncateSafeTail', () => {
+  test('strings at or under the max pass through untouched', () => {
+    expect(truncateSafeTail('hello', 5)).toBe('hello');
+    expect(truncateSafeTail('hello', 10)).toBe('hello');
+  });
+
+  test('a front cut landing inside a surrogate pair moves forward, dropping the orphaned half', () => {
+    const s = 'a\u{1F600}b';
+    expect(truncateSafeTail(s, 2)).toBe('b');
+    expect(truncateSafeTail(s, 3)).toBe('\u{1F600}b');
+    expect(truncateSafeTail(s, 2)).not.toContain('\uFFFD');
   });
 });
 

@@ -732,6 +732,14 @@ describe('§12 the sink CATEGORIES - prompt, spinner, completion line', () => {
   // field for a presence check, then throws a static error message. It
   // never renders, logs, or forwards the value (or the id) anywhere - a
   // validation guard in the same benign class as the boolean predicates.
+  //
+  // R1-6 addition (reviewed 2026-11-09): `truncateSafeTail` is the
+  // surrogate-safe front-cut `tailLines` (builtin-tools.ts) uses to cap
+  // the UI scrollback tail. It is a pure string transform - it takes the
+  // text, returns a shorter string, and never renders, logs, or forwards
+  // the value anywhere; the render site of its output (the scrollback
+  // tail) is separately covered by the sink findings. A payload ->
+  // clean -> render carrier in the same class as `appendCappedText`.
   const PINNED_CARRIERS: ReadonlySet<string> = new Set([
     'src/commands/auth/login.ts :: openInBrowser',
     'src/commands/chat.ts :: assertConversationId',
@@ -761,6 +769,7 @@ describe('§12 the sink CATEGORIES - prompt, spinner, completion line', () => {
     'src/commands/skills/index.ts :: writeSyncedSkill',
     'src/commands/usage.ts :: renderBucket',
     'src/lib/agent/builtin-tools.ts :: registerTool',
+    'src/lib/agent/builtin-tools.ts :: truncateSafeTail',
     'src/lib/agent/builtin-tools.ts :: wrapUntrustedWebContent',
     'src/lib/agent/lsp/client.ts :: isObject',
     'src/lib/agent/mcp.ts :: renderContent',

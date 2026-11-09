@@ -1001,3 +1001,28 @@ describe('provider warning event', () => {
     expect(result.finalText).toBe('Partial answer.');
   });
 });
+
+// ─────────────────────────── R1-3 ───────────────────────────
+
+describe('R1-3 journal persisted on provider throw', () => {
+  // The journal's persist() used to run only from result(), so a run that
+  // died on a non-abort provider throw never journaled the changes it had
+  // already made - and ACP, the only runAgent caller without an external
+  // recorder, lost them outright. Mutation: drop the persist() in the
+  // loop's finally - the run still throws, but no session is written.
+  test('a run that dies on a provider error still journals the changes it made', async () => {
+    const cwd = workspace('spycli-r1j-');
+    const boom = (): void => {
+      throw new Error('provider boom');
+    };
+    const provider = new ScriptProvider({
+      script: byTurn([say(lines(write('r1j.txt'))), [boom], say('Done.')]),
+    });
+    await expect(
+      drive(provider, { task: 'r1j', cwd, requestApproval: ACCEPT }),
+    ).rejects.toThrow('provider boom');
+    expect(
+      listSessions(cwd).map((s) => [s.task, s.changes.map((c) => basename(c.path))]),
+    ).toEqual([['r1j', ['r1j.txt']]]);
+  });
+});

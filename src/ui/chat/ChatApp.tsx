@@ -4,6 +4,7 @@ import { useReducer, useRef, useState, type ReactNode } from 'react';
 import { Notice, Spinner, StatusBar, type NoticeVariant } from '../components/index.js';
 import { StreamingMarkdown } from '../markdown/index.js';
 import { sanitizeForDisplay } from '../../lib/sanitize-display.js';
+import { truncateSafe } from '../../lib/text.js';
 import { useTheme } from '../theme/theme.js';
 import { useContentWidth } from '../lib/useContentWidth.js';
 import { ChatInput } from './ChatInput.js';
@@ -492,7 +493,7 @@ export function ChatApp({ model: initialModel, effort: initialEffort, conversati
         break;
       case 'narration': {
         const text = sanitizeForDisplay(e.text).trim();
-        if (text) pushNotice('info', text.length > 2_000 ? `${text.slice(0, 2_000)}…` : text);
+        if (text) pushNotice('info', text.length > 2_000 ? `${truncateSafe(text, 2_000)}…` : text);
         break;
       }
       case 'final':
@@ -545,7 +546,7 @@ export function ChatApp({ model: initialModel, effort: initialEffort, conversati
     if (req.kind === 'command') {
       return `The agent wants to run: ${sanitizeForDisplay(req.command)}`;
     }
-    return `The agent wants to call MCP tool ${sanitizeForDisplay(req.fullName)} with ${sanitizeForDisplay(JSON.stringify(req.args)).slice(0, 400)}`;
+    return `The agent wants to call MCP tool ${sanitizeForDisplay(req.fullName)} with ${truncateSafe(sanitizeForDisplay(JSON.stringify(req.args)), 400)}`;
   };
 
   // One plan-/agent-mode turn, hosted entirely on the EXISTING runAgent path
@@ -906,7 +907,7 @@ export function ChatApp({ model: initialModel, effort: initialEffort, conversati
         const echo = sanitizeForDisplay(outcome.message);
         void send(
           outcome.message,
-          echo.length > 2_000 ? `${echo.slice(0, 2_000)}\n[… echo truncated]` : echo,
+          echo.length > 2_000 ? `${truncateSafe(echo, 2_000)}\n[… echo truncated]` : echo,
         );
         break;
       }

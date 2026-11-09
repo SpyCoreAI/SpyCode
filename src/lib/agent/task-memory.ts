@@ -49,7 +49,7 @@ export interface StructureSnapshot {
 function topLevelDirs(cwd: string): string[] {
   try {
     return readdirSync(cwd, { withFileTypes: true })
-      .filter((d) => d.isDirectory() && !IGNORE_DIRS.has(d.name))
+      .filter((d) => d.isDirectory() && !IGNORE_DIRS.has(d.name.toLowerCase()))
       .map((d) => d.name)
       .sort();
   } catch {

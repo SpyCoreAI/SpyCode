@@ -65,6 +65,17 @@ describe('Windows-native catastrophic commands are screened', () => {
     }
   });
 
+  test('R1-2 - powershell -c / -Command takes the rest of the line, unquoted', () => {
+    for (const c of [
+      'powershell -c Remove-Item -Recurse C:\\',
+      'pwsh -Command Remove-Item -Recurse C:\\',
+      'powershell -c Remove-Item -Recurse -Force C:\\temp',
+      'pwsh -Command Format-Volume -DriveLetter D',
+    ]) {
+      expect(blocked(c), c).toBe(true);
+    }
+  });
+
   test('ordinary commands - POSIX and Windows alike - stay allowed', () => {
     for (const c of [
       'echo hello',
@@ -77,6 +88,8 @@ describe('Windows-native catastrophic commands are screened', () => {
       'cipher /e C:\\temp\\file.txt',
       'powershell -c "Get-ChildItem C:\\temp"',
       'powershell -c "Remove-Item C:\\temp\\one-file.txt"',
+      'powershell -c Get-ChildItem C:\\temp',
+      'powershell -c Remove-Item C:\\temp\\one-file.txt',
       'cmd /c "echo hello"',
       'ls -la',
       'rm -rf ./build',

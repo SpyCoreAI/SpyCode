@@ -281,7 +281,7 @@ function listCandidateFiles(cwd: string, spec: BuiltinServerSpec, maxFiles: numb
       if (e.isDirectory()) {
         // isDirectory() is false for symlinks (no d_type follow), so symlinked
         // trees are never descended into — no loop risk.
-        if (SKIP_DIRS.has(e.name) || e.name.startsWith('.')) continue;
+        if (SKIP_DIRS.has(e.name.toLowerCase()) || e.name.startsWith('.')) continue;
         subdirs.push(full);
       } else if (e.isFile() && spec.extensions.includes(extname(e.name).toLowerCase())) {
         out.push(full);

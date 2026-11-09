@@ -21,6 +21,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync,
 import { dirname, join } from 'node:path';
 import { getConfigPath } from '../config.js';
 import { redactFreeText } from '../redact.js';
+import { truncateSafe } from '../text.js';
 import type { AgentEvent } from './loop.js';
 
 /** Trace file version (bumped if the line schema ever changes). */
@@ -118,7 +119,7 @@ export function createRunTraceWriter(opts: {
     JSON.stringify({
       v: RUN_TRACE_VERSION,
       traceId: opts.traceId,
-      task: redactFreeText(opts.task).slice(0, 2000),
+      task: truncateSafe(redactFreeText(opts.task), 2000),
       model: opts.model,
       startedAt: new Date().toISOString(),
       detached: opts.detached,
@@ -148,7 +149,7 @@ export function createRunTraceWriter(opts: {
     close: (result): string => {
       const ended: RunTraceResult = {
         ...result,
-        finalText: redactFreeText(result.finalText).slice(0, 20_000),
+        finalText: truncateSafe(redactFreeText(result.finalText), 20_000),
         endedAt: new Date().toISOString(),
         ...(droppedEvents > 0 ? { droppedEvents } : {}),
       };

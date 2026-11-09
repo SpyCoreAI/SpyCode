@@ -19,6 +19,7 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { getConfigPath, isWorkspaceTrusted } from '../config.js';
+import { truncateSafe } from '../text.js';
 import { loadSecretGuardSync } from './secrets.js';
 
 export interface DiscoveredSkill {
@@ -51,12 +52,8 @@ export const LOAD_SKILL_BODY_CAP = 20_000;
  */
 export function capSkillBody(body: string): { body: string; truncated: boolean } {
   if (body.length <= LOAD_SKILL_BODY_CAP) return { body, truncated: false };
-  let end = LOAD_SKILL_BODY_CAP;
-  const last = body.charCodeAt(end - 1);
-  const next = body.charCodeAt(end);
-  if (last >= 0xd800 && last <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) end -= 1;
   return {
-    body: `${body.slice(0, end)}\n\n[skill body truncated at ${LOAD_SKILL_BODY_CAP} characters - the remainder was not loaded]`,
+    body: `${truncateSafe(body, LOAD_SKILL_BODY_CAP)}\n\n[skill body truncated at ${LOAD_SKILL_BODY_CAP} characters - the remainder was not loaded]`,
     truncated: true,
   };
 }
@@ -80,7 +77,7 @@ function unquote(v: string): string {
 
 function oneLine(s: string, cap = DESCRIPTION_CAP): string {
   const flat = s.replace(/\s+/g, ' ').trim();
-  return flat.length > cap ? `${flat.slice(0, cap - 1)}…` : flat;
+  return flat.length > cap ? `${truncateSafe(flat, cap - 1)}…` : flat;
 }
 
 export interface ParsedSkillFile {

@@ -7,6 +7,8 @@
  * the transcript-level context compression the proposal asks for.
  */
 
+import { truncateSafe } from '../../lib/text.js';
+
 /** Minimal structural shape the serializer needs (TuiApp's items satisfy it). */
 export interface SummarizableItem {
   kind: string;
@@ -31,7 +33,7 @@ export const MAX_SERIAL_CHARS = 30_000;
 function cap(s: string | undefined, max = MAX_ITEM_CHARS): string {
   if (!s) return '';
   const t = s.trim();
-  return t.length > max ? `${t.slice(0, max - 1)}…` : t;
+  return t.length > max ? `${truncateSafe(t, max - 1)}…` : t;
 }
 
 /**

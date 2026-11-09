@@ -9,6 +9,7 @@
  * block, or delay the session. No bundled sound files at v1.
  */
 import { spawn } from 'node:child_process';
+import { truncateSafe } from '../../lib/text.js';
 
 /** Tracks terminal focus via DEC 1004 focus reports. Defaults to focused. */
 let blurred = false;
@@ -72,12 +73,12 @@ export function notifyUser(title: string, body: string): void {
         'osascript',
         [
           '-e',
-          `display notification ${JSON.stringify(body.slice(0, 200))} with title ${JSON.stringify(title.slice(0, 80))}`,
+          `display notification ${JSON.stringify(truncateSafe(body, 200))} with title ${JSON.stringify(truncateSafe(title, 80))}`,
         ],
         opts,
       );
     } else if (process.platform === 'linux') {
-      child = spawn('notify-send', [title.slice(0, 80), body.slice(0, 200)], opts);
+      child = spawn('notify-send', [truncateSafe(title, 80), truncateSafe(body, 200)], opts);
     } else {
       return;
     }

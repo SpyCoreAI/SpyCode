@@ -55,7 +55,7 @@ import {
   type McpContent,
   type McpToolDef,
 } from './mcp-client.js';
-import { isObject } from '../text.js';
+import { isObject, truncateSafe } from '../text.js';
 import { validateRemoteMcpUrl } from './mcp-config.js';
 
 /** Cap on one HTTP response (JSON body bytes, or cumulative SSE bytes). */
@@ -95,7 +95,7 @@ function sanitizeRemoteText(raw: unknown): string {
   const s = typeof raw === 'string' ? raw : String(raw ?? '');
   // eslint-disable-next-line no-control-regex
   const clean = s.replace(/[\x00-\x1f\x7f-\x9f]/g, " ").replace(/\s+/g, ' ').trim();
-  return clean.length > REMOTE_ERROR_TEXT_CAP ? `${clean.slice(0, REMOTE_ERROR_TEXT_CAP)}…` : clean;
+  return clean.length > REMOTE_ERROR_TEXT_CAP ? `${truncateSafe(clean, REMOTE_ERROR_TEXT_CAP)}…` : clean;
 }
 
 /** First value of a possibly-multi response header. */
