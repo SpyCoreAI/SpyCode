@@ -25,7 +25,7 @@ import {
 } from '../../lib/config.js';
 import { formatOption, getOutputOptions, info, json, print, resolveFormat, success, warn } from '../../lib/output.js';
 import { confirmYesNo } from '../../lib/prompt.js';
-import { accessSync, constants } from 'node:fs';
+import { accessSync, constants, statSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
 
 /**
@@ -351,6 +351,28 @@ function registerTrust(group: Command): void {
     .description('Trust a workspace so its project-scoped MCP servers run (defaults to the current directory)')
     .action((path: string | undefined) => {
       const target = resolvePath(path ?? process.cwd());
+      // Trust is the security boundary for project-scoped MCP servers (and
+      // project hooks): a nonexistent or not-yet-created path must not be
+      // granted now and silently apply if that path later becomes a cloned
+      // repo, and a file path can never be a workspace. Require an existing
+      // directory, like `projects add` does.
+      let st;
+      try {
+        st = statSync(target);
+      } catch {
+        throw new SpycoreCliError(
+          `Cannot trust workspace: ${target} does not exist.`,
+          EXIT_USER_ERROR,
+          'Pass an existing directory.',
+        );
+      }
+      if (!st.isDirectory()) {
+        throw new SpycoreCliError(
+          `Cannot trust workspace: ${target} is not a directory.`,
+          EXIT_USER_ERROR,
+          'Pass an existing directory.',
+        );
+      }
       if (isWorkspaceTrusted(target)) {
         info(`Workspace already trusted: ${target}`);
         return;

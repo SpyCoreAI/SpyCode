@@ -90,6 +90,18 @@ export function registerCurator(group: Command): void {
         }
         if (opts.unpin) {
           const name = opts.unpin.trim();
+          // Same existence check as --pin: unpinning a name that does not
+          // exist used to print success for an operation that did nothing.
+          // And a name that exists but is not pinned is refused too, so
+          // the success message only ever follows a real unpin.
+          requireUserSkill(name, userDir);
+          if (!readCuratorState(userDir).pinned.includes(name)) {
+            throw new SpycoreCliError(
+              `Skill "${name}" is not pinned.`,
+              EXIT_USER_ERROR,
+              'See `spycore skills curator` for currently pinned skills.',
+            );
+          }
           unpinSkill(name, userDir);
           success(`Unpinned "${sanitizeForDisplay(name)}".`);
           if (!opts.archive) return;

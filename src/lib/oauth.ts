@@ -14,7 +14,7 @@
 
 import { createServer, type Server } from 'node:http';
 import { randomBytes, createHash } from 'node:crypto';
-import { exec } from 'node:child_process';
+import { openInBrowser } from './browser.js';
 
 // Google OAuth endpoints
 const GOOGLE_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
@@ -75,19 +75,17 @@ function generatePkce(): { verifier: string; challenge: string } {
   return { verifier, challenge };
 }
 
-/** Open URL in default browser (cross-platform). */
+/**
+ * Open URL in default browser (cross-platform). Reuses openInBrowser's
+ * argv-based opener (no shell, no string interpolation): the previous
+ * exec-string form mangled the percent-encoded OAuth URL on Windows
+ * (cmd.exe expands %XX before any other parsing) and duplicated the
+ * browser opener instead of reusing it.
+ */
 function openBrowser(url: string): void {
-  const cmd =
-    process.platform === 'darwin'
-      ? `open "${url}"`
-      : process.platform === 'win32'
-        ? `start "" "${url}"`
-        : `xdg-open "${url}"`;
-  exec(cmd, (err) => {
-    if (err) {
-      console.log(`\nPlease open this URL in your browser:\n${url}\n`);
-    }
-  });
+  if (!openInBrowser(url)) {
+    console.log(`\nPlease open this URL in your browser:\n${url}\n`);
+  }
 }
 
 /**

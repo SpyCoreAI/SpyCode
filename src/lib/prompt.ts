@@ -1,5 +1,14 @@
 import { createInterface, type Interface } from 'node:readline';
+import { EXIT_USER_ERROR, SpycoreCliError } from './errors.js';
+import { formatFileSize } from './files.js';
 import { sanitizeForDisplay } from './sanitize-display.js';
+
+/**
+ * Cap on bytes read from a piped stdin. The only caller rejects anything
+ * over 500 chars anyway - the cap only bounds what is buffered before
+ * that rejection, so a multi-GB pipe fails fast instead of OOMing first.
+ */
+export const READ_STDIN_PIPE_MAX_BYTES = 1_048_576;
 
 /**
  * Stdin/stdout prompt helpers. Built on Node's readline so we don't drag
@@ -76,6 +85,16 @@ export async function readSingleLineInput(prompt: string): Promise<string> {
       reject(makeCancelledError());
     };
     rl.on('SIGINT', onSigint);
+
+    // EOF (Ctrl+D / piped empty stdin) closes the interface without ever
+    // answering the question - without this the promise never settles and
+    // the CLI exits 13 with an unsettled-await warning instead of a clean
+    // cancel. confirmYesNo's docstring promises EOF is false; this is
+    // what makes it true.
+    rl.on('close', () => {
+      if (answered) return;
+      reject(makeCancelledError());
+    });
 
     // THE BOUNDARY. readline writes this string to the interface's `output`
     // (process.stderr) verbatim - this is the last point we control.
@@ -171,13 +190,48 @@ export async function readStdinPipe(): Promise<string> {
   if (process.stdin.isTTY === true) return '';
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    process.stdin.on('data', (chunk: Buffer) => {
+    let total = 0;
+    let settled = false;
+    const cleanup = (): void => {
+      process.stdin.off('data', onData);
+      process.stdin.off('end', onEnd);
+      process.stdin.off('error', onError);
+    };
+    const onData = (chunk: Buffer): void => {
+      total += chunk.length;
+      if (total > READ_STDIN_PIPE_MAX_BYTES) {
+        // Stop accumulating past the cap: the only caller rejects anything
+        // over 500 chars anyway, so reading gigabytes to then reject them
+        // was pure waste (and an OOM vector).
+        settled = true;
+        cleanup();
+        process.stdin.pause();
+        reject(
+          new SpycoreCliError(
+            `Piped stdin exceeds the ${formatFileSize(READ_STDIN_PIPE_MAX_BYTES)} limit.`,
+            EXIT_USER_ERROR,
+            'Pipe a smaller input.',
+          ),
+        );
+        return;
+      }
       chunks.push(chunk);
-    });
-    process.stdin.on('end', () => {
+    };
+    const onEnd = (): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
       resolve(Buffer.concat(chunks).toString('utf8'));
-    });
-    process.stdin.on('error', reject);
+    };
+    const onError = (err: Error): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(err);
+    };
+    process.stdin.on('data', onData);
+    process.stdin.on('end', onEnd);
+    process.stdin.on('error', onError);
   });
 }
 

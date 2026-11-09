@@ -59,7 +59,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { getConfigPath, isWorkspaceTrusted } from '../config.js';
 import { parseSkillFile } from '../agent/skills.js';
-import { resolveTemplateIncludes } from '../memory.js';
+import { REPO_MD_READ_CAP_BYTES, resolveTemplateIncludes } from '../memory.js';
 import { WIRE_MESSAGE_MAX_CHARS } from '../attachments.js';
 import { SLASH_HELP, type SlashHelpEntry, type SlashOutcome } from './registry.js';
 import { loadSecretGuardSync } from '../agent/secrets.js';
@@ -144,6 +144,12 @@ function scanCommandsRoot(
     }
     let raw: string;
     try {
+      // Capped read (L17): a repo-supplied template over the cap is
+      // skipped with a notice, never read whole into memory first.
+      if (statSync(path).size > REPO_MD_READ_CAP_BYTES) {
+        notices.push(`Skipped ${source} command /${name}: file over 1 MB.`);
+        continue;
+      }
       raw = readFileSync(path, 'utf8');
     } catch {
       notices.push(`Skipped ${source} command /${name}: file not readable.`);

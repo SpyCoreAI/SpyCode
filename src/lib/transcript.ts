@@ -50,7 +50,14 @@ export function conversationToMarkdown(c: ConversationExportResp): string {
   lines.push('');
   lines.push('---');
   lines.push('');
-  for (const m of c.messages) {
+  // Server-shape drift: a response without a messages array used to crash
+  // on for...of, and a non-string content used to crash inside
+  // redactFreeText (.replace on a non-string). Degrade to an empty history
+  // and empty content instead of a raw TypeError surfacing as save-error.
+  const messages = (Array.isArray(c.messages) ? c.messages : []).filter(
+    (m): m is ConversationExportResp['messages'][number] => !!m && typeof m === 'object',
+  );
+  for (const m of messages) {
     const role = sanitizeExportField(m.role);
     const heading =
       role.toLowerCase() === 'user'
@@ -60,7 +67,7 @@ export function conversationToMarkdown(c: ConversationExportResp): string {
           : `## ${role}`;
     lines.push(heading);
     lines.push('');
-    lines.push(redactFreeText(m.content));
+    lines.push(redactFreeText(typeof m.content === 'string' ? m.content : ''));
     lines.push('');
   }
   return lines.join('\n') + '\n';

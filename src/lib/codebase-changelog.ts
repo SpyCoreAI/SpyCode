@@ -11,7 +11,7 @@
  * `spycore` CLI runs - it always lives at the end-user's project root, and
  * nothing here ever writes into the CLI's own source tree.
  */
-import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { countFileLines, readFilePrefix } from './repo-scan.js';
 import { loadSecretGuardSync } from './agent/secrets.js';
@@ -179,13 +179,20 @@ export interface ChangelogAppendResult {
  * order. Does NOT create the file - when it is absent this is a no-op, because
  * the write-at-end lifecycle only logs once `/init` has set the file up. Never
  * throws.
+ *
+ * Bounded + atomic: the read is capped at CHANGELOG_READ_CAP_BYTES (the file
+ * is newest-first, so the head holds the newest entries - an oversized file
+ * is trimmed to the newest entries that fit the cap, and the older tail is
+ * dropped on that append rather than read, parsed, and rewritten whole on
+ * every run), and the write goes through tmp+rename so a crash mid-write
+ * cannot lose the whole file.
  */
 export function appendChangelogEntry(cwd: string, entryBlock: string): ChangelogAppendResult {
   const path = join(resolve(cwd), CHANGELOG_FILE);
   if (!existsSync(path)) return { appended: false, path };
   let content = '';
   try {
-    content = readFileSync(path, 'utf8');
+    content = readFilePrefix(path, CHANGELOG_READ_CAP_BYTES) ?? '';
   } catch {
     return { appended: false, path };
   }
@@ -195,7 +202,19 @@ export function appendChangelogEntry(cwd: string, entryBlock: string): Changelog
       .map((e) => `${e.heading}\n${e.body}`.replace(/\s+$/, ''))
       .join('\n\n');
     const blocks = [preamble.trim(), entryBlock.trim(), existing].filter((s) => s.length > 0);
-    writeFileSync(path, `${blocks.join('\n\n')}\n`, 'utf8');
+    const next = `${blocks.join('\n\n')}\n`;
+    const tmp = `${path}.tmp-${process.pid}`;
+    writeFileSync(tmp, next, 'utf8');
+    try {
+      renameSync(tmp, path);
+    } catch {
+      writeFileSync(path, next, 'utf8');
+      try {
+        unlinkSync(tmp);
+      } catch {
+        // ignore cleanup failure
+      }
+    }
     return { appended: true, path };
   } catch {
     return { appended: false, path };

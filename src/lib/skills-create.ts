@@ -33,6 +33,23 @@ export const DERIVED_NAME_CAP = 40;
 export const MIN_BODY_LINES = 20;
 
 /**
+ * Cap on user text folded into a generation message (description /
+ * feedback): the assembled message must stay under the server's 32k wire
+ * cap, and no provider clamps it - an uncapped description pushed the
+ * generation over the cap and failed with a 400. 8k leaves ample room for
+ * the scaffold + the model's reply budget while keeping the invariant.
+ */
+export const SKILL_GEN_INPUT_MAX_CHARS = 8_000;
+
+/** Cut `text` to `max` chars with an explicit marker (no silent trims). */
+function truncateWithMarker(text: string, max: number): string {
+  const MARKER = '[... truncated: input exceeds the generation budget ...]';
+  if (text.length <= max) return text;
+  const keep = Math.max(0, max - MARKER.length - 2);
+  return `${text.slice(0, keep)}\n${MARKER}`;
+}
+
+/**
  * Cap on accumulated model text in one generation turn: a runaway
  * server/model must not grow memory without bound. Far above a SKILL.md
  * (target 100-400 lines), so a legitimate turn never trips it.
@@ -200,7 +217,7 @@ export function buildCreateMessage(name: string, description: string): string {
   return `Write the skill now.
 
 Skill name (the frontmatter \`name:\` must be EXACTLY this): ${name}
-Topic: ${description}
+Topic: ${truncateWithMarker(description, SKILL_GEN_INPUT_MAX_CHARS)}
 
 Output only the complete SKILL.md content, starting with the opening \`---\` line.`;
 }
@@ -211,7 +228,7 @@ Output the corrected COMPLETE SKILL.md content again - only the file, starting w
 }
 
 export function buildFeedbackMessage(feedback: string): string {
-  return `The user reviewed the skill and asked for changes: "${feedback}"
+  return `The user reviewed the skill and asked for changes: "${truncateWithMarker(feedback, SKILL_GEN_INPUT_MAX_CHARS)}"
 Revise it and output the COMPLETE revised SKILL.md content - only the file, starting with the opening \`---\` line.`;
 }
 

@@ -3,6 +3,7 @@ import { api } from '../../lib/api.js';
 import { parseIntFlag } from '../../lib/numeric-flags.js';
 import { formatOption, json, print, resolveFormat, writeFormatted } from '../../lib/output.js';
 import { clip } from '../../lib/text.js';
+import { relativeTime } from '../../lib/files.js';
 import { sanitizeForDisplay } from '../../lib/sanitize-display.js';
 
 interface ConvSummary {
@@ -36,15 +37,9 @@ interface ListResp {
  */
 const SERVER_PAGE_SIZE = 20;
 
-function relTime(iso: string): string {
-  const ts = Date.parse(iso);
-  if (Number.isNaN(ts)) return '';
-  const diffSec = Math.floor((Date.now() - ts) / 1000);
-  if (diffSec < 60) return `${diffSec}s ago`;
-  if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
-  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
-  return `${Math.floor(diffSec / 86400)}d ago`;
-}
+// Relative timestamps come from lib/files.js `relativeTime` (the same one
+// memory/list.ts and files/list.ts use): the local duplicate used to render
+// a future updatedAt as "-5s ago". Do not reintroduce a local copy.
 
 export function registerConversationsListCommand(program: Command): void {
   program
@@ -73,7 +68,13 @@ export function registerConversationsListCommand(program: Command): void {
         `/conversations?page=${encodeURIComponent(String(page))}`,
         { apiUrlOverride: parentOpts.apiUrl },
       );
-      const items = (data.conversations ?? []).slice(0, limit);
+      // Server-shape drift: a non-array `conversations` used to crash on
+      // .slice - degrade to an empty list, and per-row fields are read
+      // through string guards below (a non-string id/title/model must not
+      // throw on .length / .padEnd downstream).
+      const items = (Array.isArray(data.conversations) ? data.conversations : []).filter(
+        (c): c is ConvSummary => !!c && typeof c === 'object',
+      ).slice(0, limit);
       // The server sends `total` (un-paginated count) but not `hasMore`; it
       // documents the client-side formula `page * 20 < total`. Compute it so
       // both JSON consumers and the text footer can show "more available".
@@ -109,8 +110,10 @@ export function registerConversationsListCommand(program: Command): void {
       // Full ids, not shortId: the lookup commands (show/delete/export/
       // share/remove) require the exact id, and a 12-char + … display
       // made copy-paste from a list fail with "not found". The column
-      // widens to the longest id on the page.
-      const idCol = Math.max(14, ...items.map((c) => c.id.length));
+      // widens to the longest id on the page. Non-string ids render empty
+      // (server-shape drift) instead of throwing on .length.
+      const strId = (c: ConvSummary): string => (typeof c.id === 'string' ? c.id : '');
+      const idCol = Math.max(14, ...items.map((c) => strId(c).length));
       const titleCol = Math.max(20, Math.min(40, process.stdout.columns ? process.stdout.columns - 50 : 40));
       const modelCol = 10;
 
@@ -125,10 +128,10 @@ export function registerConversationsListCommand(program: Command): void {
       for (const c of items) {
         // Sanitize BEFORE clip()/padEnd() - see memory/list.ts.
         const row = [
-          sanitizeForDisplay(c.id).padEnd(idCol),
-          clip(sanitizeForDisplay(c.title || '(untitled)'), titleCol).padEnd(titleCol),
-          sanitizeForDisplay(c.model || '').padEnd(modelCol),
-          relTime(c.updatedAt),
+          sanitizeForDisplay(strId(c)).padEnd(idCol),
+          clip(sanitizeForDisplay(typeof c.title === 'string' && c.title ? c.title : '(untitled)'), titleCol).padEnd(titleCol),
+          sanitizeForDisplay(typeof c.model === 'string' ? c.model : '').padEnd(modelCol),
+          relativeTime(typeof c.updatedAt === 'string' ? c.updatedAt : ''),
         ].join('  ');
         print(row);
       }

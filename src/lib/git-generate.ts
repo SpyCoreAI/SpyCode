@@ -29,6 +29,8 @@ export const GIT_DIFF_MAX_CHARS = 24_000;
 /** File-list / log blocks are context, not the payload - keep them small. */
 const STAT_MAX_CHARS = 4_000;
 const LOG_MAX_CHARS = 1_000;
+/** The `--for` task hint is context, not the payload - same budget as the log block. */
+const HINT_MAX_CHARS = 1_000;
 
 /**
  * Cap on accumulated model text in one turn: a runaway server/model must
@@ -141,7 +143,9 @@ export function buildBranchPrompt(input: BranchPromptInput): string {
     '- kebab-case, prefixed with a change type: feat/, fix/, chore/, docs/, refactor/, perf/ or test/\n' +
     '- at most 60 characters, lowercase letters, digits and hyphens only after the prefix\n' +
     `- ${NO_TRAILER_RULES}\n`;
-  const hint = input.hint.trim() ? `\nTask: ${input.hint.trim()}\n` : '';
+  const hint = input.hint.trim()
+    ? `\nTask: ${truncateWithMarker(input.hint.trim(), HINT_MAX_CHARS)}\n`
+    : '';
   const scaffold = `${head}${hint}\nWorking-tree diff:\n`;
   const diffBudget = Math.min(
     GIT_DIFF_MAX_CHARS,

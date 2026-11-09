@@ -22,9 +22,9 @@
  * targets the end-user's repo - nothing here ever writes into the CLI's own
  * source tree.
  */
-import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { countFileLines, readFilePrefix, scanRepo, type RepoScan } from './repo-scan.js';
+import { countFileLines, readFilePrefix, readFileSuffix, scanRepo, type RepoScan } from './repo-scan.js';
 import { loadSecretGuardSync } from './agent/secrets.js';
 
 /** Cap on bytes read from CODEBASE_GUIDE.md: only the head is ever rendered. */
@@ -356,8 +356,14 @@ export async function refreshCodebaseGuide(cwd: string): Promise<GuideRefreshRes
   let oldNotes: string | null = null;
   if (existed) {
     try {
-      const section = extractNotesSection(readFileSync(path, 'utf8'));
-      if (section && notesHaveUserContent(section)) oldNotes = section;
+      // Tail read, not a whole-file read: the preserved section is the
+      // TRAILING "## Notes (manual)" block, so a head-only capped read
+      // would lose it on a file over the cap (L17).
+      const tail = readFileSuffix(path, GUIDE_READ_CAP_BYTES);
+      if (tail !== null) {
+        const section = extractNotesSection(tail);
+        if (section && notesHaveUserContent(section)) oldNotes = section;
+      }
     } catch {
       /* unreadable - regenerate from scratch */
     }

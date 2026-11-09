@@ -172,9 +172,82 @@ export function visionGateError(modelSlug: string): SpycoreCliError {
   );
 }
 
-/** NUL-byte sniff on the first 8 KiB - the standard "is this binary?" check. */
+/**
+ * True when the buffer looks like UTF-16 text: most 16-bit units have a
+ * NUL high (LE) or low (BE) byte next to a printable low/high byte. Mirrors
+ * the agent tool-core's heuristic (same 80% threshold, same text-byte
+ * set) so the two `looksBinary` copies agree. CJK/emoji text has non-zero
+ * high bytes and only matches via the BOM - the documented limit of the
+ * heuristic, not a second binary rule.
+ */
+function looksUtf16Text(buf: Buffer, len: number): 'le' | 'be' | null {
+  const pairs = Math.floor(len / 2);
+  if (pairs < 4) return null;
+  const isTextByte = (b: number): boolean =>
+    b === 9 || b === 10 || b === 11 || b === 12 || b === 13 || (b >= 32 && b <= 126) || b >= 128;
+  let le = 0;
+  let be = 0;
+  for (let i = 0; i < pairs; i += 1) {
+    const lo = buf[i * 2] as number;
+    const hi = buf[i * 2 + 1] as number;
+    if (hi === 0 && isTextByte(lo)) le += 1;
+    if (lo === 0 && isTextByte(hi)) be += 1;
+  }
+  if (le / pairs >= 0.8) return 'le';
+  if (be / pairs >= 0.8) return 'be';
+  return null;
+}
+
+/**
+ * Decode a text buffer, honouring a UTF-16 BOM or an even-spaced-NUL
+ * pattern. UTF-16 text decoded as UTF-8 is mojibake full of NULs, so the
+ * sniff below must run on the decoded form, not the raw bytes.
+ */
+function decodeTextBuffer(buf: Buffer): string {
+  if (buf.length >= 2) {
+    const b0 = buf[0] as number;
+    const b1 = buf[1] as number;
+    if (b0 === 0xff && b1 === 0xfe) {
+      return buf.subarray(2).toString('utf16le').replace(/^\uFEFF/, '');
+    }
+    if (b0 === 0xfe && b1 === 0xff) {
+      // No BE decoder in Node: swap the pairs, then decode as LE.
+      const swapped = Buffer.from(buf.subarray(2));
+      for (let i = 0; i + 1 < swapped.length; i += 2) {
+        const t = swapped[i] as number;
+        swapped[i] = swapped[i + 1] as number;
+        swapped[i + 1] = t;
+      }
+      return swapped.toString('utf16le').replace(/^\uFEFF/, '');
+    }
+  }
+  const form = looksUtf16Text(buf, Math.min(buf.length, 8192));
+  if (form === 'le') return buf.toString('utf16le').replace(/^\uFEFF/, '');
+  if (form === 'be') {
+    const swapped = Buffer.from(buf);
+    for (let i = 0; i + 1 < swapped.length; i += 2) {
+      const t = swapped[i] as number;
+      swapped[i] = swapped[i + 1] as number;
+      swapped[i + 1] = t;
+    }
+    return swapped.toString('utf16le').replace(/^\uFEFF/, '');
+  }
+  return buf.toString('utf8');
+}
+
+/**
+ * NUL-byte sniff on the first 8 KiB - the standard "is this binary?" check.
+ * UTF-16 text is full of NUL bytes, so a BOM or an even-spaced-NUL pattern
+ * is text, not binary evidence (same approach as agent/tool-core.ts).
+ */
 export function looksBinary(buf: Buffer): boolean {
   const window = buf.subarray(0, 8192);
+  if (window.length >= 2) {
+    const b0 = window[0] as number;
+    const b1 = window[1] as number;
+    if ((b0 === 0xff && b1 === 0xfe) || (b0 === 0xfe && b1 === 0xff)) return false;
+  }
+  if (looksUtf16Text(window, window.length) !== null) return false;
   return window.includes(0);
 }
 
@@ -262,7 +335,9 @@ export function inspectAttachment(rawPath: string, cwd: string): LocalAttachment
       SUPPORTED_KINDS_HINT,
     );
   }
-  let text = buf.toString('utf8');
+  // UTF-16 text is decoded to UTF-8 here (BOM / even-spaced-NUL pattern):
+  // decoding the raw bytes as UTF-8 would inline mojibake full of NULs.
+  let text = decodeTextBuffer(buf);
   let truncated = false;
   if (text.length > TEXT_ATTACH_MAX_CHARS) {
     text = `${text.slice(0, TEXT_ATTACH_MAX_CHARS)}\n[attachment truncated at ${TEXT_ATTACH_MAX_CHARS} characters]`;

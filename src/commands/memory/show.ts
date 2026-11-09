@@ -34,7 +34,12 @@ export function registerMemoryShowCommand(program: Command): void {
       const data = await api.get<MemoryListResp>('/api/memory', {
         apiUrlOverride: parentOpts.apiUrl,
       });
-      const found = (data.memories ?? []).find((m) => m.id === id);
+      // Server-shape drift: a non-array `memories` used to throw on .find,
+      // and a non-object entry would throw on .id.
+      const memories = (Array.isArray(data.memories) ? data.memories : []).filter(
+        (m): m is MemoryItem => !!m && typeof m === 'object',
+      );
+      const found = memories.find((m) => m.id === id);
       if (!found) {
         throw new SpycoreCliError(
           `Memory not found: ${id}`,
@@ -47,16 +52,17 @@ export function registerMemoryShowCommand(program: Command): void {
         return;
       }
       // Server-returned record fields reaching the terminal - sanitized here,
-      // never on the json() path above .
-      print(`ID:        ${sanitizeForDisplay(found.id)}`);
-      print(`Category:  ${sanitizeForDisplay(found.category)}`);
-      if (found.source) print(`Source:    ${sanitizeForDisplay(found.source)}`);
+      // never on the json() path above. Non-string fields render empty
+      // (server-shape drift) instead of throwing.
+      print(`ID:        ${sanitizeForDisplay(typeof found.id === 'string' ? found.id : '')}`);
+      print(`Category:  ${sanitizeForDisplay(typeof found.category === 'string' ? found.category : '')}`);
+      if (typeof found.source === 'string' && found.source) print(`Source:    ${sanitizeForDisplay(found.source)}`);
       if (typeof found.confidence === 'number') {
         print(`Confidence: ${found.confidence.toFixed(2)}`);
       }
-      print(`Created:   ${relativeTime(found.createdAt)}`);
-      if (found.expiresAt) print(`Expires:   ${relativeTime(found.expiresAt)}`);
+      print(`Created:   ${relativeTime(typeof found.createdAt === 'string' ? found.createdAt : '')}`);
+      if (typeof found.expiresAt === 'string' && found.expiresAt) print(`Expires:   ${relativeTime(found.expiresAt)}`);
       print('');
-      print(sanitizeForDisplay(found.content));
+      print(sanitizeForDisplay(typeof found.content === 'string' ? found.content : ''));
     });
 }

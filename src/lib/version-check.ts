@@ -1,6 +1,7 @@
 import { fileURLToPath } from 'node:url';
 import { request } from 'undici';
 import { getConfigStore } from './config.js';
+import { readCappedJson } from './sse.js';
 
 /**
  * Soft, opt-out background check against the npm registry. We never block
@@ -140,7 +141,10 @@ export async function checkForUpdates(
     }
 
     if (res.statusCode < 200 || res.statusCode >= 300) return null;
-    const body = (await res.body.json()) as { version?: unknown };
+    // Capped read: a compromised/misbehaving registry could return a
+    // multi-GB body and OOM the CLI on the passive banner path.
+    const body = (await readCappedJson(res.body)) as { version?: unknown } | null;
+    if (!body) return null;
     if (typeof body.version !== 'string' || body.version.length === 0) {
       return null;
     }

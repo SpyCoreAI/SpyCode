@@ -54,6 +54,15 @@ export const DEFAULT_BUDGET_CHARS = 48_000;
 /** How deep `@path` imports may nest before we stop following them. */
 export const MAX_IMPORT_DEPTH = 5;
 
+/**
+ * Cap on bytes read from a repo-supplied markdown file (SPYCODE.md, an
+ * @-import, a slash-command template, an append target): the same 1 MB
+ * the guide/changelog readers already use. The 48k-char budget caps what
+ * is *injected* - not what is *read* - so without this a cloned repo
+ * shipping a multi-GB SPYCODE.md was read whole on every session.
+ */
+export const REPO_MD_READ_CAP_BYTES = 1_048_576;
+
 /** Per-file caps for the GUIDE + CHANGELOG context parts (Part 3a). */
 export const GUIDE_BUDGET_CHARS = 16_000;
 export const CHANGELOG_BUDGET_CHARS = 6_000;
@@ -230,6 +239,13 @@ function resolveImports(
         notices.push(`@import not found: ${rel}`);
         continue;
       }
+      // Capped read (L17): an @-imported file over the cap is skipped
+      // with a notice, never read whole into memory first.
+      if (statSync(abs).size > REPO_MD_READ_CAP_BYTES) {
+        out.push(`<!-- @${rel}: skipped (over 1 MB) -->`);
+        notices.push(`@import skipped (over 1 MB): ${rel}`);
+        continue;
+      }
       raw = readFileSync(abs, 'utf8');
     } catch {
       out.push(`<!-- @${rel}: not readable -->`);
@@ -375,6 +391,12 @@ export function loadMemory(opts: LoadMemoryOptions): LoadedMemory {
     let raw: string;
     try {
       if (!existsSync(abs) || !statSync(abs).isFile()) continue;
+      // Capped read (L17): a repo-supplied memory file over the cap is
+      // skipped with a notice, never read whole into memory first.
+      if (statSync(abs).size > REPO_MD_READ_CAP_BYTES) {
+        notices.push(`Skipped ${c.label} (over 1 MB)`);
+        continue;
+      }
       raw = readFileSync(abs, 'utf8');
     } catch {
       notices.push(`Could not read ${c.label}`);
@@ -900,9 +922,18 @@ export function appendMemoryNote(cwd: string, note: string): QuickAddResult {
 
   let body = '';
   if (!created) {
+    // Capped append (L17): appending one bullet used to read + rewrite
+    // the whole file unboundedly. A memory file over the cap refuses with
+    // a clear error instead of being read whole (or silently truncated).
     try {
+      if (statSync(target).size > REPO_MD_READ_CAP_BYTES) {
+        throw new Error(
+          `Memory file ${target} is over 1 MB - trim it before adding notes.`,
+        );
+      }
       body = readFileSync(target, 'utf8');
-    } catch {
+    } catch (err) {
+      if (err instanceof Error && /over 1 MB/.test(err.message)) throw err;
       body = '';
     }
   } else {

@@ -90,7 +90,12 @@ export function registerFilesShowCommand(program: Command): void {
         try {
           const { request } = await import('undici');
           // Presigned URLs 302: follow redirects like a normal client.
-          const res = await request(file.url, { maxRedirections: 5 });
+          // Total timeout: the preview is best-effort and small - a
+          // stalled response must not hang the command.
+          const res = await request(file.url, {
+            maxRedirections: 5,
+            signal: AbortSignal.timeout(30_000),
+          });
           if (res.statusCode >= 200 && res.statusCode < 300) {
             // Cap the bytes ACTUALLY read, not just the server-declared
             // size: a body larger than the declared 8 KB used to be read

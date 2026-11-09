@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
@@ -152,6 +152,67 @@ describe('spycore image', () => {
     // Presigned URLs 302: the download follows redirects like a client.
     expect(downloadInits).toHaveLength(1);
     expect(downloadInits[0]?.['maxRedirections']).toBe(5);
+  });
+
+  test('a truncated download is refused and leaves no file at the final path (L5)', async () => {
+    const png = Buffer.from('PNGDATA'.repeat(10));
+    responder = (url, init) => {
+      if (init.method === 'POST' && url.endsWith('/conversations')) {
+        return jsonResp(200, {
+          success: true,
+          data: { id: 'cnv_img', title: 'New', model: 'HEPHAESTUS' },
+        });
+      }
+      if (init.method === 'POST' && url.includes('/api/chat/stream')) {
+        return sseResp([
+          { type: 'image', urls: ['https://r2.example.com/img.png?sig=abc'], revisedPrompt: 'x' },
+          { type: 'done' },
+        ]);
+      }
+      if (isR2Url(url)) {
+        // Content-Length promises 999999 bytes; the body delivers 70.
+        return {
+          statusCode: 200,
+          headers: { 'content-type': 'image/png', 'content-length': '999999' },
+          body: {
+            json: async () => ({}),
+            [Symbol.asyncIterator]: () => Readable.from([png])[Symbol.asyncIterator](),
+          },
+        };
+      }
+      throw new Error(`unexpected ${url}`);
+    };
+
+    const out = join(workDir, 'truncated.png');
+    await expect(runCli(['a sunset', '--output', out])).rejects.toThrow(/incomplete/);
+    expect(existsSync(out)).toBe(false);
+    // No temp file left behind either.
+    expect(readdirSync(workDir).filter((f) => f.includes('.tmp-'))).toEqual([]);
+  });
+
+  test('a successful download leaves no temp file behind (L5)', async () => {
+    const png = Buffer.from('PNGDATA'.repeat(50));
+    responder = (url, init) => {
+      if (init.method === 'POST' && url.endsWith('/conversations')) {
+        return jsonResp(200, {
+          success: true,
+          data: { id: 'cnv_img', title: 'New', model: 'HEPHAESTUS' },
+        });
+      }
+      if (init.method === 'POST' && url.includes('/api/chat/stream')) {
+        return sseResp([
+          { type: 'image', urls: ['https://r2.example.com/img.png?sig=abc'], revisedPrompt: 'x' },
+          { type: 'done' },
+        ]);
+      }
+      if (isR2Url(url)) return binaryResp(png);
+      throw new Error(`unexpected ${url}`);
+    };
+
+    const out = join(workDir, 'pic.png');
+    await runCli(['a sunset', '--output', out]);
+    expect(readFileSync(out).equals(png)).toBe(true);
+    expect(readdirSync(workDir).filter((f) => f.includes('.tmp-'))).toEqual([]);
   });
 
   test('an existing --output is refused unless --force is given', async () => {

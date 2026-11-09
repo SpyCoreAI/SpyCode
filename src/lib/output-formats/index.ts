@@ -143,8 +143,10 @@ function yamlScalar(s: string, indent: number): string {
   // A leading `- ` (or a bare `-`) would re-parse as a sequence entry, so it
   // is quoted; `[`/`]`/`{`/`}` at the start are already caught by the class
   // below (a `[a]` value was already emitted quoted - pinned by the test).
+  // `---` and `...` are document markers: emitted bare they break a
+  // re-parse of the output, so they are quoted too.
   if (
-    /^(true|false|null|yes|no|on|off|~)$/i.test(s) ||
+    /^(true|false|null|yes|no|on|off|~|---|\.\.\.)$/i.test(s) ||
     /^-?\d/.test(s) ||
     /^-([ \t]|$)/.test(s) ||
     /^[!&*?{}\[\]|>%@`,]|^[ \t]|[ \t]$/.test(s) ||

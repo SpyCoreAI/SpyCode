@@ -154,19 +154,24 @@ describe('skills sync', () => {
     expect(readFileSync(skillFile('beta'), 'utf8')).toBe('B v1');
   });
 
-  test('a manifest sha that does not match the download records the REAL hash and warns', async () => {
+  test('a manifest sha that does not match the download refuses the install (fail-closed)', async () => {
     // The manifest claims a sha the bytes do not have (stale manifest or
-    // tampered download). The old code ledgered the manifest's claim
-    // verbatim, so later syncs skipped the skill as "unchanged".
+    // tampered download). A mismatch is refused, not installed on a warning:
+    // the skill file is never written and the ledger never records it, so
+    // a truncated or tampered download can never become an active skill.
+    // The next sync re-downloads it instead of trusting the mismatch.
     setSkill('alpha', 'Alpha body');
     manifest[0]!.sha256 = shaFor('something else entirely');
     const r = await runSkills(['sync']);
     expect(r.stdout + r.stderr).toMatch(/does not match the manifest hash/);
+    expect(existsSync(skillFile('alpha'))).toBe(false);
     const ledger = JSON.parse(readFileSync(join(configDir, 'skills', '.sync.json'), 'utf8')) as {
       skills: Record<string, { sha256: string }>;
     };
-    expect(ledger.skills['alpha']?.sha256).toBe(shaFor('Alpha body'));
-    expect(ledger.skills['alpha']?.sha256).not.toBe(shaFor('something else entirely'));
+    expect(ledger.skills['alpha']).toBeUndefined();
+    // The JSON summary reports the refusal, not a silent success.
+    const rJson = await runSkills(['sync'], { json: true });
+    expect(JSON.parse(rJson.stdout)).toMatchObject({ added: 0, updated: 0, failed: 1 });
     // …and the next sync re-downloads it instead of trusting the mismatch.
     requests = [];
     await runSkills(['sync']);

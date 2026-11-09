@@ -80,6 +80,7 @@ export function loadProjects(): ProjectEntry[] {
   try {
     raw = readFileSync(registryPath(), 'utf-8');
   } catch {
+    lastSkippedProjectRows = [];
     return [];
   }
   let parsed: unknown;
@@ -94,25 +95,50 @@ export function loadProjects(): ProjectEntry[] {
     } catch {
       // rename failed - fail open anyway
     }
+    lastSkippedProjectRows = [];
     return [];
   }
-  if (!Array.isArray(parsed)) return [];
-  return parsed.filter(isProjectEntry);
+  if (!Array.isArray(parsed)) {
+    // A valid-JSON wrong-shape file used to return [] and be destroyed by
+    // the next save; keep the value verbatim so a save round-trips it.
+    lastSkippedProjectRows = [parsed];
+    return [];
+  }
+  // Malformed rows are skipped for the caller but remembered verbatim (same
+  // process) so saveProjects round-trips them instead of silently wiping a
+  // hand-edited row - the cron store's L10 fix, same shape.
+  const skipped: unknown[] = [];
+  const entries = parsed.filter((item) => {
+    if (isProjectEntry(item)) return true;
+    skipped.push(item);
+    return false;
+  });
+  lastSkippedProjectRows = skipped;
+  return entries;
 }
+
+/**
+ * Malformed rows (or a wrong-shape whole file) seen by the most recent
+ * loadProjects() call, kept verbatim so a save in the same process
+ * round-trips them. Reset on every load.
+ */
+let lastSkippedProjectRows: unknown[] = [];
 
 /** Persist the registry (0600 — paths are mildly sensitive). */
 export function saveProjects(entries: ProjectEntry[]): void {
   const file = registryPath();
   mkdirSync(dirname(file), { recursive: true });
+  // Preserve malformed rows verbatim alongside the valid entries.
+  const all: unknown[] = [...entries, ...lastSkippedProjectRows];
   // Atomic write via tmp+rename (the runs.ts pattern): a crash mid-write
   // used to leave a torn projects.json. The direct writeFileSync is only
   // the fallback when the rename itself fails.
   const tmp = `${file}.tmp-${process.pid}`;
-  writeFileSync(tmp, JSON.stringify(entries, null, 2) + '\n', { mode: 0o600 });
+  writeFileSync(tmp, JSON.stringify(all, null, 2) + '\n', { mode: 0o600 });
   try {
     renameSync(tmp, file);
   } catch {
-    writeFileSync(file, JSON.stringify(entries, null, 2) + '\n', { mode: 0o600 });
+    writeFileSync(file, JSON.stringify(all, null, 2) + '\n', { mode: 0o600 });
     try {
       unlinkSync(tmp);
     } catch {

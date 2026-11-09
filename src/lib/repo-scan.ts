@@ -90,6 +90,32 @@ export function readFilePrefix(path: string, maxBytes: number): string | null {
 }
 
 /**
+ * Read at most `maxBytes` from the TAIL of a file. Returns null when the
+ * file cannot be opened/read. The counterpart of readFilePrefix for
+ * trailing sections (e.g. a hand-written notes block at the end of a
+ * generated file): the head is never materialized.
+ */
+export function readFileSuffix(path: string, maxBytes: number): string | null {
+  let fd: number;
+  try {
+    fd = openSync(path, 'r');
+  } catch {
+    return null;
+  }
+  try {
+    const size = fstatSync(fd).size;
+    const len = Math.min(size, maxBytes);
+    const buf = Buffer.alloc(len);
+    readSync(fd, buf, 0, len, size - len);
+    return buf.toString('utf8');
+  } catch {
+    return null;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
  * Count lines in a file by streaming 64 KiB chunks - the whole file is
  * never loaded. Same count as `content.replace(/\n$/, '').split('\n').length`
  * (0 for an empty file). Returns null when the file cannot be read.
@@ -319,7 +345,18 @@ export async function scanRepo(cwd: string): Promise<RepoScan> {
     for (const d of readdirSync(cwd, { withFileTypes: true })) {
       if (IGNORE_NAMES.has(d.name)) continue;
       if (ignored(join(cwd, d.name))) continue;
-      if (d.isDirectory()) topDirs.push(`${d.name}/`);
+      // Dirent.isDirectory() is false for a symlink-to-directory, so a
+      // symlinked dir used to land in topFiles. A single statSync (no
+      // traversal) classifies it correctly; a dangling symlink stays a file.
+      let isDir = d.isDirectory();
+      if (!isDir) {
+        try {
+          isDir = statSync(join(cwd, d.name)).isDirectory();
+        } catch {
+          /* dangling symlink - stays a file */
+        }
+      }
+      if (isDir) topDirs.push(`${d.name}/`);
       else topFiles.push(d.name);
     }
   } catch {
@@ -337,6 +374,13 @@ export async function scanRepo(cwd: string): Promise<RepoScan> {
       onlyFiles: true,
       ignore: IGNORE_GLOBS,
       suppressErrors: true,
+      // followSymbolicLinks: false - the same hazard the follow-up-3 fix
+      // closed for isGitIgnoredSync above: globby follows symlinks by
+      // default with no cycle protection, so a parent-escaping symlink in
+      // the tree made the walk re-scan the tree exponentially (measured:
+      // three root-pointing symlinks never returned, RSS climbing past
+      // 300 MB). The walk must not follow symlinks, like repo-map.ts.
+      followSymbolicLinks: false,
     });
   } catch {
     all = [];

@@ -18,6 +18,7 @@ import {
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getConfigPath } from '../lib/config.js';
+import { parseIntFlag } from '../lib/numeric-flags.js';
 import { listRunTraces, readRunTrace } from '../lib/agent/run-trace.js';
 import { indexRun, searchSessions } from '../lib/agent/session-search.js';
 import { formatOption, getOutputOptions, info, json, print, resolveFormat, success, warn } from '../lib/output.js';
@@ -102,11 +103,73 @@ export function getSystemBootTimeMs(): number | null {
       const out = execFileSync('sysctl', ['-n', 'kern.boottime'], { encoding: 'utf-8' });
       const m = out.match(/sec = (\d+)/);
       if (m) return Number(m[1]) * 1000;
+    } else if (process.platform === 'win32') {
+      // WMIC first (present on most Windows 10/11 installs), CIM via
+      // PowerShell as the fallback - WMIC was removed in Windows 11 24H2.
+      // Both go through execFileSync with an argv array: no shell, no
+      // interpolation. No Windows box is available to this worker; the
+      // parsers are unit-tested and the CI Windows legs are the verdict.
+      const wmic = tryWmicBootTimeMs();
+      if (wmic !== null) return wmic;
+      return tryPowerShellBootTimeMs();
     }
   } catch {
     // fall through to null
   }
   return null;
+}
+
+/**
+ * Parse `wmic os get LastBootUpTime /value` output
+ * (`LastBootUpTime=20240101120000.000000+060`, local time with a UTC offset
+ * in minutes) to epoch ms. Pure, so it is unit-testable without Windows.
+ */
+export function parseWmicBootTime(output: string): number | null {
+  const m = output.match(
+    /LastBootUpTime=(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(?:\.\d+)?([+-]\d{1,4})?/,
+  );
+  if (!m) return null;
+  const [, y, mo, d, h, mi, s, off] = m as unknown as [string, string, string, string, string, string, string, string | undefined];
+  const utcMs = Date.UTC(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi), Number(s));
+  if (!Number.isFinite(utcMs)) return null;
+  const offsetMin = off === undefined ? 0 : Number(off);
+  if (!Number.isFinite(offsetMin)) return null;
+  return utcMs - offsetMin * 60_000;
+}
+
+function tryWmicBootTimeMs(): number | null {
+  try {
+    const out = execFileSync('wmic', ['os', 'get', 'LastBootUpTime', '/value'], {
+      encoding: 'utf-8',
+      timeout: 15_000,
+    });
+    return parseWmicBootTime(out);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * PowerShell CIM fallback: `(Get-CimInstance Win32_OperatingSystem)
+ * .LastBootUpTime` rendered as ISO-8601 UTC. Same no-shell argv discipline.
+ */
+function tryPowerShellBootTimeMs(): number | null {
+  try {
+    const out = execFileSync(
+      'powershell',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        '(Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().ToString("o")',
+      ],
+      { encoding: 'utf-8', timeout: 30_000 },
+    );
+    const ms = Date.parse(out.trim());
+    return Number.isFinite(ms) ? ms : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -492,13 +555,99 @@ const sleep = (ms: number): Promise<void> =>
   new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
 
 /**
+ * Read the last `maxLines` lines of a file by seeking from the end - the
+ * whole log is never loaded. Scans backwards in 64 KiB chunks until enough
+ * newlines are seen (or the file start is reached); at most
+ * TAIL_SCAN_MAX_BYTES is scanned, so a pathological single-line log still
+ * bounds the read. Returns null when the file cannot be read.
+ */
+export const TAIL_SCAN_MAX_BYTES = 16 * 1024 * 1024;
+
+export function readLastLines(path: string, maxLines: number): string | null {
+  if (maxLines <= 0) return '';
+  let fd: number;
+  try {
+    fd = openSync(path, 'r');
+  } catch {
+    return null;
+  }
+  try {
+    const size = fstatSync(fd).size;
+    if (size === 0) return '';
+    const chunkSize = 64 * 1024;
+    let scanned = 0;
+    let start = size;
+    let newlines = 0;
+    const chunks: Buffer[] = [];
+    while (start > 0 && scanned < TAIL_SCAN_MAX_BYTES) {
+      const len = Math.min(chunkSize, start, TAIL_SCAN_MAX_BYTES - scanned);
+      const buf = Buffer.alloc(len);
+      start -= len;
+      const read = readSync(fd, buf, 0, len, start);
+      if (read <= 0) break;
+      scanned += read;
+      chunks.unshift(buf.subarray(0, read));
+      for (let i = read - 1; i >= 0; i -= 1) {
+        if (buf[i] === 0x0a) {
+          newlines += 1;
+          // maxLines lines need maxLines newlines *after* the first line
+          // only when the file ends with one; counting maxLines newlines
+          // and then slicing is simpler and always safe (we may read one
+          // extra line, which slice(-maxLines) drops).
+          if (newlines > maxLines) break;
+        }
+      }
+      if (newlines > maxLines) break;
+    }
+    const text = Buffer.concat(chunks).toString('utf-8');
+    const lines = text.split('\n');
+    // A file ending in '\n' splits to a trailing '' - drop it, or it
+    // steals one of the N slots in slice(-maxLines) and the tail comes
+    // back one line short (plus a blank line).
+    if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+    return lines.slice(-maxLines).join('\n');
+  } catch {
+    return null;
+  } finally {
+    try {
+      closeSync(fd);
+    } catch {
+      // already closed - nothing to do
+    }
+  }
+}
+
+/** Current size of a run log, for the follow loop's start offset. */
+function logFileSize(path: string): number {
+  let fd: number;
+  try {
+    fd = openSync(path, 'r');
+  } catch {
+    return 0;
+  }
+  try {
+    return fstatSync(fd).size;
+  } catch {
+    return 0;
+  } finally {
+    try {
+      closeSync(fd);
+    } catch {
+      // already closed - nothing to do
+    }
+  }
+}
+
+/**
  * Print the run's log and, with --follow (default), keep printing new bytes
  * until the run leaves `running` and the log is drained. Ctrl-C stops the
  * attach only - the detached run keeps going (that is the point of it).
  */
 async function attachRun(rec: DetachedRunRecord, opts: AttachOpts): Promise<void> {
   const follow = opts.follow !== false;
-  const maxLines = Math.max(0, Number(opts.lines ?? 50) || 0);
+  // Invalid input errors instead of silently defaulting: --lines abc used
+  // to become 0 (printing nothing) via Number(...) || 0.
+  const maxLines = parseIntFlag(opts.lines, 'lines', { min: 0, max: 10_000, defaultValue: 50 });
 
   // --follow used to re-read the whole log file every 500ms
   // (readFileSync per poll is O(n^2) CPU/IO over a long run). Keep one fd
@@ -546,16 +695,16 @@ async function attachRun(rec: DetachedRunRecord, opts: AttachOpts): Promise<void
 
   try {
     if (maxLines > 0) {
-      let data = Buffer.alloc(0);
-      try {
-        data = readFileSync(rec.logFile);
-      } catch {
-        // log not written yet - fall through to follow
+      // Incremental tail: the old code readFileSync'd the whole log here,
+      // so attaching to a multi-GB run log OOMed before the (already
+      // incremental) follow loop ever started.
+      const tail = readLastLines(rec.logFile, maxLines);
+      if (tail !== null && tail.length > 0) {
+        process.stdout.write(`${sanitizeForDisplay(tail)}\n`);
       }
-      const lines = data.toString('utf-8').split('\n');
-      const tail = lines.slice(-maxLines).join('\n');
-      process.stdout.write(tail.length > 0 ? `${sanitizeForDisplay(tail)}\n` : '');
-      offset = data.length;
+      // Start following at the end of the file as it stands now, so the
+      // tail is not re-printed by the follow loop.
+      offset = logFileSize(rec.logFile);
     }
 
     if (!follow) return;

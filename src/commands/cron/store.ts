@@ -42,7 +42,10 @@ function storePath(): string {
 
 export function loadCronEntries(): CronEntry[] {
   const path = storePath();
-  if (!existsSync(path)) return [];
+  if (!existsSync(path)) {
+    lastSkippedRows = [];
+    return [];
+  }
   let raw: string;
   try {
     raw = readFileSync(path, 'utf-8');
@@ -71,6 +74,12 @@ export function loadCronEntries(): CronEntry[] {
     );
   }
   const entries: CronEntry[] = [];
+  // Rows that fail shape validation are skipped rather than fatal: one bad
+  // row must not brick the whole list. They are NOT dropped, though: the
+  // skipped rows are remembered verbatim (module state, same process) and
+  // saveCronEntries round-trips them, so removing any other entry no longer
+  // silently wipes a hand-edited or partially-corrupt row from the file.
+  const skipped: unknown[] = [];
   for (const item of parsed) {
     if (
       item &&
@@ -87,26 +96,37 @@ export function loadCronEntries(): CronEntry[] {
         model: typeof (item as CronEntry).model === 'string' ? (item as CronEntry).model : null,
         createdAt: (item as CronEntry).createdAt,
       });
+    } else {
+      skipped.push(item);
     }
-    // Rows that fail shape validation are skipped rather than fatal:
-    // one bad row must not brick the whole list.
   }
+  lastSkippedRows = skipped;
   return entries;
 }
+
+/**
+ * Malformed rows seen by the most recent loadCronEntries() call, kept
+ * verbatim so a save in the same process round-trips them instead of
+ * silently deleting user data. Reset on every load; a save without a
+ * prior load preserves nothing extra.
+ */
+let lastSkippedRows: unknown[] = [];
 
 function saveCronEntries(entries: CronEntry[]): void {
   const path = storePath();
   mkdirSync(dirname(path), { recursive: true });
+  // Preserve malformed rows verbatim alongside the valid entries.
+  const all: unknown[] = [...entries, ...lastSkippedRows];
   // Atomic write via tmp+rename (the runs.ts pattern): a crash mid-write
   // used to leave a torn cron.json, and then every cron command errored
   // "not valid JSON". The direct writeFileSync is only the fallback when
   // the rename itself fails.
   const tmp = `${path}.tmp-${process.pid}`;
-  writeFileSync(tmp, `${JSON.stringify(entries, null, 2)}\n`, { mode: 0o600 });
+  writeFileSync(tmp, `${JSON.stringify(all, null, 2)}\n`, { mode: 0o600 });
   try {
     renameSync(tmp, path);
   } catch {
-    writeFileSync(path, `${JSON.stringify(entries, null, 2)}\n`, { mode: 0o600 });
+    writeFileSync(path, `${JSON.stringify(all, null, 2)}\n`, { mode: 0o600 });
     try {
       unlinkSync(tmp);
     } catch {
@@ -160,7 +180,10 @@ const FIELD_BOUNDS: ReadonlyArray<readonly [number, number]> = [
 
 function parseAtom(atom: string, min: number, max: number, names?: Record<string, number>): number {
   const lowered = atom.toLowerCase();
-  if (names && lowered in names) return names[lowered]!;
+  // Object.hasOwn, not `in`: `in` walks the prototype chain, so
+  // "constructor" / "__proto__" used to "exist" in MONTH_NAMES/DOW_NAMES
+  // and validate as months/days of the week.
+  if (names && Object.hasOwn(names, lowered)) return names[lowered]!;
   if (!/^\d+$/.test(atom)) {
     throw new Error(`"${atom}" is not a number or name`);
   }
@@ -176,7 +199,12 @@ function validateField(field: string, fieldIndex: number): void {
   const names = fieldIndex === 3 ? MONTH_NAMES : fieldIndex === 4 ? DOW_NAMES : undefined;
   for (const part of field.split(',')) {
     if (part.length === 0) throw new Error('empty list element');
-    const [rangePart, stepPart] = part.split('/');
+    // Strict segment counts: the old destructuring silently dropped extra
+    // segments, so "*/15/3" and "1-2-3" validated as if the trailing "/3"
+    // / "-3" did not exist.
+    const slashParts = part.split('/');
+    if (slashParts.length > 2) throw new Error(`invalid step expression "${part}"`);
+    const [rangePart, stepPart] = slashParts as [string, string | undefined];
     if (stepPart !== undefined) {
       if (!/^\d+$/.test(stepPart) || Number(stepPart) < 1) {
         throw new Error(`invalid step "${stepPart}"`);
@@ -187,7 +215,9 @@ function validateField(field: string, fieldIndex: number): void {
       throw new Error(`invalid step expression "${part}"`);
     }
     if (rangePart.includes('-')) {
-      const [lo, hi] = rangePart.split('-');
+      const dashParts = rangePart.split('-');
+      if (dashParts.length > 2) throw new Error(`invalid range "${rangePart}"`);
+      const [lo, hi] = dashParts as [string, string];
       if (lo === undefined || hi === undefined || lo.length === 0 || hi.length === 0) {
         throw new Error(`invalid range "${rangePart}"`);
       }

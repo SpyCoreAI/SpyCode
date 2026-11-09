@@ -161,6 +161,7 @@ function registerSync(group: Command): void {
       const byName = new Map(entries.map((e) => [e.name, e]));
       let added = 0;
       let updated = 0;
+      let failed = 0;
       try {
         for (const dl of plan.download) {
           const meta = byName.get(dl.name);
@@ -172,16 +173,17 @@ function registerSync(group: Command): void {
           // manifest's claim. The old code recorded `meta.sha256`
           // verbatim - a tampered or truncated download was then ledgered
           // as verified, and later syncs skipped it as "unchanged".
-          // The real hash is what gets recorded either way, so a mismatch
-          // re-downloads next time instead of being trusted; the mismatch
-          // itself is warned loudly rather than failing the whole sync
-          // (a stale manifest is the likelier cause, and the content
-          // still came over the authenticated API).
+          // A mismatch is now fail-closed: the skill is REFUSED (not
+          // installed, not ledgered), so a truncated or tampered download
+          // never becomes an active agent skill on a warning alone. The
+          // sync continues with the rest, and the next sync retries it.
           const actualSha256 = createHash('sha256').update(resp.content, 'utf8').digest('hex');
           if (meta.sha256 && actualSha256 !== meta.sha256) {
+            failed += 1;
             warn(
-              `skill "${sanitizeForDisplay(dl.name)}" downloaded hash ${actualSha256} does not match the manifest hash ${meta.sha256} - recorded the downloaded hash; it will re-download on the next sync`,
+              `skill "${sanitizeForDisplay(dl.name)}" downloaded hash ${actualSha256} does not match the manifest hash ${meta.sha256} - refused to install; it will be retried on the next sync`,
             );
+            continue;
           }
           writeSyncedSkill(dl.name, resp.content);
           next.skills[dl.name] = { sha256: actualSha256 };
@@ -215,6 +217,7 @@ function registerSync(group: Command): void {
         unchanged: plan.unchanged.length,
         skipped: plan.skipped.length,
         rejected: plan.rejected.length,
+        failed,
         total: entries.length,
       };
       if (getOutputOptions().json) {
@@ -222,7 +225,7 @@ function registerSync(group: Command): void {
         return;
       }
       success(
-        `Skills synced: added ${summary.added}, updated ${summary.updated}, removed ${summary.removed}, unchanged ${summary.unchanged}${summary.skipped > 0 ? `, skipped ${summary.skipped}` : ''}${summary.rejected > 0 ? `, rejected ${summary.rejected}` : ''}.`,
+        `Skills synced: added ${summary.added}, updated ${summary.updated}, removed ${summary.removed}, unchanged ${summary.unchanged}${summary.skipped > 0 ? `, skipped ${summary.skipped}` : ''}${summary.rejected > 0 ? `, rejected ${summary.rejected}` : ''}${summary.failed > 0 ? `, failed ${summary.failed} (hash mismatch - not installed)` : ''}.`,
       );
       if (added + updated > 0) {
         info('They are available to every agent run (any provider) via load_skill.');

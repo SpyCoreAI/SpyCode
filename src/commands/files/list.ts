@@ -80,7 +80,12 @@ export function registerFilesListCommand(program: Command): void {
         const data = await api.get<ListResp>(`/api/files?${params.toString()}`, {
           apiUrlOverride: parentOpts.apiUrl,
         });
-        const items = data.files ?? [];
+        // Server-shape drift: a non-array `files` used to pass through and
+        // throw on .map/.length downstream; per-row fields are read through
+        // string guards below.
+        const items = (Array.isArray(data.files) ? data.files : []).filter(
+          (f): f is FileItem => !!f && typeof f === 'object',
+        );
         // Server returns total + page + pageSize but not `hasMore`; derive it
         // the same way conversations does (page * pageSize < total).
         const hasMore =
@@ -109,7 +114,10 @@ export function registerFilesListCommand(program: Command): void {
 
         // Full ids, not shortId: lookups require the exact id (see
         // conversations/list.ts). The column widens to the longest id.
-        const idCol = Math.max(14, ...items.map((f) => f.id.length));
+        // Non-string ids render empty (server-shape drift) instead of
+        // throwing on .length.
+        const strId = (f: FileItem): string => (typeof f.id === 'string' ? f.id : '');
+        const idCol = Math.max(14, ...items.map((f) => strId(f).length));
         const nameCol = Math.max(
           18,
           Math.min(36, process.stdout.columns ? process.stdout.columns - 56 : 32),
@@ -132,11 +140,11 @@ export function registerFilesListCommand(program: Command): void {
         const renderRow = (f: FileItem) => {
           // Sanitize BEFORE clip()/padEnd() - see memory/list.ts.
           const row = [
-            sanitizeForDisplay(f.id).padEnd(idCol),
-            clip(sanitizeForDisplay(f.filename || '(unnamed)'), nameCol).padEnd(nameCol),
-            sanitizeForDisplay(shortMimeLabel(f.mimeType, f.filename)).padEnd(typeCol),
-            formatFileSize(f.size ?? 0).padEnd(sizeCol),
-            relativeTime(f.createdAt),
+            sanitizeForDisplay(strId(f)).padEnd(idCol),
+            clip(sanitizeForDisplay(typeof f.filename === 'string' && f.filename ? f.filename : '(unnamed)'), nameCol).padEnd(nameCol),
+            sanitizeForDisplay(shortMimeLabel(typeof f.mimeType === 'string' ? f.mimeType : '', typeof f.filename === 'string' ? f.filename : '')).padEnd(typeCol),
+            formatFileSize(typeof f.size === 'number' ? f.size : 0).padEnd(sizeCol),
+            relativeTime(typeof f.createdAt === 'string' ? f.createdAt : ''),
           ].join('  ');
           print(row);
         };

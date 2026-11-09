@@ -732,6 +732,11 @@ describe('§12 the sink CATEGORIES - prompt, spinner, completion line', () => {
     'src/commands/chat.ts :: sendMessage',
     'src/commands/chat.ts :: setLastConversationId',
     'src/commands/conversations/export.ts :: toMarkdown',
+    // R3 L8 (v0.9.10 Phase 5): the redacted copy of the conversation built
+    // for export - a payload -> clean -> render carrier like toMarkdown:
+    // every message's content passes redactFreeText, and the render sites
+    // (toMarkdown / JSON.stringify) are separately covered.
+    'src/commands/conversations/export.ts :: redactedExport',
     'src/commands/conversations/handoff.ts :: buildHandoffContinueMessage',
     'src/commands/conversations/handoff.ts :: createRunRecorder',
     'src/commands/conversations/handoff.ts :: fireHookEvent',

@@ -1,6 +1,6 @@
 import { Command, Option } from 'commander';
-import { createWriteStream, existsSync } from 'node:fs';
-import { extname, resolve as resolvePath } from 'node:path';
+import { existsSync, renameSync, unlinkSync } from 'node:fs';
+import { basename, dirname, extname, resolve as resolvePath } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { request } from 'undici';
@@ -13,7 +13,7 @@ import {
   inspectAttachment,
   uploadImageAttachment,
 } from '../lib/attachments.js';
-import { formatFileSize } from '../lib/files.js';
+import { createExclusiveTempWriteStream, formatFileSize } from '../lib/files.js';
 import { imageExtensionFor } from '../lib/image-format.js';
 import { getOutputOptions, json, success, warn } from '../lib/output.js';
 import { sanitizeForDisplay } from '../lib/sanitize-display.js';
@@ -33,6 +33,8 @@ interface ConversationCreateResp {
 
 const PROMPT_MIN = 3;
 const PROMPT_MAX = 4_000;
+/** Total bound on an image download (matches uploadFile's 120 s). */
+const IMAGE_DOWNLOAD_TIMEOUT_MS = 120_000;
 
 function todaySlug(): string {
   const d = new Date();
@@ -83,7 +85,12 @@ async function downloadImage(
   }
   // Presigned S3/R2 URLs 302 to the object: follow redirects like a
   // normal client (bounded), instead of failing with "HTTP 302".
-  const res = await request(url, { maxRedirections: 5 });
+  // Total timeout: a stalled/trickling response must not hang the command
+  // past the undici 300 s inactivity defaults (L15).
+  const res = await request(url, {
+    maxRedirections: 5,
+    signal: AbortSignal.timeout(IMAGE_DOWNLOAD_TIMEOUT_MS),
+  });
   if (res.statusCode < 200 || res.statusCode >= 300) {
     throw new SpycoreCliError(
       `Image download failed: HTTP ${res.statusCode}`,
@@ -116,7 +123,15 @@ async function downloadImage(
   }
 
   let total = firstChunk.length;
-  const sink = createWriteStream(outPath);
+  // Write to a temp file in the same directory and rename on success (the
+  // files/download.ts pattern): an interrupted/failed download used to
+  // leave a truncated file at the final path that looked complete, and
+  // the --force path truncated a pre-existing file before the body was
+  // verified. The temp is deleted on any failure.
+  const { stream: sink, path: tmpPath } = createExclusiveTempWriteStream(
+    dirname(outPath),
+    `${basename(outPath)}.tmp-${process.pid}`,
+  );
   const monitored = Readable.from(
     (async function* () {
       if (firstChunk.length > 0) yield firstChunk;
@@ -129,7 +144,33 @@ async function downloadImage(
       }
     })(),
   );
-  await pipeline(monitored, sink);
+  try {
+    await pipeline(monitored, sink);
+  } catch (err) {
+    try {
+      unlinkSync(tmpPath);
+    } catch {
+      // ignore cleanup failure
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new SpycoreCliError(`Image download interrupted: ${msg}`, EXIT_NETWORK_ERROR);
+  }
+  // Size verification against Content-Length when the server sent one: a
+  // cleanly truncated stream used to be saved and reported as complete.
+  const expected = Number(res.headers['content-length']);
+  if (Number.isFinite(expected) && expected > 0 && total !== expected) {
+    try {
+      unlinkSync(tmpPath);
+    } catch {
+      // ignore cleanup failure
+    }
+    throw new SpycoreCliError(
+      `Image download incomplete: received ${formatFileSize(total)} of ${formatFileSize(expected)} - the file was not saved.`,
+      EXIT_NETWORK_ERROR,
+      'Retry the download; if it keeps failing, the server or network is truncating the stream.',
+    );
+  }
+  renameSync(tmpPath, outPath);
   return { path: outPath, size: total };
 }
 

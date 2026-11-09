@@ -22,11 +22,18 @@ interface ConversationGetResp {
   messages: Message[];
 }
 
-function roleLabel(role: string): string {
-  if (role.toLowerCase() === 'user') return 'You';
-  if (role.toLowerCase() === 'assistant') return 'Assistant';
-  if (role.toLowerCase() === 'system') return 'System';
-  return role;
+function roleLabel(role: unknown): string {
+  // Server-shape drift: a non-string role used to crash on .toLowerCase().
+  const r = typeof role === 'string' ? role : '';
+  if (r.toLowerCase() === 'user') return 'You';
+  if (r.toLowerCase() === 'assistant') return 'Assistant';
+  if (r.toLowerCase() === 'system') return 'System';
+  return r;
+}
+
+/** Lower-cased role for comparisons; '' for a non-string role. */
+function roleLower(role: unknown): string {
+  return typeof role === 'string' ? role.toLowerCase() : '';
 }
 
 export function registerConversationsShowCommand(program: Command): void {
@@ -67,8 +74,11 @@ export function registerConversationsShowCommand(program: Command): void {
 
         // Server-shape drift: a response without a messages array used to
         // crash with a raw TypeError on .slice - degrade to an empty
-        // history, the same guard handoff.ts already uses.
-        const messages = Array.isArray(convo.messages) ? convo.messages : [];
+        // history, the same guard handoff.ts already uses. Non-object
+        // entries are dropped too (a null entry would throw on .role).
+        const messages = (Array.isArray(convo.messages) ? convo.messages : []).filter(
+          (m): m is Message => !!m && typeof m === 'object',
+        );
         const tail = messages.slice(-limit);
 
         if (getOutputOptions().json) {
@@ -87,16 +97,17 @@ export function registerConversationsShowCommand(program: Command): void {
         for (const m of tail) {
           const safeLabel = `[${sanitizeForDisplay(roleLabel(m.role))}]`;
           const label =
-            m.role.toLowerCase() === 'assistant' ? chalk.cyan(safeLabel) : chalk.green(safeLabel);
+            roleLower(m.role) === 'assistant' ? chalk.cyan(safeLabel) : chalk.green(safeLabel);
           print(label);
-          if (opts.raw || m.role.toLowerCase() === 'user') {
-            print(sanitizeForDisplay(m.content));
+          const content = typeof m.content === 'string' ? m.content : '';
+          if (opts.raw || roleLower(m.role) === 'user') {
+            print(sanitizeForDisplay(content));
           } else {
             const renderer = createMarkdownRenderer({
               color,
               wrapWidth: process.stdout.columns ?? undefined,
             });
-            const safeContent = sanitizeForDisplay(m.content);
+            const safeContent = sanitizeForDisplay(content);
             process.stdout.write(renderer.write(safeContent));
             process.stdout.write(renderer.flush());
             if (!safeContent.endsWith('\n')) process.stdout.write('\n');

@@ -50,13 +50,23 @@ describe('openInBrowser', () => {
     );
   });
 
-  test('Windows spawns cmd.exe start with the empty title slot', () => {
+  test('Windows spawns explorer.exe with the URL as a single argv element (no cmd.exe)', () => {
+    // The old shape (cmd.exe /c start "" <url>) was the defect: libuv only
+    // quotes argv elements containing space/tab/quote, so the `&` in an
+    // OAuth authorize URL reached cmd.exe as a command separator.
+    // explorer.exe takes the URL as one argv element with no command-line
+    // parsing, so & and %XX ride verbatim.
     platformMock.mockReturnValue('win32');
     expect(openInBrowser('https://example.com/?a=1&b=2')).toBe(true);
     expect(spawnMock).toHaveBeenCalledWith(
-      'cmd.exe',
-      ['/c', 'start', '', 'https://example.com/?a=1&b=2'],
+      'explorer.exe',
+      ['https://example.com/?a=1&b=2'],
       SPAWN_OPTS,
+    );
+    expect(spawnMock).not.toHaveBeenCalledWith(
+      'cmd.exe',
+      expect.anything(),
+      expect.anything(),
     );
   });
 

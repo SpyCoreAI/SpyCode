@@ -6,15 +6,20 @@ import os from 'node:os';
  * failure: returns false rather than throwing so the calling command can
  * fall back to printing the URL for the user to open manually.
  *
- * macOS uses `open`, Windows uses cmd.exe's `start`, Linux uses xdg-open.
+ * macOS uses `open`, Windows uses `explorer.exe`, Linux uses xdg-open.
  * We use `detached` + `unref` so the spawned helper process doesn't keep
  * the CLI alive after it exits.
+ *
+ * Windows deliberately does NOT go through `cmd.exe start`: libuv only
+ * quotes argv elements containing space/tab/quote, so an `&` in the URL
+ * (present in every OAuth authorize URL by construction) reached cmd.exe
+ * unquoted as a command separator, and `%XX` sequences were expanded as
+ * environment variables. explorer.exe takes the URL as one argv element
+ * and hands it to the shell's URL handler with no command-line parsing,
+ * so `&`, `%`, and friends ride verbatim.
  */
 export function openInBrowser(url: string): boolean {
-  // M1: validate the URL before spawning. On Windows, cmd.exe interprets
-  // metacharacters (&, |, etc.) in the URL as command separators, so a
-  // server-controlled approveUrl could achieve command injection. Only
-  // http(s) URLs are allowed.
+  // M1: validate the URL before spawning. Only http(s) URLs are allowed.
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -33,10 +38,10 @@ export function openInBrowser(url: string): boolean {
       args = [url];
       break;
     case 'win32':
-      command = 'cmd.exe';
-      // The empty string after /c "start" is the window title; required so
-      // a URL with spaces/quotes isn't misparsed as the title.
-      args = ['/c', 'start', '', url];
+      // explorer.exe opens the URL in the default browser (ShellExecute
+      // semantics): no cmd.exe, no command separator, no % expansion.
+      command = 'explorer.exe';
+      args = [url];
       break;
     default:
       command = 'xdg-open';

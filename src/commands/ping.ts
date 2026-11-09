@@ -3,6 +3,7 @@ import { Command } from 'commander';
 import { isAuthenticated } from '../lib/auth.js';
 import { api } from '../lib/api.js';
 import { resolveApiUrl } from '../lib/config.js';
+import { readCappedJson } from '../lib/sse.js';
 import {
   fail,
   getOutputOptions,
@@ -45,12 +46,15 @@ export function registerPingCommand(program: Command): void {
       const start = Date.now();
       let res;
       try {
+        // Total timeout: a stalled/trickling health endpoint must not hang
+        // the command past the undici 300 s inactivity defaults.
         res = await request(healthUrl, {
           method: 'GET',
           headers: {
             'user-agent': '@spycore/cli',
             accept: 'application/json',
           },
+          signal: AbortSignal.timeout(30_000),
         });
       } catch (err) {
         fail(
@@ -65,7 +69,10 @@ export function registerPingCommand(program: Command): void {
 
       let health: HealthResp | null = null;
       try {
-        health = (await res.body.json()) as HealthResp;
+        // Capped read (1 MB): an unbounded res.body.json() let a
+        // misbehaving API OOM the CLI; a body past the cap parses as null
+        // and fails below like any other unparseable body.
+        health = (await readCappedJson(res.body)) as HealthResp | null;
       } catch {
         // empty body - treat as failure below
       }

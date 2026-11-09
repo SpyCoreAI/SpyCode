@@ -56,10 +56,15 @@ export function registerMemoryListCommand(program: Command): void {
         const data = await api.get<ListResp>('/api/memory', {
           apiUrlOverride: parentOpts.apiUrl,
         });
-        let memories = data.memories ?? [];
+        // Server-shape drift: a non-array `memories` used to pass through
+        // and throw on .filter/.map downstream; per-row fields are read
+        // through string guards below.
+        let memories = (Array.isArray(data.memories) ? data.memories : []).filter(
+          (m): m is MemoryItem => !!m && typeof m === 'object',
+        );
         if (opts.category) {
           const wanted = opts.category.toUpperCase();
-          memories = memories.filter((m) => (m.category || '').toUpperCase() === wanted);
+          memories = memories.filter((m) => (typeof m.category === 'string' ? m.category : '').toUpperCase() === wanted);
         }
         memories = memories.slice(0, limit);
 
@@ -75,7 +80,10 @@ export function registerMemoryListCommand(program: Command): void {
 
         // Full ids, not shortId: lookups require the exact id (see
         // conversations/list.ts). The column widens to the longest id.
-        const idCol = Math.max(14, ...memories.map((m) => m.id.length));
+        // Non-string ids render empty (server-shape drift) instead of
+        // throwing on .length.
+        const strId = (m: MemoryItem): string => (typeof m.id === 'string' ? m.id : '');
+        const idCol = Math.max(14, ...memories.map((m) => strId(m).length));
         const catCol = 12;
         const createdCol = 10;
         const snippetCol = Math.max(
@@ -96,10 +104,10 @@ export function registerMemoryListCommand(program: Command): void {
           // otherwise cut an escape sequence in half, and column widths must be
           // computed on the bytes that actually render.
           const row = [
-            sanitizeForDisplay(m.id).padEnd(idCol),
-            sanitizeForDisplay(m.category || '').padEnd(catCol),
-            relativeTime(m.createdAt).padEnd(createdCol),
-            clipOneLine(sanitizeForDisplay(m.content || ''), snippetCol),
+            sanitizeForDisplay(strId(m)).padEnd(idCol),
+            sanitizeForDisplay(typeof m.category === 'string' ? m.category : '').padEnd(catCol),
+            relativeTime(typeof m.createdAt === 'string' ? m.createdAt : '').padEnd(createdCol),
+            clipOneLine(sanitizeForDisplay(typeof m.content === 'string' ? m.content : ''), snippetCol),
           ].join('  ');
           print(row);
         }

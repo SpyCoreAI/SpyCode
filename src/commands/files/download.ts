@@ -108,7 +108,12 @@ export function registerFilesDownloadCommand(program: Command): void {
 
         // Presigned S3/R2 URLs 302 to the object: follow redirects like a
         // normal client (bounded), instead of failing with "HTTP 302".
-        const res = await request(downloadUrl, { maxRedirections: 5 });
+        // Total timeout: a stalled/trickling response must not hang the
+        // command past the undici 300 s inactivity defaults.
+        const res = await request(downloadUrl, {
+          maxRedirections: 5,
+          signal: AbortSignal.timeout(120_000),
+        });
         if (res.statusCode < 200 || res.statusCode >= 300) {
           spinner?.fail();
           throw new SpycoreCliError(

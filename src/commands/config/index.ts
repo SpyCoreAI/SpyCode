@@ -244,11 +244,22 @@ function readLine(): Promise<string> {
       buf += chunk.toString('utf-8');
       if (buf.includes('\n')) {
         process.stdin.off('data', onData);
+        process.stdin.off('end', onEnd);
         process.stdin.pause();
         resolve(buf.split('\n')[0] ?? '');
       }
     };
+    // EOF without a newline (piped empty stdin, Ctrl+D): settle as an
+    // empty answer - the caller treats anything but "yes" as abort, so
+    // EOF aborts instead of hanging the promise forever.
+    const onEnd = () => {
+      process.stdin.off('data', onData);
+      process.stdin.off('end', onEnd);
+      process.stdin.pause();
+      resolve(buf.split('\n')[0] ?? '');
+    };
     process.stdin.resume();
     process.stdin.on('data', onData);
+    process.stdin.on('end', onEnd);
   });
 }

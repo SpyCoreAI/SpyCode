@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { api } from '../../lib/api.js';
 import { json, success, print } from '../../lib/output.js';
+import { redactFreeText } from '../../lib/redact.js';
 import { sanitizeForDisplay } from '../../lib/sanitize-display.js';
 import { EXIT_USER_ERROR, SpycoreCliError } from '../../lib/errors.js';
 
@@ -24,29 +25,56 @@ interface ConversationGetResp {
 
 function toMarkdown(convo: ConversationGetResp): string {
   const lines: string[] = [];
-  lines.push(`# ${convo.title || '(untitled)'}`);
+  lines.push(`# ${typeof convo.title === 'string' && convo.title ? convo.title : '(untitled)'}`);
   lines.push('');
-  lines.push(`*Model:* ${convo.model}  ·  *ID:* \`${convo.id}\``);
+  lines.push(`*Model:* ${typeof convo.model === 'string' ? convo.model : ''}  ·  *ID:* \`${typeof convo.id === 'string' ? convo.id : ''}\``);
   lines.push('');
   lines.push('---');
   lines.push('');
   // Server-shape drift: a response without a messages array used to crash
   // with a raw TypeError on for...of - degrade to an empty history, the
-  // same guard handoff.ts already uses.
-  const messages = Array.isArray(convo.messages) ? convo.messages : [];
+  // same guard handoff.ts already uses. Non-object entries are dropped,
+  // and per-message fields are read through string guards.
+  const messages = (Array.isArray(convo.messages) ? convo.messages : []).filter(
+    (m): m is Message => !!m && typeof m === 'object',
+  );
   for (const m of messages) {
+    const role = typeof m.role === 'string' ? m.role : '';
+    const roleLower = role.toLowerCase();
+    const model = typeof m.model === 'string' ? m.model : '';
     const heading =
-      m.role.toLowerCase() === 'user'
+      roleLower === 'user'
         ? '## You'
-        : m.role.toLowerCase() === 'assistant'
-          ? `## ${m.model ? m.model : 'Assistant'}`
-          : `## ${m.role}`;
+        : roleLower === 'assistant'
+          ? `## ${model ? model : 'Assistant'}`
+          : `## ${role}`;
     lines.push(heading);
     lines.push('');
-    lines.push(m.content);
+    // Message content is secret-redacted before it lands on disk/stdout,
+    // the same guarantee /save and share already make: an export is the
+    // file a user is most likely to hand to someone else.
+    lines.push(redactFreeText(typeof m.content === 'string' ? m.content : ''));
     lines.push('');
   }
   return lines.join('\n');
+}
+
+/**
+ * The exportable conversation with every message's content redacted.
+ * The JSON path dumps the whole object, so the redaction has to happen
+ * on the copy, not only in the markdown renderer.
+ */
+export function redactedExport(convo: ConversationGetResp): ConversationGetResp {
+  const messages = (Array.isArray(convo.messages) ? convo.messages : []).filter(
+    (m): m is Message => !!m && typeof m === 'object',
+  );
+  return {
+    ...convo,
+    messages: messages.map((m) => ({
+      ...m,
+      content: redactFreeText(typeof m.content === 'string' ? m.content : ''),
+    })),
+  };
 }
 
 export function registerConversationsExportCommand(program: Command): void {
@@ -77,10 +105,14 @@ export function registerConversationsExportCommand(program: Command): void {
           { apiUrlOverride: parentOpts.apiUrl },
         );
 
+        // Redact message content in BOTH formats before anything is
+        // written or printed (L8): the JSON path used to dump the whole
+        // raw object, secrets included.
+        const redacted = redactedExport(convo);
         const body =
           format === 'json'
-            ? `${JSON.stringify(convo, null, 2)}\n`
-            : `${toMarkdown(convo)}\n`;
+            ? `${JSON.stringify(redacted, null, 2)}\n`
+            : `${toMarkdown(redacted)}\n`;
 
         if (opts.output) {
           // Never silently overwrite: refuse an existing file without
@@ -111,7 +143,7 @@ export function registerConversationsExportCommand(program: Command): void {
         }
 
         if (format === 'json') {
-          json(convo);
+          json(redacted);
         } else {
           // Markdown to the terminal IS a display boundary - sanitize the
           // server-derived body (title/model/content) first (SEC-013).

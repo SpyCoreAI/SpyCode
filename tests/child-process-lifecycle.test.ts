@@ -179,8 +179,10 @@ describe('the child-process census - no spawn site may be added unclassified', (
     'ui/tui/clipboard.ts': 'execFileSync - synchronous; bounded by the clipboard write',
     'ui/tui/shell.ts': "async execFile; settles on 'exit'+drain and releases its stdio at settle",
     'ui/tui/TuiApp.tsx': "spawnSync - synchronous; the user's own $EDITOR",
-    // B5: OAuth uses child_process for opening the browser (fire-and-forget).
-    'lib/oauth.ts': "fire-and-forget: stdio 'ignore' + unref, so it holds nothing",
+    // B5 (retired in the v0.9.10 Phase 5 R3 fix, M1): OAuth used to open
+    // the browser via exec() here. It now reuses lib/browser.ts's
+    // argv-based opener, so this file no longer imports child_process -
+    // the entry was removed, not reclassified.
     // F14: detached runs spawn the child agent (detached, stdio to log file,
     // unref) and use execFileSync for sysctl (boot time, synchronous).
     'commands/runs.ts': "spawn detached + unref for the child agent; execFileSync (sysctl) for boot time",

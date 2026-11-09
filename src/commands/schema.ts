@@ -171,6 +171,9 @@ const ENV_VARS: CliSchema['envVars'] = [
   { name: 'SPYCORE_NO_UPDATE_CHECK', description: 'Set to 1 to skip the daily update check.' },
   { name: 'SPYCORE_NO_NOTIFY', description: 'Set to 1 to disable desktop notifications.' },
   { name: 'SPYCORE_GOOGLE_CLIENT_ID', description: 'Google OAuth client ID for BYOK Google providers (stored with the provider by `spycore provider add --oauth` when present).' },
+  { name: 'SPYCORE_HEALTH_CHECK_TIMEOUT_MS', description: 'Override the provider health-check stall timeout in milliseconds (default 30000).' },
+  { name: 'SPYCORE_REDUCED_MOTION', description: 'Set to 1 (or true) to reduce motion in the TUI (static indicators instead of animated spinners).' },
+  { name: 'SPYCODE_LSP', description: 'Set to 1 to enable (or 0 to disable) the LSP integration, overriding the config file and the default.' },
   { name: 'SPYCODE_GUARDIAN_THRESHOLD', description: 'Override the guardian threshold: consecutive approval rejections before the denial circuit breaker engages (0 disables it).' },
 ];
 

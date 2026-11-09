@@ -45,16 +45,19 @@ interface ShareCreateResp {
 export function buildShareBody(convo: ConversationGetResp): ShareBody {
   // Server-shape drift: a response without a messages array used to crash
   // with a raw TypeError on .map - degrade to an empty history, the same
-  // guard handoff.ts already uses.
-  const messages = Array.isArray(convo.messages) ? convo.messages : [];
+  // guard handoff.ts already uses. Per-message fields are read through
+  // string guards (redactFreeText throws on a non-string content).
+  const messages = (Array.isArray(convo.messages) ? convo.messages : []).filter(
+    (m): m is ShareMessage => !!m && typeof m === 'object',
+  );
   return {
-    title: redactFreeText(convo.title || '(untitled)'),
-    model: convo.model,
+    title: redactFreeText(typeof convo.title === 'string' && convo.title ? convo.title : '(untitled)'),
+    model: typeof convo.model === 'string' ? convo.model : '',
     messages: messages.map((m) => ({
-      role: m.role,
-      content: redactFreeText(m.content),
-      model: m.model,
-      createdAt: m.createdAt,
+      role: typeof m.role === 'string' ? m.role : '',
+      content: redactFreeText(typeof m.content === 'string' ? m.content : ''),
+      model: typeof m.model === 'string' ? m.model : null,
+      createdAt: typeof m.createdAt === 'string' ? m.createdAt : '',
     })),
   };
 }

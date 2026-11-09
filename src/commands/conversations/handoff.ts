@@ -23,7 +23,7 @@ import { MODEL_DISPLAY } from '../../lib/models.js';
 import { loadCommandRules } from '../../lib/agent/command-rules.js';
 import { createAgentHooksBridge, fireHookEvent, loadHookSession } from '../../lib/hooks.js';
 import { buildContextInjection } from '../../lib/memory.js';
-import { parseIntFlag } from '../../lib/numeric-flags.js';
+import { parseIntFlag, parseStrictIntFlag } from '../../lib/numeric-flags.js';
 import { readSingleLineInput } from '../../lib/prompt.js';
 
 /**
@@ -86,7 +86,7 @@ interface ConversationGetResp {
 
 const HANDOFF_MODELS: readonly AgentModelSlug[] = ['charon', 'styx', 'hermes', 'minos'];
 
-function resolveHandoffModel(conversationModel: string, flag?: string): { model: AgentModelSlug; fromFlag: boolean } {
+function resolveHandoffModel(conversationModel: unknown, flag?: string): { model: AgentModelSlug; fromFlag: boolean } {
   if (flag !== undefined) {
     const slug = flag.toLowerCase() as AgentModelSlug;
     if (!(HANDOFF_MODELS as readonly string[]).includes(slug)) {
@@ -94,7 +94,8 @@ function resolveHandoffModel(conversationModel: string, flag?: string): { model:
     }
     return { model: slug, fromFlag: true };
   }
-  const convoSlug = (conversationModel ?? '').toLowerCase();
+  // Server-shape drift: a non-string model used to crash on .toLowerCase().
+  const convoSlug = typeof conversationModel === 'string' ? conversationModel.toLowerCase() : '';
   if ((HANDOFF_MODELS as readonly string[]).includes(convoSlug)) {
     return { model: convoSlug as AgentModelSlug, fromFlag: false };
   }
@@ -201,7 +202,9 @@ export function registerConversationsHandoffCommand(program: Command): void {
           }
           throw err;
         }
-        const messages = Array.isArray(convo.messages) ? convo.messages : [];
+        const messages = (Array.isArray(convo.messages) ? convo.messages : []).filter(
+          (m): m is Message => !!m && typeof m === 'object',
+        );
         if (messages.length === 0) {
           throw new SpycoreCliError(
             `Conversation ${id} has no messages - there is no history to hand off.`,
@@ -212,11 +215,11 @@ export function registerConversationsHandoffCommand(program: Command): void {
         // Role breakdown for the handoff report (server order is kept as-is).
         const roleCounts = new Map<string, number>();
         for (const m of messages) {
-          const r = String(m.role ?? 'unknown').toLowerCase();
+          const r = typeof m.role === 'string' && m.role ? m.role.toLowerCase() : 'unknown';
           roleCounts.set(r, (roleCounts.get(r) ?? 0) + 1);
         }
         const last = messages[messages.length - 1]!;
-        const lastRole = String(last.role ?? 'unknown').toLowerCase();
+        const lastRole = typeof last.role === 'string' && last.role ? last.role.toLowerCase() : 'unknown';
 
         // Lifecycle hooks (like agent.ts): loaded once per run, after the
         // login gate and the conversation fetch so a failed handoff fires
@@ -250,13 +253,18 @@ export function registerConversationsHandoffCommand(program: Command): void {
 
         // ── Model: flag wins; else the conversation's model when agent-callable. ──
         const { model, fromFlag } = resolveHandoffModel(convo.model, opts.model);
-        if (!fromFlag && model !== (convo.model ?? '').toLowerCase()) {
+        const convoModelSlug = typeof convo.model === 'string' ? convo.model.toLowerCase() : '';
+        if (!fromFlag && model !== convoModelSlug) {
           warn(
-            `Conversation model "${sanitizeForDisplay(convo.model)}" is not agent-callable - continuing with ${MODEL_DISPLAY[model]}. Pass --model to override.`,
+            `Conversation model "${sanitizeForDisplay(typeof convo.model === 'string' ? convo.model : '')}" is not agent-callable - continuing with ${MODEL_DISPLAY[model]}. Pass --model to override.`,
           );
         }
 
-        const maxTurns = Math.max(MIN_TURNS, Math.min(MAX_TURNS_CAP, Number(opts.maxTurns ?? DEFAULT_MAX_TURNS) || DEFAULT_MAX_TURNS));
+        // Invalid input errors instead of silently defaulting: --max-turns
+        // abc used to run with 25 turns, -5 clamped to the minimum, and
+        // 99999 clamped to the cap - the same rule parseStrictIntFlag
+        // already enforces for --max-turns in agent.ts.
+        const maxTurns = parseStrictIntFlag(opts.maxTurns, 'max-turns', MIN_TURNS, MAX_TURNS_CAP, DEFAULT_MAX_TURNS);
         const budgetCaps = toBudgetCaps({
           maxTokens: opts.maxTokens !== undefined ? Number(opts.maxTokens) : undefined,
           maxTimeMs: opts.maxTime !== undefined ? Number(opts.maxTime) * 1000 : undefined,
