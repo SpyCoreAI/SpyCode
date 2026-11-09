@@ -132,6 +132,17 @@ describe('remote (http) entries - parsing, expansion, redaction (1.9)', () => {
     expect(describeHeader('A', '${X}')).toBe('A (from env)');
   });
 
+  test('plain http is allowed on the whole 127/8 block, 0.0.0.0 and .local - not just 127.0.0.1 (R2-6)', async () => {
+    const { validateRemoteMcpUrl } = await import('../src/lib/agent/mcp-config.js');
+    for (const host of ['127.0.0.2', '127.0.0.254', '127.1.2.3', '0.0.0.0', 'mybox.local', 'localhost', '127.0.0.1', '[::1]']) {
+      expect(validateRemoteMcpUrl(`http://${host}:9000/mcp`), `http://${host}`).toBeNull();
+    }
+    // Controls: private LAN and public hosts still require https.
+    for (const host of ['10.1.2.3', '192.168.1.1', '172.16.0.5', 'example.com']) {
+      expect(validateRemoteMcpUrl(`http://${host}:9000/mcp`), `http://${host}`).toMatch(/https/);
+    }
+  });
+
   test('an http entry round-trips through the project file', () => {
     const servers: McpServerConfig[] = [
       { name: 'remote', type: 'http', url: 'https://mcp.example.com/mcp', headers: { Authorization: 'Bearer ${T}' } },

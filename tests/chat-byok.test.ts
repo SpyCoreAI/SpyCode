@@ -113,6 +113,20 @@ function openaiSseTruncated(): MockResp {
   };
 }
 
+/** A reply consisting only of tool calls (no text at all). */
+function openaiSseToolCalls(): MockResp {
+  const lines = [
+    `data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_1', function: { name: 'read_file', arguments: '{"path":"/etc/passwd"}' } }] } }] })}\n\n`,
+    `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] })}\n\n`,
+    'data: [DONE]\n\n',
+  ];
+  return {
+    statusCode: 200,
+    headers: { 'content-type': 'text/event-stream' },
+    body: Readable.from([Buffer.from(lines.join(''), 'utf8')]) as unknown as MockBody,
+  };
+}
+
 function spycoreSse(text: string): MockResp {
   return {
     statusCode: 200,
@@ -214,6 +228,30 @@ describe('BYOK chat (logged out)', () => {
     expect(payload.message).toContain('cut ');
     expect(payload.usage).toEqual({ input: 10, output: 5 });
     expect(payload.warnings?.join(' ')).toMatch(/Response truncated/);
+  });
+
+  test('a reply of only tool calls is explained on stderr instead of a bare blank line (R2-8)', async () => {
+    responder = (url) => {
+      if (url.includes('127.0.0.1:11434')) return openaiSseToolCalls();
+      throw new Error(`unexpected ${url} - BYOK chat must not touch SpyCore`);
+    };
+    await runChat(['chat', '--provider', 'local', 'hi']);
+    expect(stderr()).toMatch(/tried to call tools \(read_file\)/);
+    expect(stderr()).toMatch(/chat has no tools/);
+    // The call arguments are model-controlled and unbounded - never echoed.
+    expect(stderr()).not.toContain('/etc/passwd');
+    expect(stdout()).toBe('\n');
+  });
+
+  test('tool calls are named in the --json payload (R2-8)', async () => {
+    responder = (url) => {
+      if (url.includes('127.0.0.1:11434')) return openaiSseToolCalls();
+      throw new Error(`unexpected ${url} - BYOK chat must not touch SpyCore`);
+    };
+    await runChat(['--json', 'chat', '--provider', 'local', 'hi']);
+    const payload = JSON.parse(stdout()) as { message: string; toolCalls?: string[] };
+    expect(payload.message).toBe('');
+    expect(payload.toolCalls).toEqual(['read_file']);
   });
 });
 

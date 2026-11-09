@@ -1,8 +1,7 @@
 /**
- * Theme gallery + 2D model picker (Wave 3-D, F10/F15): pure-logic pins.
- * Gallery resolution, theme selection fallback, picker row builders, and
- * the provider rail. The Ink components themselves are presentational and
- * are not rendered here.
+ * Theme gallery (Wave 3-D, F10): pure-logic pins.
+ * Gallery resolution, theme selection fallback, and picker row builders.
+ * The Ink components themselves are presentational and are not rendered here.
  */
 import { describe, expect, test } from 'vitest';
 import {
@@ -15,12 +14,6 @@ import {
 } from '../src/ui/theme/gallery.js';
 import type { TerminalCapabilities } from '../src/ui/theme/capabilities.js';
 import { themePickerRows } from '../src/ui/tui/theme-picker.js';
-import {
-  byokModelRows,
-  modelsForProvider,
-  pickerProviders,
-  spycoreModelRows,
-} from '../src/ui/tui/model-picker.js';
 
 const CAPS: TerminalCapabilities = {
   isTTY: true,
@@ -154,42 +147,5 @@ describe('themePickerRows', () => {
     const active = rows.find((r) => r.key === 'abyss')!;
     expect(active.text).toContain('(active)');
     expect(rows.find((r) => r.key === 'dark')!.text).not.toContain('(active)');
-  });
-});
-
-describe('model picker rows', () => {
-  test('spycoreModelRows lists the chat models with an active marker', () => {
-    const rows = spycoreModelRows('styx');
-    expect(rows.map((r) => r.key)).toEqual(['hermes', 'minos', 'styx', 'styx_max', 'charon']);
-    expect(rows[2]!.text).toContain('(active)');
-    expect(rows[0]!.text).not.toContain('(active)');
-  });
-
-  test('byokModelRows shows the configured model, or a placeholder when unset', () => {
-    expect(byokModelRows('gpt-4o', null)).toEqual([{ key: 'gpt-4o', text: 'gpt-4o' }]);
-    expect(byokModelRows('gpt-4o', 'gpt-4o')[0]!.text).toContain('(active)');
-    expect(byokModelRows(null, null)[0]!.text).toContain('no model configured');
-    expect(byokModelRows('  ', null)[0]!.text).toContain('no model configured');
-  });
-
-  test('modelsForProvider switches on provider kind', () => {
-    const spycore = modelsForProvider({ id: 'spycore', label: 'SpyCore', kind: 'spycore' }, null);
-    expect(spycore.length).toBe(5);
-    const byok = modelsForProvider(
-      { id: 'mine', label: 'mine', kind: 'byok', model: 'llama-3' },
-      null,
-    );
-    expect(byok).toEqual([{ key: 'llama-3', text: 'llama-3' }]);
-  });
-
-  test('pickerProviders puts SpyCore first, then stored BYOK providers', () => {
-    const providers = pickerProviders([
-      { name: 'work', type: 'openai', baseURL: 'https://x', model: 'gpt-4o' },
-      { name: 'local', type: 'openai', baseURL: 'http://localhost:1234' },
-    ]);
-    expect(providers.map((p) => p.id)).toEqual(['spycore', 'work', 'local']);
-    expect(providers[1]!.kind).toBe('byok');
-    expect(providers[1]!.model).toBe('gpt-4o');
-    expect(providers[2]!.model).toBeNull();
   });
 });

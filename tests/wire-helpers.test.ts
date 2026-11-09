@@ -133,4 +133,36 @@ describe('readErrorDetail', () => {
     const bigText = { text: async () => 'y'.repeat(2 * 1024 * 1024) };
     expect(await readErrorDetail(bigText)).toBe(`${'y'.repeat(200)}…`);
   });
+
+  test('a body exposing BOTH .text() and the async iterator is read via the capped stream (R2-2)', async () => {
+    // Real undici bodies expose both, and the old code checked .text()
+    // first - so the capped branch was unreachable in production and a
+    // multi-MB error page was buffered in full. The iterator must win.
+    let chunksYielded = 0;
+    async function* huge(): AsyncGenerator<Buffer> {
+      for (let i = 0; i < 40; i += 1) {
+        chunksYielded += 1;
+        yield Buffer.alloc(64 * 1024, 'x');
+      }
+    }
+    const dual = {
+      text: async () => JSON.stringify({ error: { message: 'via-text' } }),
+      [Symbol.asyncIterator]: () => huge(),
+    };
+    const detail = await readErrorDetail(dual);
+    expect(detail).toBe(`${'x'.repeat(200)}…`);
+    expect(detail).not.toContain('via-text');
+    expect(chunksYielded).toBeLessThan(40);
+  });
+
+  test('a small dual body still prefers the iterator content (R2-2)', async () => {
+    async function* chunks(): AsyncGenerator<Buffer> {
+      yield Buffer.from('{"error":{"message":"via-stream"}}');
+    }
+    const dual = {
+      text: async () => JSON.stringify({ error: { message: 'via-text' } }),
+      [Symbol.asyncIterator]: () => chunks(),
+    };
+    expect(await readErrorDetail(dual)).toBe('via-stream');
+  });
 });

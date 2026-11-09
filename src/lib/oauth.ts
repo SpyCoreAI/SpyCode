@@ -15,6 +15,7 @@
 import { createServer, type Server } from 'node:http';
 import { randomBytes, createHash } from 'node:crypto';
 import { openInBrowser } from './browser.js';
+import { ERROR_BODY_MAX_BYTES, readCappedJson } from './sse.js';
 
 // Google OAuth endpoints
 const GOOGLE_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
@@ -204,7 +205,42 @@ export async function runOAuthFlow(config: OAuthConfig): Promise<OAuthTokens> {
   });
 }
 
-async function exchangeCodeForTokens(
+/**
+ * Read a token-endpoint error body with the same 1 MB bound the provider
+ * stack uses (R2-3): `resp.text()` buffers the whole body first, so a
+ * runaway token endpoint could land an unbounded body in memory (and the
+ * text is interpolated into the thrown error). Stream the body when it is
+ * async-iterable; fall back to `.text()` only for bodies that offer
+ * nothing else (test doubles, non-streaming transports).
+ */
+async function readCappedErrorText(resp: Response): Promise<string> {
+  const body = resp.body as unknown;
+  if (body && typeof (body as AsyncIterable<Uint8Array>)[Symbol.asyncIterator] === 'function') {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    try {
+      for await (const chunk of body as AsyncIterable<Uint8Array>) {
+        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        total += buf.length;
+        if (total > ERROR_BODY_MAX_BYTES) break;
+        chunks.push(buf);
+      }
+    } catch {
+      return '';
+    }
+    return Buffer.concat(chunks).toString('utf8');
+  }
+  if (typeof resp.text === 'function') {
+    try {
+      return (await resp.text()).slice(0, ERROR_BODY_MAX_BYTES);
+    } catch {
+      return '';
+    }
+  }
+  return '';
+}
+
+export async function exchangeCodeForTokens(
   config: OAuthConfig,
   code: string,
   verifier: string,
@@ -227,16 +263,35 @@ async function exchangeCodeForTokens(
   });
 
   if (!resp.ok) {
-    const text = await resp.text();
+    const text = await readCappedErrorText(resp);
     throw new Error(`Token exchange failed (${resp.status}): ${text}`);
   }
 
-  const data = (await resp.json()) as {
+  // Capped read (R2-3): `resp.json()` buffers the whole success body
+  // first. `readCappedJson` streams the body under the 1 MB bound and
+  // returns null past it; a body-less double falls back to `.json()`.
+  const data = (await readCappedJson((resp.body ?? resp) as unknown)) as {
     access_token: string;
     refresh_token?: string;
     expires_in: number;
     token_type: string;
-  };
+  } | null;
+
+  if (!data || typeof data !== 'object') {
+    throw new Error('Token exchange failed: unexpected response from token endpoint');
+  }
+
+  // Same validation as the refresh path (R3-13 site 9): a response with a
+  // refresh_token but no access_token used to flow through as
+  // accessToken: undefined, and a missing expires_in made expiresAt NaN -
+  // a broken token was STORED, so every later API call failed auth.
+  // Fail here, at the exchange, with the real cause.
+  if (typeof data.access_token !== 'string' || data.access_token.length === 0) {
+    throw new Error('Token exchange failed: no access token in response');
+  }
+  if (typeof data.expires_in !== 'number' || !Number.isFinite(data.expires_in)) {
+    throw new Error('Token exchange failed: no expiry (expires_in) in response');
+  }
 
   if (!data.refresh_token) {
     throw new Error('No refresh token received. Try revoking access and trying again.');
@@ -283,17 +338,23 @@ export async function refreshAccessToken(
   }
 
   if (!resp.ok) {
-    const text = await resp.text();
+    const text = await readCappedErrorText(resp);
     throw new Error(`Token refresh failed (${resp.status}): ${text}`);
   }
 
-  const data = (await resp.json()) as {
+  // Capped read (R2-3), same as the exchange path: `resp.json()` buffers
+  // the whole success body first. A body-less double falls back to `.json()`.
+  const data = (await readCappedJson((resp.body ?? resp) as unknown)) as {
     access_token: string;
     /** Present when the provider rotates the refresh token: keep it, or the next refresh fails. */
     refresh_token?: string;
     expires_in: number;
     token_type: string;
-  };
+  } | null;
+
+  if (!data || typeof data !== 'object') {
+    throw new Error('Token refresh failed: unexpected response from token endpoint');
+  }
 
   // An empty success payload used to flow straight through: an absent
   // access_token left the Google provider sending requests with NO auth

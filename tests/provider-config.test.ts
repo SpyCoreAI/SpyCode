@@ -276,6 +276,55 @@ describe('provider test command', () => {
   });
 });
 
+// ───────────────────────── provider add/test redaction + oauth errors ─────────────────────────
+
+describe('provider add/test URL redaction + oauth config errors (R2-4, R2-7)', () => {
+  test('add and test print a credentialed base URL redacted, like list does (R2-4)', async () => {
+    const { getStoredProviders } = await import('../src/lib/config.js');
+    const add = await runProvider([
+      'add',
+      'credbox',
+      '--base-url',
+      'https://user:s3cret-pass@h.example/v1',
+      '--model',
+      'm',
+      '--skip-test',
+    ]);
+    expect(add.error).toBeUndefined();
+    expect(add.stdout).toContain('h.example/v1');
+    expect(add.stdout).not.toContain('s3cret-pass');
+    expect(add.stdout).not.toContain('user:');
+    // Storage is untouched - only the display redacts.
+    expect(getStoredProviders()[0]?.baseURL).toBe('https://user:s3cret-pass@h.example/v1');
+
+    responder = () => openaiSse(['OK'], { prompt_tokens: 2, completion_tokens: 1 });
+    const tested = await runProvider(['test', 'credbox']);
+    expect(tested.error).toBeUndefined();
+    const out = tested.stdout + tested.stderr;
+    expect(out).toContain('h.example');
+    expect(out).not.toContain('s3cret-pass');
+    expect(out).not.toContain('user:');
+  });
+
+  test('add --oauth without a client id fails as a SpycoreCliError with the not-saved hint (R2-7)', async () => {
+    const { getStoredProviders } = await import('../src/lib/config.js');
+    const { isSpycoreCliError } = await import('../src/lib/errors.js');
+    const savedEnv = process.env.SPYCORE_GOOGLE_CLIENT_ID;
+    delete process.env.SPYCORE_GOOGLE_CLIENT_ID;
+    try {
+      const r = await runProvider(['add', 'gbox', '--type', 'google', '--oauth']);
+      expect(isSpycoreCliError(r.error)).toBe(true);
+      expect(String((r.error as Error).message)).toMatch(/OAuth failed: Google OAuth client ID not configured/);
+      expect((r.error as { hint?: string }).hint).toMatch(/provider was not saved/);
+      expect((r.error as { hint?: string }).hint).toMatch(/--api-key instead/);
+      expect(getStoredProviders()).toHaveLength(0);
+    } finally {
+      if (savedEnv !== undefined) process.env.SPYCORE_GOOGLE_CLIENT_ID = savedEnv;
+      else delete process.env.SPYCORE_GOOGLE_CLIENT_ID;
+    }
+  });
+});
+
 // ───────────────────────── login decoupling ─────────────────────────
 
 describe('agent - login decoupling', () => {

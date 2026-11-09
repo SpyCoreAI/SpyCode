@@ -144,3 +144,127 @@ describe('refreshAccessToken timeout (4c)', () => {
     }
   });
 });
+
+describe('exchangeCodeForTokens validates the payload (R3-13 site 9)', () => {
+  const cfg = {
+    clientId: 'id',
+    authUrl: 'https://example.com/auth',
+    tokenUrl: 'https://example.com/token',
+    scopes: [],
+    redirectPort: 0,
+  };
+
+  test('a refresh_token without an access_token fails at the exchange instead of storing a broken token', async () => {
+    const { vi } = await import('vitest');
+    const { exchangeCodeForTokens } = await import('../src/lib/oauth.js');
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ refresh_token: 'rt', expires_in: 3600, token_type: 'Bearer' }),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      await expect(exchangeCodeForTokens(cfg, 'code', 'verifier', 'http://127.0.0.1:0/callback')).rejects.toThrow(
+        /no access token in response/,
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  test('a missing expires_in fails at the exchange instead of producing a NaN expiry', async () => {
+    const { vi } = await import('vitest');
+    const { exchangeCodeForTokens } = await import('../src/lib/oauth.js');
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ access_token: 'at', refresh_token: 'rt', token_type: 'Bearer' }),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      await expect(exchangeCodeForTokens(cfg, 'code', 'verifier', 'http://127.0.0.1:0/callback')).rejects.toThrow(
+        /no expiry \(expires_in\) in response/,
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  test('a complete payload still returns the tokens', async () => {
+    const { vi } = await import('vitest');
+    const { exchangeCodeForTokens } = await import('../src/lib/oauth.js');
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ access_token: 'at', refresh_token: 'rt', expires_in: 3600, token_type: 'Bearer' }),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const tokens = await exchangeCodeForTokens(cfg, 'code', 'verifier', 'http://127.0.0.1:0/callback');
+      expect(tokens.accessToken).toBe('at');
+      expect(tokens.refreshToken).toBe('rt');
+      expect(Number.isFinite(tokens.expiresAt)).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe('token endpoint reads are capped at 1 MB (R2-3)', () => {
+  const cfg = {
+    clientId: 'id',
+    authUrl: 'https://example.com/auth',
+    tokenUrl: 'https://example.com/token',
+    scopes: [],
+    redirectPort: 0,
+  };
+
+  test('a multi-MB error body is truncated, not buffered in full', async () => {
+    const { vi } = await import('vitest');
+    const { exchangeCodeForTokens } = await import('../src/lib/oauth.js');
+    let chunksYielded = 0;
+    async function* huge(): AsyncGenerator<Buffer> {
+      for (let i = 0; i < 40; i += 1) {
+        chunksYielded += 1;
+        yield Buffer.alloc(64 * 1024, 'x');
+      }
+    }
+    const fetchMock = vi.fn(async () => ({ ok: false, status: 400, body: huge() }));
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      let err: Error | undefined;
+      try {
+        await exchangeCodeForTokens(cfg, 'code', 'verifier', 'http://127.0.0.1:0/callback');
+        expect.unreachable('should have thrown');
+      } catch (e) {
+        err = e as Error;
+      }
+      expect(err?.message).toMatch(/Token exchange failed \(400\)/);
+      // The 1 MB cap binds: the message carries at most ~1 MB of body,
+      // not the full 2.5 MB the endpoint sent.
+      expect(err?.message.length).toBeLessThan(1_048_576 + 100);
+      expect(chunksYielded).toBeLessThan(40);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  test('a multi-MB success body fails cleanly instead of being parsed whole', async () => {
+    const { vi } = await import('vitest');
+    const { refreshAccessToken } = await import('../src/lib/oauth.js');
+    async function* huge(): AsyncGenerator<Buffer> {
+      for (let i = 0; i < 40; i += 1) {
+        yield Buffer.alloc(64 * 1024, 'x');
+      }
+    }
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 200, body: huge() }));
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      await expect(refreshAccessToken(cfg, 'refresh-token')).rejects.toThrow(
+        /unexpected response from token endpoint/,
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});

@@ -174,9 +174,12 @@ function registerAdd(group: Command): void {
         const { runOAuthFlow, googleOAuthConfig } = await import('../../lib/oauth.js');
         // Use a random high port for the callback server.
         const port = 49152 + Math.floor(Math.random() * 16383);
-        const oauthConfig = googleOAuthConfig(port);
-        info('Starting Google OAuth flow...');
         try {
+          // googleOAuthConfig throws a plain Error when no client id is
+          // configured - inside the try so it gets the same SpycoreCliError
+          // + hint as a failed flow, not a bare message (R2-7).
+          const oauthConfig = googleOAuthConfig(port);
+          info('Starting Google OAuth flow...');
           const tokens = await runOAuthFlow(oauthConfig);
           entry.oauthRefreshToken = tokens.refreshToken;
           entry.oauthClientId = oauthConfig.clientId;
@@ -194,7 +197,9 @@ function registerAdd(group: Command): void {
       if (apiKey.length > 0) {
         warn('The API key was written to the config file (locked to 0600). Prefer --api-key-env <VAR> to keep it off disk.');
       }
-      success(`Saved provider "${trimmedName}" (${type} · ${entry.baseURL}).`);
+      // A hand-edited baseURL can carry userinfo - strip it before it
+      // reaches the terminal, like `provider list` already does (R2-4).
+      success(`Saved provider "${trimmedName}" (${type} · ${redactUrlCredentials(entry.baseURL)}).`);
       info(`Use it: spycore agent --provider ${trimmedName} "<task>"  ·  make default: spycore provider use ${trimmedName}`);
 
       // Automatic health check after save (unless --skip-test).
@@ -409,7 +414,8 @@ function registerTest(group: Command): void {
         throw new SpycoreCliError(`Provider "${targetName}" is not testable.`, EXIT_USER_ERROR);
       }
       const { config } = selection;
-      info(`Testing "${targetName}" → ${config.baseURL} (model ${config.model})…`);
+      // Redact URL userinfo, like `provider list` (R2-4).
+      info(`Testing "${targetName}" → ${redactUrlCredentials(config.baseURL)} (model ${config.model})…`);
       // The factory lazy-loads whichever adapter speaks this config's wire.
       const { createByokProvider } = await import('../../lib/providers/factory.js');
       const provider = await createByokProvider(config);

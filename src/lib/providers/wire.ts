@@ -55,33 +55,53 @@ export function connectionErrorMessage(err: unknown, url: string): string {
  * `{ error: { message } }` shape (OpenAI-compatible, Anthropic, and Google all
  * use it), falls back to a clipped raw snippet. Never includes request
  * headers, so the API key can't leak here. The read itself is capped at
- * ERROR_BODY_MAX_BYTES (the same 1 MB bound readCappedJson uses): the
- * clipped output is 200 chars, but the full body used to be buffered first,
- * so a multi-MB error page from a proxy/misbehaving endpoint was read into
- * memory in full.
+ * ERROR_BODY_MAX_BYTES (the same 1 MB bound readCappedJson uses): real
+ * undici bodies are streamed through the async iterator under a byte
+ * budget (with the transport destroyed past the cap), so a multi-MB error
+ * page from a proxy/misbehaving endpoint is never buffered in full. Only
+ * bodies with no async iterator fall back to `.text()`, where the cap can
+ * bound just the parse/clip work.
  */
 export async function readErrorDetail(body: unknown): Promise<string | undefined> {
   try {
     let text = '';
     const b = body as
-      | ({ text?: () => Promise<string> } & AsyncIterable<Buffer | Uint8Array>)
+      | ({ text?: () => Promise<string>; destroy?: (err?: Error) => void } & AsyncIterable<Buffer | Uint8Array>)
       | undefined;
-    if (b && typeof b.text === 'function') {
-      // .text() resolves with the whole body already buffered by the
-      // transport - truncate before parsing so no downstream work scales
-      // with a hostile body size.
-      text = (await b.text()).slice(0, ERROR_BODY_MAX_BYTES);
-    } else if (b && typeof (b as AsyncIterable<Buffer>)[Symbol.asyncIterator] === 'function') {
-      const dec = new TextDecoder();
+    if (b && typeof (b as AsyncIterable<Buffer>)[Symbol.asyncIterator] === 'function') {
+      // Stream through the async iterator with a BYTE budget: `.text()`
+      // resolves only after the transport has buffered the whole body,
+      // so a `.text()` + slice cap never binds for real undici bodies
+      // (they expose both, and the old code checked `.text()` first).
+      // Reading the iterator is the only branch that actually stops a
+      // multi-MB error page from landing in memory in full.
+      const chunks: Buffer[] = [];
+      let total = 0;
+      let overCap = false;
       for await (const chunk of b as AsyncIterable<Buffer | Uint8Array>) {
-        text += dec.decode(chunk instanceof Buffer ? chunk : Buffer.from(chunk), { stream: true });
-        if (text.length > ERROR_BODY_MAX_BYTES) {
-          text = text.slice(0, ERROR_BODY_MAX_BYTES);
+        const buf = chunk instanceof Buffer ? chunk : Buffer.from(chunk);
+        total += buf.length;
+        if (total > ERROR_BODY_MAX_BYTES) {
+          overCap = true;
           break;
         }
+        chunks.push(buf);
       }
-      text += dec.decode();
-      if (text.length > ERROR_BODY_MAX_BYTES) text = text.slice(0, ERROR_BODY_MAX_BYTES);
+      if (overCap) {
+        // Stop the transport producing more: without this the producer
+        // keeps buffering behind our back.
+        try {
+          b.destroy?.();
+        } catch {
+          /* best-effort */
+        }
+      }
+      text = Buffer.concat(chunks).toString('utf8');
+    } else if (b && typeof b.text === 'function') {
+      // Bodies that offer no async iterator (test doubles, non-streaming
+      // transports) can only be read via `.text()` - already buffered by
+      // the transport, so the slice below bounds only the parse/clip work.
+      text = (await b.text()).slice(0, ERROR_BODY_MAX_BYTES);
     }
     if (!text) return undefined;
     try {

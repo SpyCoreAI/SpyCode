@@ -579,6 +579,8 @@ async function runByokChat(
   let assistantText = '';
   let usage: { input: number; output: number } | null = null;
   const warnings: string[] = [];
+  // Names of tools the model tried to call (chat declares none).
+  const toolCalls: string[] = [];
   // --no-stream buffers the reply and prints it once at the end instead
   // of streaming it progressively (the SpyCore path does the same).
   const noStream = opts.stream === false;
@@ -600,6 +602,19 @@ async function runByokChat(
     } else if (ev.type === 'usage') {
       usage = { input: ev.input, output: ev.output };
       if (!json) process.stderr.write(`${chalk.dim(`(${ev.input} in / ${ev.output} out tokens)`)}\n`);
+    } else if (ev.type === 'tool_calls') {
+      // Chat declares no tools, so a model emitting tool calls unbidden
+      // used to yield a blank line (or `"message": ""` in --json) with
+      // exit 0 and no explanation - surface the calls by name, same
+      // stderr shape as the warning path (R2-8). Arguments are not
+      // echoed: they are model-controlled and unbounded.
+      for (const call of ev.calls) toolCalls.push(call.name);
+      const names = ev.calls.map((c) => sanitizeForDisplay(c.name)).join(', ');
+      if (!json) {
+        process.stderr.write(
+          `${chalk.yellow('!')} The model tried to call tools (${names}) instead of replying - chat has no tools, so the calls were ignored.\n`,
+        );
+      }
     } else if (ev.type === 'error') {
       throw new SpycoreCliError(
         `BYOK provider error: ${ev.message}`,
@@ -616,6 +631,7 @@ async function runByokChat(
         message: assistantText,
         ...(usage ? { usage } : {}),
         ...(warnings.length > 0 ? { warnings } : {}),
+        ...(toolCalls.length > 0 ? { toolCalls } : {}),
       }) + '\n',
     );
   } else if (noStream) {

@@ -106,6 +106,24 @@ describe('B4: fallback error detection', () => {
     expect(isFallbackEligibleError(new Error('Model endpoint returned HTTP 400.'))).toBe(false);
   });
 
+  test('detects HTTP 408 and mid-stream errnos the matcher used to miss (R2-5)', () => {
+    // 408 is the same transient server-side class as the 500/502/503/504
+    // the matcher already covers - a server timing out.
+    expect(isFallbackEligibleError({ code: 408 })).toBe(true);
+    expect(isFallbackEligibleError(new Error('Model endpoint returned HTTP 408.'))).toBe(true);
+    // Mid-stream interruptions carry an errno outside the connect-time
+    // set and never flow through connectionErrorMessage's prose, so the
+    // errno spellings are what can ever match here.
+    expect(
+      isFallbackEligibleError(new Error('Model stream interrupted: getaddrinfo EAI_AGAIN example.com')),
+    ).toBe(true);
+    expect(isFallbackEligibleError(new Error('Model stream interrupted: EHOSTUNREACH'))).toBe(true);
+    expect(isFallbackEligibleError(new Error('Model stream interrupted: ENETUNREACH'))).toBe(true);
+    expect(isFallbackEligibleError(new Error('Model stream interrupted: EPIPE'))).toBe(true);
+    // Control: an unrelated mid-stream failure is still not eligible.
+    expect(isFallbackEligibleError(new Error('Model stream interrupted: invalid JSON'))).toBe(false);
+  });
+
   test('does not flag user errors', () => {
     expect(isFallbackEligibleError(new Error('Invalid request format'))).toBe(false);
     expect(isFallbackEligibleError(null)).toBe(false);

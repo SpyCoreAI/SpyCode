@@ -114,16 +114,31 @@ const HEADER_NAME_RE = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 /** `${ENV_VAR}` references inside a header value - the ONLY templating form. */
 const ENV_REF_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
 
-/** Loopback hosts where plain http:// is permitted. Everything else = https. */
+/**
+ * Loopback hosts where plain http:// is permitted. Everything else = https.
+ * Same coverage as `isLocalBaseURL` (byok-config.ts): the whole 127/8
+ * block, not just 127.0.0.1 - 127.0.0.2 and friends are local too - plus
+ * 0.0.0.0 and .local names (R2-6).
+ */
 function isLoopbackHost(hostname: string): boolean {
+  // URL strips the brackets from an IPv6 literal, so `[::1]` → `::1` -
+  // except on Node 24, where hostname keeps the brackets ('[::1]').
+  // Match both spellings.
   const h = hostname.toLowerCase().replace(/^\[|\]$/g, '');
-  return h === 'localhost' || h === '127.0.0.1' || h === '::1';
+  return (
+    h === 'localhost' ||
+    h.startsWith('127.') ||
+    h === '0.0.0.0' ||
+    h === '::1' ||
+    h.endsWith('.local')
+  );
 }
 
 /**
  * Validate a remote MCP endpoint URL. Returns an error message, or null when
  * acceptable. HARD rules (no config escape hatch):
- * - https:// anywhere; http:// ONLY for loopback (localhost / 127.0.0.1 / ::1);
+ * - https:// anywhere; http:// ONLY for loopback (localhost / 127.0.0.0/8 /
+ *   0.0.0.0 / .local / ::1);
  * - no credentials in the URL (auth belongs in a header with a `${ENV}` ref).
  */
 export function validateRemoteMcpUrl(raw: string): string | null {
@@ -140,7 +155,7 @@ export function validateRemoteMcpUrl(raw: string): string | null {
   if (url.protocol === 'http:') {
     return isLoopbackHost(url.hostname)
       ? null
-      : 'remote MCP servers require https:// (plain http is allowed only for loopback: localhost, 127.0.0.1, ::1)';
+      : 'remote MCP servers require https:// (plain http is allowed only for loopback: localhost, 127.0.0.0/8, 0.0.0.0, .local, ::1)';
   }
   return `unsupported URL scheme "${url.protocol}" (use https://, or http:// on loopback)`;
 }

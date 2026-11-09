@@ -167,11 +167,12 @@ export function isFallbackEligibleError(err: unknown): boolean {
   const msg = String((err as { message?: unknown }).message ?? '').toLowerCase();
   const code = (err as { code?: unknown }).code;
   // HTTP status codes
-  if (typeof code === 'number' && [401, 403, 429, 502, 503, 504].includes(code)) return true;
+  if (typeof code === 'number' && [401, 403, 408, 429, 502, 503, 504].includes(code)) return true;
   // Common error patterns
   return (
     msg.includes('401') ||
     msg.includes('403') ||
+    msg.includes('408') ||
     msg.includes('429') ||
     msg.includes('500') ||
     msg.includes('502') ||
@@ -187,6 +188,15 @@ export function isFallbackEligibleError(err: unknown): boolean {
     msg.includes('enotfound') ||
     msg.includes('etimedout') ||
     msg.includes('econnreset') ||
+    // Mid-stream errnos outside the connect-time set: a DNS failure or a
+    // broken pipe mid-stream arrives as `Model stream interrupted:
+    // getaddrinfo EAI_AGAIN …`, which never flows through
+    // `connectionErrorMessage`'s prose - so the errno spellings are what
+    // can ever match here (R2-5).
+    msg.includes('eai_again') ||
+    msg.includes('ehostunreach') ||
+    msg.includes('enetunreach') ||
+    msg.includes('epipe') ||
     // Prose forms `connectionErrorMessage` actually emits for the errno
     // spellings above - the spellings themselves never survive into the
     // probe error string.

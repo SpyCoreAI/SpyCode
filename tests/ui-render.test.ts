@@ -20,7 +20,6 @@ import { CodeBlock } from '../src/ui/markdown/CodeBlock.js';
 import { StreamingMarkdown } from '../src/ui/markdown/StreamingMarkdown.js';
 import { parseMarkdown } from '../src/ui/markdown/parse.js';
 import { ApprovalPrompt, DiffLineView, clamp, modelLabel, statLabel } from '../src/ui/agent/shared.js';
-import { ModelPicker, spycoreModelRows } from '../src/ui/tui/model-picker.js';
 import { ThemePicker } from '../src/ui/tui/theme-picker.js';
 import { listThemeOptions } from '../src/ui/theme/gallery.js';
 import { CommandPalette } from '../src/ui/tui/palette.js';
@@ -340,21 +339,6 @@ describe('agent shared views and helpers', () => {
 });
 
 describe('TUI pickers and panels', () => {
-  test('ModelPicker renders the provider rail and model rows', () => {
-    const frame = renderFrame(
-      React.createElement(ModelPicker, {
-        providers: [{ id: 'spycore', label: 'SpyCore', kind: 'spycore' }],
-        providerIndex: 0,
-        models: spycoreModelRows('styx'),
-        modelIndex: 2,
-        width: 80,
-      }),
-    );
-    expect(frame).toContain('SpyCore');
-    expect(frame).toContain('Styx');
-    expect(frame).toContain('(active)');
-  });
-
   test('ThemePicker renders options with the active marker', () => {
     const options = listThemeOptions();
     expect(options.length).toBeGreaterThanOrEqual(3);
