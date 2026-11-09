@@ -725,9 +725,20 @@ describe('import path expansion and comparison', () => {
       const { planFromDir } = await import('../src/commands/import.js');
       const plan = planFromDir(src, root);
       expect(plan.items).toHaveLength(1);
-      expect(plan.items[0]?.detail).toContain(
-        'WARNING: copies 1 executable file(s) and 1 symlink(s) as-is',
-      );
+      // Windows has no POSIX file modes: chmod 0o755 leaves stat mode at
+      // 0o666, so the mode-bit scan counts 0 executables (same cause as the
+      // 0600 failure in follow-up 1). The 1-executable assertion is
+      // POSIX-only; the symlink count and warning shape still run on
+      // Windows.
+      if (process.platform !== 'win32') {
+        expect(plan.items[0]?.detail).toContain(
+          'WARNING: copies 1 executable file(s) and 1 symlink(s) as-is',
+        );
+      } else {
+        expect(plan.items[0]?.detail).toContain(
+          'WARNING: copies 0 executable file(s) and 1 symlink(s) as-is',
+        );
+      }
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
