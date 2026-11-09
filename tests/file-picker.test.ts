@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
@@ -149,5 +149,68 @@ describe('picker state machine', () => {
     expect(m.preview!.lines[0]).toBe('# hello');
     m = filePickerSetFilter(m, '');
     expect(m.entries.length).toBe(5);
+  });
+});
+
+describe('symlink safety (D4)', () => {
+  // The old code claimed "Symlinks are not followed for preview" while
+  // statSync/readFileSync followed them: a `notes.md -> .env` link was
+  // listed and previewed, and a symlinked directory escaped the root.
+  test('a symlink to a secret file is not listed', () => {
+    const ws = mkdtempSync(join(tmpdir(), 'spycode-picker-link-'));
+    try {
+      writeFileSync(join(ws, '.env'), 'SECRET=<redacted>\n');
+      writeFileSync(join(ws, 'plain.txt'), 'hello\n');
+      symlinkSync(join(ws, '.env'), join(ws, 'notes.md'));
+      const names = listDirectoryEntries(ws, ws).map((e) => e.name);
+      expect(names).toContain('plain.txt');
+      expect(names).not.toContain('notes.md');
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  test('a symlink escaping the root is not listed and cannot be entered', () => {
+    const base = mkdtempSync(join(tmpdir(), 'spycode-picker-esc-'));
+    const ws = join(base, 'ws');
+    const outside = join(base, 'outside');
+    try {
+      mkdirSync(ws);
+      mkdirSync(outside);
+      writeFileSync(join(outside, 'secret.txt'), 'outside\n');
+      symlinkSync(outside, join(ws, 'escape'));
+      expect(listDirectoryEntries(ws, ws).map((e) => e.name)).not.toContain('escape/');
+      // A start directory through the escaping link is clamped to the root.
+      expect(createFilePickerModel(ws, join(ws, 'escape')).dir).toBe(ws);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  test('a symlink staying inside the root IS listed and previewable', () => {
+    const ws = mkdtempSync(join(tmpdir(), 'spycode-picker-in-'));
+    try {
+      writeFileSync(join(ws, 'real.txt'), 'inside\n');
+      symlinkSync(join(ws, 'real.txt'), join(ws, 'alias.txt'));
+      const entries = listDirectoryEntries(ws, ws);
+      const alias = entries.find((e) => e.name === 'alias.txt');
+      expect(alias).toBeDefined();
+      expect(readFilePreview(alias!, 24, ws).lines[0]).toBe('inside');
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  test('readFilePreview refuses a symlinked secret file even when constructed directly', () => {
+    const ws = mkdtempSync(join(tmpdir(), 'spycode-picker-prev-'));
+    try {
+      writeFileSync(join(ws, '.env'), 'SECRET=<redacted>\n');
+      const link = join(ws, 'notes.md');
+      symlinkSync(join(ws, '.env'), link);
+      const p = readFilePreview({ name: 'notes.md', absPath: link, isDir: false, size: 18 }, 24, ws);
+      expect(p.lines).toEqual(['[unreadable]']);
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
   });
 });

@@ -228,8 +228,11 @@ export class McpHttpClient {
     name: string,
     args: Record<string, unknown>,
     timeoutMs?: number,
+    signal?: AbortSignal,
   ): Promise<McpCallResult> {
-    const result = await this.rpc('tools/call', { name, arguments: args }, timeoutMs ?? this.requestTimeoutMs);
+    const result = await this.rpc('tools/call', { name, arguments: args }, timeoutMs ?? this.requestTimeoutMs, {
+      signal,
+    });
     if (!isObject(result)) return { content: [], isError: false };
     const content = Array.isArray(result.content)
       ? result.content.filter(isObject).map((c) => c as McpContent)
@@ -293,7 +296,7 @@ export class McpHttpClient {
     method: string,
     params: Record<string, unknown>,
     timeoutMs: number,
-    opts: { captureSession?: boolean; allowReinit?: boolean } = {},
+    opts: { captureSession?: boolean; allowReinit?: boolean; signal?: AbortSignal } = {},
   ): Promise<unknown> {
     if (this.closed || this.failedForSession) throw this.failFast();
     const allowReinit = opts.allowReinit !== false;
@@ -316,6 +319,13 @@ export class McpHttpClient {
       timedOut = true;
       controller.abort();
     }, timeoutMs);
+    // A dispatch-timeout (or run abort) cancels the in-flight fetch instead
+    // of leaving it running after dispatch already reported a timeout.
+    const onExternalAbort = (): void => controller.abort();
+    if (opts.signal) {
+      if (opts.signal.aborted) controller.abort();
+      else opts.signal.addEventListener('abort', onExternalAbort, { once: true });
+    }
 
     try {
       let res;
@@ -329,6 +339,7 @@ export class McpHttpClient {
           bodyTimeout: timeoutMs,
         });
       } catch (err) {
+        if (opts.signal?.aborted) throw new McpError(`request "${method}" aborted`);
         this.noteTransportFailure();
         if (timedOut) throw new McpError(`request "${method}" timed out after ${timeoutMs}ms`);
         if (this.closed) throw this.failFast();
@@ -373,6 +384,7 @@ export class McpHttpClient {
           message = await readJsonResponse(res.body as AsyncIterable<Buffer>, id);
         }
       } catch (err) {
+        if (opts.signal?.aborted) throw new McpError(`request "${method}" aborted`);
         this.noteTransportFailure();
         if (timedOut) throw new McpError(`request "${method}" timed out after ${timeoutMs}ms`);
         throw err instanceof McpError ? err : new McpError(`request "${method}" failed while reading the response`);
@@ -390,6 +402,7 @@ export class McpHttpClient {
     } finally {
       clearTimeout(timer);
       this.inflight.delete(controller);
+      if (opts.signal) opts.signal.removeEventListener('abort', onExternalAbort);
     }
   }
 

@@ -28,7 +28,7 @@ import {
   statSync,
   type Dirent,
 } from 'node:fs';
-import { delimiter, extname, join, resolve } from 'node:path';
+import { delimiter, extname, isAbsolute, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { DEFAULT_LSP_INIT_TIMEOUT_MS, LspClient } from './client.js';
 import { effectiveLspOverrides, isLspEnabled, type LspServerOverride } from './config.js';
@@ -189,12 +189,18 @@ export function languageForExtension(ext: string): LspLanguageId | null {
  * on PATH (with PATHEXT on Windows). Pure fs probing: no child process, so it
  * stays out of the child-process census.
  */
-export function commandExists(command: string): boolean {
+export function commandExists(command: string, cwd?: string): boolean {
   const hasSeparator =
     command.includes('/') || (process.platform === 'win32' && /[\\:]/.test(command));
   if (hasSeparator) {
+    // A relative override command is resolved against the WORKSPACE cwd: the
+    // server is spawned with cwd = the workspace root, so probing it against
+    // the process cwd wrongly rejects `./scripts/lsp.sh` that exists in the
+    // workspace (and wrongly accepts one that exists only where the CLI was
+    // launched from). Absolute commands are unaffected by the join.
+    const target = cwd !== undefined && !isAbsolute(command) ? join(cwd, command) : command;
     try {
-      accessSync(command, fsConstants.X_OK);
+      accessSync(target, fsConstants.X_OK);
       return true;
     } catch {
       return false;
@@ -220,17 +226,25 @@ export function commandExists(command: string): boolean {
 function resolveServerCommand(
   spec: BuiltinServerSpec,
   override: LspServerOverride | undefined,
+  cwd?: string,
 ): { command: string; args: string[] } {
   if (override) {
-    if (!commandExists(override.command)) {
+    if (!commandExists(override.command, cwd)) {
+      // A relative-path override is not "on PATH" - say what was actually
+      // checked, so a user with `./scripts/lsp.sh` in the workspace is not
+      // told to put it on PATH.
+      const hasSeparator =
+        override.command.includes('/') || (process.platform === 'win32' && /[\\:]/.test(override.command));
       throw new LspError(
-        `LSP server for ${spec.language} not found: configured command "${override.command}" is not on PATH`,
+        hasSeparator
+          ? `LSP server for ${spec.language} not found: configured command "${override.command}" does not exist or is not executable${cwd !== undefined ? ` (resolved against the workspace: ${cwd})` : ''}`
+          : `LSP server for ${spec.language} not found: configured command "${override.command}" is not on PATH`,
       );
     }
     return { command: override.command, args: override.args ?? spec.candidates[0]?.args ?? [] };
   }
   for (const c of spec.candidates) {
-    if (commandExists(c.command)) return { command: c.command, args: c.args };
+    if (commandExists(c.command, cwd)) return { command: c.command, args: c.args };
   }
   const tried = spec.candidates.map((c) => c.command).join(', ');
   throw new LspError(
@@ -349,7 +363,7 @@ export class LspManager {
       // cannot spawn arbitrary processes. No second inline trust check lives
       // here - the gate cannot drift between the two sites.
       const override = effectiveLspOverrides(this.cwd)[language];
-      const { command, args } = resolveServerCommand(spec, override);
+      const { command, args } = resolveServerCommand(spec, override, this.cwd);
       managed.command = command;
       managed.args = args;
       const client = await LspClient.start({
@@ -413,7 +427,15 @@ export class LspManager {
       // Size-cap BEFORE the read: the whole text goes to a third-party
       // server process via didOpen, so an uncapped read is a multi-GB
       // memory spike and a multi-GB message.
-      if (statSync(absPath).size > LSP_MAX_FILE_BYTES) {
+      // Regular-file check BEFORE the read: a FIFO reports size 0, passes
+      // the cap, and readFileSync blocks until a writer opens it - the
+      // timeoutMs below only covers waitForDiagnostics. Same refusal
+      // read_file applies.
+      const st = statSync(absPath);
+      if (!st.isFile()) {
+        throw new LspError(`not a regular file, cannot run diagnostics: "${absPath}"`);
+      }
+      if (st.size > LSP_MAX_FILE_BYTES) {
         throw new LspError(
           `file is too large for diagnostics (${LSP_MAX_FILE_BYTES.toLocaleString('en-US')} byte cap): "${absPath}"`,
         );
@@ -483,7 +505,12 @@ export class LspManager {
           const ext = extname(f).toLowerCase();
           let text: string;
           try {
-            const size = statSync(f).size;
+            // Non-regular files (FIFO, socket, device, directory) are
+            // refused before the read: a FIFO reports size 0 and would
+            // block readFileSync until a writer opens it.
+            const st = statSync(f);
+            if (!st.isFile()) continue;
+            const size = st.size;
             if (size > LSP_MAX_FILE_BYTES) {
               oversizeSkipped += 1;
               continue;

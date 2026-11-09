@@ -134,6 +134,21 @@ describe('planRedo and applyRedo', () => {
     expect(deleted[0]?.reason).toBe('deleted since undo');
   });
 
+  test('a really recreated file (create with null before) says recreated, not modified', () => {
+    // In a real journal a create always has before null, so the old code -
+    // sha guard first, existence checks below it - reported a recreated
+    // file "modified since undo": the inner checks could never fire. The
+    // existence checks now run first, so the reason names what happened.
+    writeFileSync(fp('c.txt'), 'USER RECREATED');
+    const recreated = planRedo(session([ch(fp('c.txt'), 'create', null, 'NEW')]));
+    expect(recreated[0]?.action).toBe('skip');
+    expect(recreated[0]?.reason).toBe('recreated since undo');
+    // And a really re-deleted file says deleted, not modified.
+    const deleted = planRedo(session([ch(fp('d.txt'), 'delete', 'OLD', '')]));
+    expect(deleted[0]?.action).toBe('skip');
+    expect(deleted[0]?.reason).toBe('deleted since undo');
+  });
+
   test('delete then create chain threads null through the sim', () => {
     writeFileSync(fp('f.txt'), 'OLD');
     const steps = planRedo(

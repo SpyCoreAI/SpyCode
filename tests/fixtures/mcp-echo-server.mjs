@@ -97,6 +97,12 @@ function handle(msg) {
     return;
   }
   if (method === 'tools/call') {
+    // Env knob for the non-object-error test: reply with a bare-string
+    // error instead of the { code, message } object.
+    if (process.env.FIXTURE_STRING_ERROR) {
+      send({ jsonrpc: '2.0', id, error: 'boom' });
+      return;
+    }
     const name = params?.name;
     const args = params?.arguments ?? {};
     result(id, callTool(name, args));

@@ -1225,9 +1225,16 @@ function decodeAnsiC(span: string): string {
       const want = n === 'u' ? 4 : 8;
       const m = new RegExp(`^[0-9A-Fa-f]{1,${want}}`).exec(span.slice(i + 2));
       if (m) {
-        out += String.fromCodePoint(parseInt(m[0], 16));
-        i += 2 + m[0].length;
-        continue;
+        const cp = parseInt(m[0], 16);
+        // Out of range (> 0x10FFFF) makes String.fromCodePoint throw, which
+        // would break parseShell's "never throws" contract (the screeners
+        // call it unguarded). Fall through to the verbatim arm below, which
+        // keeps the escape literally, exactly like an unrecognised escape.
+        if (cp <= 0x10ffff) {
+          out += String.fromCodePoint(cp);
+          i += 2 + m[0].length;
+          continue;
+        }
       }
     }
     if (n === 'c') {

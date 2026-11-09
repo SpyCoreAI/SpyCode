@@ -15,7 +15,7 @@
  * import (H-6). Like everything else that touches the model, the query is a
  * parameterised FTS5 MATCH - user text is never interpolated into SQL.
  */
-import { closeSync, existsSync, mkdirSync, openSync, readSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
 import { getConfigPath } from '../config.js';
@@ -109,6 +109,15 @@ export function openSessionIndex(path?: string): DatabaseSyncInstance {
   }
   mkdirSync(dirname(p), { recursive: true });
   db = new DatabaseSync(p);
+  // The index holds task text + transcripts that may contain secrets, so it
+  // gets the house-standard 0600 like the journals and durable-memory
+  // files - the config dir being 0700 today is not a reason to leave the
+  // file itself world-readable by default umask.
+  try {
+    chmodSync(p, 0o600);
+  } catch {
+    /* best-effort on filesystems without POSIX modes (Windows) */
+  }
   db.exec(`
     CREATE TABLE IF NOT EXISTS runs (
       id TEXT PRIMARY KEY,

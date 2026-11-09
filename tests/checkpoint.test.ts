@@ -7,6 +7,7 @@ import { __resetConfigForTests } from '../src/lib/config.js';
 import {
   applyRewind,
   branchSession,
+  checkpointDirFor,
   latestSession,
   listSessions,
   loadSession,
@@ -79,6 +80,30 @@ describe('checkpoint journal', () => {
   test('an empty change list persists nothing', () => {
     expect(saveSession({ cwd: workDir, task: 't', changes: [] })).toBeNull();
     expect(listSessions(workDir)).toHaveLength(0);
+  });
+
+  test('a journal with a corrupt session-level id/task/startedAt is dropped, not fatal', () => {
+    // parseSession validated every change entry but never the session-level
+    // fields: a hand-edited journal with a numeric `id` threw inside the
+    // list sort (numericPrefix does id.split) and poisoned the WHOLE
+    // listing, even though every other session was fine.
+    writeFileSync(fp('a.txt'), 'A');
+    const change = { path: fp('a.txt'), op: 'modify', before: 'A0', after: 'A' } as RecordedChange;
+    const good = seed('good', [change])!;
+    const badId = seed('bad id', [change])!;
+    const badTask = seed('bad task', [change])!;
+    const badStarted = seed('bad startedAt', [change])!;
+    const dir = checkpointDirFor(workDir);
+    const corrupt = (id: string, patch: Record<string, unknown>): void => {
+      const file = join(dir, `${id}.json`);
+      const data = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
+      writeFileSync(file, JSON.stringify({ ...data, ...patch }));
+    };
+    corrupt(badId, { id: 42 });
+    corrupt(badTask, { task: 7 });
+    corrupt(badStarted, { startedAt: 1_700_000_000_000 });
+    const listed = listSessions(workDir);
+    expect(listed.map((s) => s.id)).toEqual([good]);
   });
 
   test('back-to-back sessions order newest-first with NO sleep (monotonic id sequence)', () => {

@@ -507,6 +507,23 @@ describe('the sync and async guards are one decision mechanism', () => {
 // ─────────────────────────────────────────────────────────────────────────
 
 describe('the reach this mechanism does NOT have, pinned so it cannot be forgotten', () => {
+  test('a malformed .spycoreignore rule does not crash the sync guard', async () => {
+    await withBed(async (b) => {
+      // `[z-a]` is a range out of order: new RegExp throws, and the sync
+      // guard used to have no try/catch anywhere up the chain, so agent
+      // startup died on a bad ignore file. The bad rule is skipped, the
+      // good rules still apply, and the built-in denylist is untouched.
+      writeFileSync(join(b.ws, '.spycoreignore'), '[z-a]\ninternal-notes.md\n[b-a]\n');
+      let guard: ReturnType<typeof loadSecretGuardSync>;
+      expect(() => {
+        guard = loadSecretGuardSync(b.ws);
+      }).not.toThrow();
+      expect(guard!(join(b.ws, 'internal-notes.md'))).toBe(true);
+      expect(guard!(join(b.ws, 'src/index.ts'))).toBe(false);
+      expect(guard!(join(b.ws, '.env'))).toBe(true);
+    });
+  });
+
   test('the SYNC guard carries the project .spycoreignore layer', async () => {
     await withBed(async (b) => {
       writeFileSync(join(b.ws, '.spycoreignore'), 'internal-notes.md\n');

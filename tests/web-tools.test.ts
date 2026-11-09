@@ -113,6 +113,18 @@ describe('registry: read-only, plan-mode-allowed, fully removable', () => {
       'https://example.com/docs',
     );
   });
+
+  test('describeCallArg drops MCP tool args entirely (no secret can leak)', () => {
+    // The label rides the --json event stream (users redirect it to
+    // files/CI logs), and MCP arguments are arbitrary server-defined JSON:
+    // a secret passed as an MCP argument (e.g. {"api_key": "sk-..."})
+    // fits in the 80-char truncation, and neither redactor closes it -
+    // redactFreeText misses the JSON-quoted form, the name-keyed pass
+    // misses credentials under ordinary-looking names. So no args at all.
+    expect(describeCallArg('mcp__srv__tool', { api_key: 'sk-live-abc123xyz' })).toBe('');
+    expect(describeCallArg('mcp__srv__tool', { query: 'hello' })).toBe('');
+    expect(describeCallArg('mcp__srv__tool', {})).toBe('');
+  });
 });
 
 describe('off-switch resolution (--no-web beats config; default on)', () => {

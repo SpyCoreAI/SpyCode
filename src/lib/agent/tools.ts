@@ -203,19 +203,54 @@ export const DEFAULT_DISPATCH_TIMEOUT_MS = 10 * 60 * 1000;
  * holds, the deadline slides instead of expiring: an open approval prompt
  * means a human is deciding, and that time must not consume the tool's
  * budget. A non-positive budget disables the timeout entirely.
+ *
+ * The timeout CANCELS the work, it does not just reject: `work` runs with a
+ * dispatch `AbortSignal` on `ctx.signal` (combined with any signal the
+ * caller already set), and the controller is aborted when the deadline
+ * expires. Tools that honour the signal - `run_command`'s child via
+ * `runShellCommand`, MCP calls via the bridge - actually stop; previously
+ * the watchdog only rejected while the work kept running, so a mutating
+ * tool's write could still land (and get journaled) after the user was told
+ * the call timed out. The previous signal is restored once the call
+ * settles, so a timed-out dispatch never leaves an aborted signal on the
+ * shared context for later calls.
  */
 function withDispatchTimeout<T>(ctx: ToolContext, work: () => Promise<T>): Promise<T> {
   const budget = ctx.dispatchTimeoutMs ?? DEFAULT_DISPATCH_TIMEOUT_MS;
   if (!(budget > 0)) return work();
   return new Promise<T>((resolve, reject) => {
+    const controller = new AbortController();
+    const parent = ctx.signal;
+    const onParentAbort = (): void => controller.abort(parent?.reason);
+    if (parent) {
+      if (parent.aborted) controller.abort(parent.reason);
+      else parent.addEventListener('abort', onParentAbort, { once: true });
+    }
+    const prevSignal = ctx.signal;
+    ctx.signal = controller.signal;
+    let finished = false;
     let deadline = Date.now() + budget;
-    const timer = setInterval(() => {
+    // Declared before the watchdog so the timer callback never references
+    // a binding below its own definition.
+    let timer: ReturnType<typeof setInterval> | undefined;
+    const cleanup = (): void => {
+      if (finished) return;
+      finished = true;
+      if (timer !== undefined) clearInterval(timer);
+      if (parent) parent.removeEventListener('abort', onParentAbort);
+      // Restore only if this dispatch's signal is still installed: a
+      // later dispatch on the same context must never be clobbered.
+      if (ctx.signal === controller.signal) ctx.signal = prevSignal;
+    };
+    timer = setInterval(() => {
       if (ctx.isApprovalInFlight?.()) {
         deadline = Date.now() + budget; // a human is deciding: slide, don't bill
         return;
       }
       if (Date.now() >= deadline) {
-        clearInterval(timer);
+        // Abort FIRST so the work stops, then report the timeout.
+        controller.abort();
+        cleanup();
         reject(new ToolError(`tool dispatch timed out after ${Math.round(budget / 1000)}s`));
       }
     }, 1000);
@@ -223,11 +258,11 @@ function withDispatchTimeout<T>(ctx: ToolContext, work: () => Promise<T>): Promi
     timer.unref?.();
     work().then(
       (value) => {
-        clearInterval(timer);
+        cleanup();
         resolve(value);
       },
       (err) => {
-        clearInterval(timer);
+        cleanup();
         reject(err);
       },
     );
@@ -446,10 +481,16 @@ export function describeCallArg(tool: string, args: Record<string, unknown>): st
     const t = optString(args, 'task') ?? '';
     return t.length > 80 ? `${t.slice(0, 80)}…` : t;
   }
-  // MCP tools (`mcp__server__tool`): show a compact one-line view of the args.
+  // MCP tools (`mcp__server__tool`): show NO args. The label rides the
+  // --json event stream, which users redirect to files/CI logs, and MCP
+  // arguments are arbitrary server-defined JSON - any value can be a secret
+  // under any key name, so no redactor closes this: redactFreeText misses
+  // the JSON-quoted form ({"api_key":"sk-..."}), and the name-keyed pass
+  // misses credentials under ordinary-looking names (see redact.ts F-2c-46).
+  // Dropping the dump is the only form that cannot leak; the tool NAME is
+  // the label, and the approved call itself is what the user consented to.
   if (tool.startsWith('mcp__')) {
-    const json = Object.keys(args).length > 0 ? JSON.stringify(args) : '';
-    return json.length > 80 ? `${json.slice(0, 80)}…` : json;
+    return '';
   }
   return '';
 }

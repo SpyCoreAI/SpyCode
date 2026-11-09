@@ -391,7 +391,7 @@ function MessageViewBody({ item, width }: MessageViewProps): ReactNode {
             {showFooter ? (
               <Box marginTop={1}>
                 <Text color={colors.muted}>
-                  {`${symbols.diamond} ${item.model}`}
+                  {`${symbols.diamond} ${sanitizeForDisplay(item.model)}`}
                   {elapsed ? ` ${symbols.middot} ${elapsed}` : ''}
                   {statusWord ? ` ${symbols.middot} ${statusWord}` : ''}
                 </Text>

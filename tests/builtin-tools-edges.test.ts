@@ -214,6 +214,60 @@ describe('grep', () => {
     const res = await run('grep', { pattern: 'needle' });
     expect(res.ok).toBe(true);
   });
+
+  test('a symlink cycle does not amplify grep results (dedup by realpath)', async () => {
+    // globby follows the cycle and surfaces the same file 41x on the
+    // pinned stack; grep must read and count each inode once, and the
+    // surviving spelling is the canonical one (real/a.txt), never the
+    // 41-deep loop/loop/... spelling. (beforeEach seeds a.txt + sub/b.txt,
+    // both matching, so the deduped total is 3.)
+    mkdirSync(fp('real'));
+    writeFileSync(fp('real/a.txt'), 'needle\n');
+    symlinkSync('.', fp('loop'));
+    const res = await run('grep', { pattern: 'needle' });
+    expect(res.ok).toBe(true);
+    expect(res.summary).toBe('3 matches in 3 files');
+    expect(res.content).toBe('a.txt:1:hello needle\nreal/a.txt:1:needle\nsub/b.txt:1:needle here');
+  });
+
+  test('a symlinked dir escaping the workspace does not enumerate the outside tree', async () => {
+    // A link to a 200-file outside tree from a 1-file workspace used to
+    // return 201 matches (the outside files, then dropped by containment
+    // only AFTER enumeration); the escaping dir is now ignored up front.
+    const outside = mkdtempSync(join(tmpdir(), 'spycli-builtin-outside-'));
+    try {
+      for (let i = 0; i < 200; i += 1) writeFileSync(join(outside, `o${i}.txt`), 'needle\n');
+      symlinkSync(outside, fp('escape'));
+      const globbed = await run('glob', { pattern: '**/*.txt' });
+      expect(globbed.ok).toBe(true);
+      expect(globbed.summary).toBe('2 files');
+      expect(globbed.content).toBe('a.txt\nsub/b.txt');
+      const grepped = await run('grep', { pattern: 'needle' });
+      expect(grepped.summary).toBe('2 matches in 2 files');
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  test('a symlinked file inside the workspace is still found once', async () => {
+    // Two spellings of one inode collapse to one result — and the survivor
+    // is the user-visible spelling: alias.txt and real.txt tie on length
+    // and dot-segments, so lexical order keeps alias.txt. A symlinked file
+    // is never dropped: link2 points at a gitignored target globby would
+    // otherwise never return, and it still surfaces under its link spelling.
+    writeFileSync(fp('real.txt'), 'needle\n');
+    symlinkSync(fp('real.txt'), fp('alias.txt'));
+    mkdirSync(fp('dist'));
+    writeFileSync(fp('dist/target.txt'), 'needle\n');
+    symlinkSync(fp('dist/target.txt'), fp('link2.txt'));
+    const globbed = await run('glob', { pattern: '**/*.txt' });
+    expect(globbed.ok).toBe(true);
+    expect(globbed.summary).toBe('4 files');
+    expect(globbed.content).toBe('a.txt\nalias.txt\nlink2.txt\nsub/b.txt');
+    const grepped = await run('grep', { pattern: 'needle' });
+    expect(grepped.summary).toBe('4 matches in 4 files');
+    expect(grepped.content).toContain('link2.txt:1:needle');
+  });
 });
 
 describe('repo_map', () => {

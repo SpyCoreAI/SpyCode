@@ -239,6 +239,46 @@ describe('N25 dispatch contract', () => {
     h.release();
   });
 
+  // Mutation: drop the dispatch AbortSignal (time out without cancelling).
+  test('N25 a dispatch timeout aborts the work through ctx.signal', async () => {
+    fake();
+    let aborted = false;
+    const tool = extraTool('mcp__x__waits', (_args, c) => {
+      const sig = c.signal;
+      if (!sig) return Promise.resolve({ ok: false, summary: 'no signal', content: 'no signal' });
+      return new Promise<ToolResult>((resolve) => {
+        if (sig.aborted) {
+          aborted = true;
+          resolve({ ok: false, summary: 'aborted', content: 'aborted' });
+          return;
+        }
+        sig.addEventListener(
+          'abort',
+          () => {
+            aborted = true;
+            resolve({ ok: false, summary: 'aborted', content: 'aborted' });
+          },
+          { once: true },
+        );
+      });
+    });
+    const done = dispatchTool(
+      'mcp__x__waits',
+      {},
+      ctx({ dispatchTimeoutMs: 5_000, extraTools: new Map([[tool.name, tool]]) }),
+    );
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(await done).toEqual({
+      ok: false,
+      summary: 'tool dispatch timed out after 5s',
+      content: 'Error: tool dispatch timed out after 5s',
+    });
+    // The timeout used to only reject while the work kept running - a
+    // mutating tool's write could still land afterwards. The work itself
+    // must observe the abort.
+    expect(aborted).toBe(true);
+  });
+
   // Mutation: `budget > 0` → `budget >= 0`.
   test.each([0, -5])('N25 a dispatch timeout of %s disables the watchdog', async (dispatchTimeoutMs) => {
     fake();

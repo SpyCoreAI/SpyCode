@@ -534,6 +534,21 @@ function parseSession(file: string): CheckpointSession | null {
   try {
     const data = JSON.parse(readFileSync(file, 'utf8')) as CheckpointSession;
     if (!data || typeof data !== 'object' || !Array.isArray(data.changes)) return null;
+    // Session-level fields are used unguarded downstream: listSessions sorts
+    // on `id` via numericPrefix (`id.split`), rewind --list renders `task`
+    // (truncate does `s.length`) and `startedAt` (relTime is tolerant of
+    // anything Date.parse rejects, so a MISSING startedAt is harmless and
+    // stays listable — an existing pin writes journals without it — but a
+    // PRESENT non-string startedAt is corrupt data and drops the session).
+    // A hand-edited journal with a non-string id used to throw inside the
+    // sort and poison the whole listing, even though every other session
+    // was fine. Drop the corrupt session like any other corrupt one.
+    if (typeof data.id !== 'string' || typeof data.task !== 'string') {
+      return null;
+    }
+    if (data.startedAt !== undefined && typeof data.startedAt !== 'string') {
+      return null;
+    }
     // Validate every change entry: a hand-edited or corrupt journal with a
     // non-string `path`/`before` used to reach `planRewind`, where
     // `sha256(before)` or `currentSha(path)` threw on the bad type. Invalid
@@ -873,6 +888,21 @@ export function planRedo(session: CheckpointSession): RestoreStep[] {
   for (const change of session.changes) {
     const cur = expected(change.path);
     const beforeSha = change.before === null ? null : sha256(change.before);
+    // Existence guards FIRST, before the sha guard: for a real journal a
+    // create always has `before` null, so a recreated file fails the sha
+    // guard (`cur !== null` vs `beforeSha === null`) and used to be
+    // misreported "modified since undo" - the inner existence checks below
+    // the guard could never fire. Checked first, a recreated file is
+    // reported "recreated since undo" and a re-deleted file "deleted since
+    // undo", and the sha guard below keeps its "modified since undo" meaning.
+    if (change.op === 'create' && cur !== null) {
+      steps.push({ change, action: 'skip', reason: 'recreated since undo' });
+      continue;
+    }
+    if (change.op === 'delete' && cur === null) {
+      steps.push({ change, action: 'skip', reason: 'deleted since undo' });
+      continue;
+    }
     // Guard: file must still be in the undone state (matches `before`).
     // If user modified it after undo, skip to avoid destroying edits.
     if (cur !== beforeSha) {
@@ -881,22 +911,12 @@ export function planRedo(session: CheckpointSession): RestoreStep[] {
     }
     if (change.op === 'create') {
       // Agent created the file - redo recreates it with `after` content.
-      // Guard: file must not exist (it was deleted by undo).
-      if (cur !== null) {
-        steps.push({ change, action: 'skip', reason: 'recreated since undo' });
-      } else {
-        steps.push({ change, action: 'restore' });
-        sim.set(change.path, sha256(change.after));
-      }
+      steps.push({ change, action: 'restore' });
+      sim.set(change.path, sha256(change.after));
     } else if (change.op === 'delete') {
       // Agent deleted the file - redo deletes it again.
-      // Guard: file must exist (it was restored by undo).
-      if (cur === null) {
-        steps.push({ change, action: 'skip', reason: 'deleted since undo' });
-      } else {
-        steps.push({ change, action: 'delete' });
-        sim.set(change.path, null);
-      }
+      steps.push({ change, action: 'delete' });
+      sim.set(change.path, null);
     } else {
       // Agent modified the file - redo writes the `after` content.
       steps.push({ change, action: 'restore' });

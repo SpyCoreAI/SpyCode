@@ -34,6 +34,7 @@ import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import { randomBytes } from 'node:crypto';
 import { loadSecretGuard } from './secrets.js';
+import { isInsideReal } from '../path-containment.js';
 import { redactFreeText } from '../redact.js';
 import { matchesCatastrophic } from './command-screen.js';
 import { findInvisibleUnicode, invisibleUnicodeNotice } from './command-screen.js';
@@ -187,6 +188,123 @@ export const listDirTool: ToolDefinition = {
 };
 registerTool(listDirTool);
 
+/**
+ * Symlink discipline for the three tree scans (`glob`, `grep`, `repo_map`).
+ *
+ * globby follows symlinks by default with no cycle protection, which showed
+ * up two ways on the pinned stack: a symlink cycle surfaces the same file
+ * 41x (deterministic across sync/async/stream), and a symlinked directory
+ * pointing outside the workspace makes globby enumerate the ENTIRE outside
+ * tree (5,000 files from a 1-file workspace) before `makeContainmentFilter`
+ * drops the results - an unbounded-cost stall from one repo-supplied link.
+ *
+ * Two complementary bounds, both result-preserving:
+ * 1. `escapingSymlinkDirIgnores` pre-filters symlinked directories that
+ *    resolve OUTSIDE the workspace into globby's `ignore`, so the outside
+ *    tree is never enumerated. Only escaping dirs are ignored: following
+ *    symlinks IS intended for files (a symlinked file inside the workspace
+ *    is a legitimate result), and a symlinked dir staying inside is still
+ *    traversed.
+ * 2. `dedupeMatchesByRealpath` collapses matches naming one inode through
+ *    different spellings after the scan, so cycle amplification cannot
+ *    inflate counts, stats, or samples even when the traversal itself
+ *    still visits the cycle.
+ */
+const MAX_SYMLINK_SCAN_ENTRIES = 200_000;
+
+function escapingSymlinkDirIgnores(cwd: string): string[] {
+  const ignores: string[] = [];
+  let realCwd: string;
+  try {
+    realCwd = realpathSync(cwd);
+  } catch {
+    return ignores;
+  }
+  // Real directories only on the stack: symlinked dirs are judged, never
+  // descended into, so a cycle cannot loop this walk itself.
+  const stack: string[] = [cwd];
+  let seenEntries = 0;
+  try {
+    while (stack.length > 0) {
+      const dir = stack.pop() as string;
+      let dirents;
+      try {
+        dirents = readdirSync(dir, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const d of dirents) {
+        seenEntries += 1;
+        if (seenEntries > MAX_SYMLINK_SCAN_ENTRIES) return ignores;
+        if (ALWAYS_IGNORE_NAMES.has(d.name)) continue;
+        const abs = join(dir, d.name);
+        if (d.isSymbolicLink()) {
+          let real: string;
+          let st;
+          try {
+            real = realpathSync(abs);
+            st = statSync(abs);
+          } catch {
+            continue; // dangling link - globby skips it too
+          }
+          if (!st.isDirectory()) continue; // symlinked FILES are legitimate results
+          if (!isInsideReal(realCwd, real)) {
+            ignores.push(`${toPosix(relative(cwd, abs))}/**`);
+          }
+          continue;
+        }
+        if (d.isDirectory()) stack.push(abs);
+      }
+    }
+  } catch {
+    /* best-effort: a failed walk degrades to no pre-filter, dedup still applies */
+  }
+  return ignores;
+}
+
+/**
+ * Collapse globby matches that name the same file through different
+ * spellings (a symlink cycle, or two links to one file). The survivor is
+ * the canonical spelling: the real file over a symlink spelling, then the
+ * shortest path, then lexical - so a 41-deep `loop/loop/.../real/a.txt`
+ * cycle spelling never wins over `real/a.txt`, and a symlinked file whose
+ * target is otherwise unreachable still survives (once) under its link
+ * spelling. Legitimate symlinked files are preserved exactly once, never
+ * dropped.
+ */
+function dedupeMatchesByRealpath(cwd: string, matches: string[]): string[] {
+  // Survivor rank: fewest path segments first (a 41-deep cycle spelling
+  // never beats the canonical one), then fewest dot-segments (the
+  // user-visible spelling wins over an internal one — an in-workspace
+  // symlinked directory's link path must stay searchable even when the
+  // real file also lives under a dot-dir, pinned by security-redteam),
+  // then lexical. A symlinked file is never dropped: it survives once,
+  // under whichever spelling ranks first.
+  const rank = (m: string): [number, number, string] => {
+    const segs = m.split('/');
+    return [segs.length, segs.filter((s) => s.startsWith('.')).length, m];
+  };
+  const best = new Map<string, { m: string; r: [number, number, string] }>();
+  for (const m of matches) {
+    let key: string;
+    try {
+      key = realpathSync(join(cwd, m));
+    } catch {
+      key = join(cwd, m);
+    }
+    const r = rank(m);
+    const prev = best.get(key);
+    if (
+      prev === undefined ||
+      r[0] < prev.r[0] ||
+      (r[0] === prev.r[0] && (r[1] < prev.r[1] || (r[1] === prev.r[1] && r[2] < prev.r[2])))
+    ) {
+      best.set(key, { m, r });
+    }
+  }
+  return [...best.values()].map((v) => v.m).sort((a, b) => a.localeCompare(b));
+}
+
 export const globTool: ToolDefinition = {
   name: 'glob',
   description:
@@ -203,13 +321,17 @@ export const globTool: ToolDefinition = {
     assertContainedGlob(pattern); // reads must stay inside cwd (no ../ or absolute)
     const { globby } = await import('globby');
     let matches: string[];
+    // Escaping symlinked dirs are ignored BEFORE enumeration (see the
+    // symlink discipline above): without this a link to / or $HOME makes
+    // the scan enumerate the outside tree and only then get filtered.
+    const symlinkIgnores = escapingSymlinkDirIgnores(ctx.cwd);
     try {
       matches = await globby(pattern, {
         cwd: ctx.cwd,
         gitignore: true,
         dot: true,
         onlyFiles: true,
-        ignore: ALWAYS_IGNORE_GLOBS,
+        ignore: [...ALWAYS_IGNORE_GLOBS, ...symlinkIgnores],
         suppressErrors: true,
       });
     } catch {
@@ -220,6 +342,9 @@ export const globTool: ToolDefinition = {
     // Confine to cwd (hard backstop) THEN drop secret paths.
     matches = matches.filter((f) => inside(f) && !isSecret(join(ctx.cwd, f)));
     matches.sort((a, b) => a.localeCompare(b));
+    // A symlink cycle surfaces one file up to 41x; collapse to one entry
+    // per inode (legitimate symlinked files are kept, once).
+    matches = dedupeMatchesByRealpath(ctx.cwd, matches);
     const total = matches.length;
     const shown = matches.slice(0, ctx.limits.maxEntries);
     let content = shown.length > 0 ? shown.join('\n') : '(no matches)';
@@ -275,17 +400,20 @@ export const grepTool: ToolDefinition = {
     }
 
     const { globby } = await import('globby');
-    const files = (
+    const found = (
       await globby(patterns, {
         cwd: ctx.cwd,
         gitignore: true,
         dot: true,
         onlyFiles: true,
-        ignore: ALWAYS_IGNORE_GLOBS,
+        ignore: [...ALWAYS_IGNORE_GLOBS, ...escapingSymlinkDirIgnores(ctx.cwd)],
         suppressErrors: true,
       })
     ).filter(makeContainmentFilter(ctx.cwd)); // never read outside cwd
-    files.sort((a, b) => a.localeCompare(b));
+    found.sort((a, b) => a.localeCompare(b));
+    // A symlink cycle surfaces one file up to 41x: read and count each
+    // inode once (legitimate symlinked files are kept, once).
+    const files = dedupeMatchesByRealpath(ctx.cwd, found);
     // One realpath memo for the whole scan: the guard resolves every path
     // it judges, and a tree scan judges thousands.
     const isSecret = await loadSecretGuard(ctx.cwd, { realPathCache: new Map() });
@@ -389,16 +517,19 @@ export const repoMapTool: ToolDefinition = {
     topDirs.sort((a, b) => a.localeCompare(b));
     topFiles.sort((a, b) => a.localeCompare(b));
 
-    const all = (
-      await globby(['**/*'], {
-        cwd: ctx.cwd,
-        gitignore: true,
-        dot: false,
-        onlyFiles: true,
-        ignore: ALWAYS_IGNORE_GLOBS,
-        suppressErrors: true,
-      })
-    ).filter((f) => inside(f) && !isSecret(join(ctx.cwd, f)));
+    const all = dedupeMatchesByRealpath(
+      ctx.cwd,
+      (
+        await globby(['**/*'], {
+          cwd: ctx.cwd,
+          gitignore: true,
+          dot: false,
+          onlyFiles: true,
+          ignore: [...ALWAYS_IGNORE_GLOBS, ...escapingSymlinkDirIgnores(ctx.cwd)],
+          suppressErrors: true,
+        })
+      ).filter((f) => inside(f) && !isSecret(join(ctx.cwd, f))),
+    );
     const sample = all.slice(0, 8000);
     const extCount = new Map<string, number>();
     for (const f of sample) {

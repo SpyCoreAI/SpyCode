@@ -243,9 +243,17 @@ function parseIgnoreRules(text: string): IgnoreRule[] {
     const body = globToRegex(line);
     // A slash-less pattern matches a basename at any depth; a slashed one is
     // anchored at the root and must match the whole relative path.
-    const regex = anchored
-      ? new RegExp('^' + body + '$')
-      : new RegExp('(^|/)' + body + '$');
+    // A malformed class (e.g. `[z-a]`, range out of order) makes the RegExp
+    // constructor throw - that must not take the whole guard down (the sync
+    // guard has no try/catch above it, unlike the async loader): skip the
+    // bad rule and keep the rest, so one bad line degrades instead of
+    // crashing agent startup.
+    let regex: RegExp;
+    try {
+      regex = anchored ? new RegExp('^' + body + '$') : new RegExp('(^|/)' + body + '$');
+    } catch {
+      continue;
+    }
     rules.push({ negated, dirOnly, regex });
   }
   return rules;
@@ -290,7 +298,15 @@ function loadIgnorePredSync(cwd: string): SecretGuard {
   } catch {
     return NO_IGNORE;
   }
-  const rules = parseIgnoreRules(text);
+  // Belt and braces beside the per-rule skip in parseIgnoreRules: if rule
+  // parsing itself ever throws, degrade to denylist-only exactly like the
+  // async loader (loadIgnorePred) does, instead of crashing the caller.
+  let rules: IgnoreRule[];
+  try {
+    rules = parseIgnoreRules(text);
+  } catch {
+    return NO_IGNORE;
+  }
   if (rules.length === 0) return NO_IGNORE;
   return (abs) => {
     const rel = relative(cwd, abs).split(sep).join('/');

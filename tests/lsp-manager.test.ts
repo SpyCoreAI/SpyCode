@@ -108,19 +108,24 @@ describe('commandExists', () => {
     expect(commandExists('definitely-not-a-real-binary-xyz')).toBe(false);
   });
 
-  test('finds a fake executable prepended to PATH', () => {
-    const bin = mkdtempSync(join(tmpdir(), 'spycli-lsp-bin-'));
+  test('a relative override command is resolved against the workspace cwd, not the process cwd', () => {
+    // commandExists probed a relative command against the PROCESS cwd while
+    // the server spawns with cwd = the workspace root, so `./scripts/lsp.sh`
+    // in the workspace was wrongly rejected (and a same-named script where
+    // the CLI happened to launch from was wrongly accepted).
+    const ws = mkdtempSync(join(tmpdir(), 'spycli-lsp-ws-'));
+    const elsewhere = mkdtempSync(join(tmpdir(), 'spycli-lsp-elsewhere-'));
     try {
-      // Windows resolves a bare command name through PATHEXT only: an
-      // extensionless file is never found, whatever its mode bits. The
-      // Windows leg therefore plants a `.cmd` and still looks the bare name
-      // up, which exercises the real PATHEXT resolution commandExists does.
-      const exe = join(bin, process.platform === 'win32' ? 'fake-ls-binary.cmd' : 'fake-ls-binary');
+      mkdirSync(join(ws, 'scripts'));
+      const exe = join(ws, 'scripts', 'spycore-lsp-probe-xyz.sh');
       writeFileSync(exe, '#!/bin/sh\n', { mode: 0o755 });
-      process.env.PATH = `${bin}${delimiter}${process.env.PATH ?? ''}`;
-      expect(commandExists('fake-ls-binary')).toBe(true);
+      expect(commandExists('./scripts/spycore-lsp-probe-xyz.sh', ws)).toBe(true);
+      expect(commandExists('./scripts/spycore-lsp-probe-xyz.sh', elsewhere)).toBe(false);
+      // Without a cwd the old behaviour is unchanged (process cwd).
+      expect(commandExists('./scripts/spycore-lsp-probe-xyz.sh')).toBe(false);
     } finally {
-      rmSync(bin, { recursive: true, force: true });
+      rmSync(ws, { recursive: true, force: true });
+      rmSync(elsewhere, { recursive: true, force: true });
     }
   });
 });

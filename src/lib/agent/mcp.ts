@@ -59,7 +59,12 @@ export interface McpClientHandle {
   readonly serverInfo: { name?: string; version?: string } | null;
   readonly protocolVersion: string | null;
   listTools(): Promise<McpToolDef[]>;
-  callTool(name: string, args: Record<string, unknown>, timeoutMs?: number): Promise<McpCallResult>;
+  callTool(
+    name: string,
+    args: Record<string, unknown>,
+    timeoutMs?: number,
+    signal?: AbortSignal,
+  ): Promise<McpCallResult>;
   kill(): void;
   shutdown(): Promise<void>;
 }
@@ -375,7 +380,10 @@ function makeWrapper(
       const timeoutMs = callTimeoutMs ?? ctx.commandTimeoutMs;
       let result;
       try {
-        result = await client.callTool(tool.name, args, timeoutMs);
+        // The dispatch-timeout signal (tools.ts) rides ctx.signal: aborting
+        // it cancels the in-flight JSON-RPC request instead of leaving the
+        // server call running after dispatch already reported a timeout.
+        result = await client.callTool(tool.name, args, timeoutMs, ctx.signal);
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
         return {

@@ -139,6 +139,28 @@ interface JsonRpcResponse {
 export class McpError extends Error {}
 
 /**
+ * Render a JSON-RPC `error` value for the rejection message. Servers may
+ * send a non-object error (a bare string, a number, null) - reading
+ * `.message` off one of those used to produce the content-free
+ * "undefined (code undefined)" and swallow the actual error text.
+ */
+export function describeRpcError(error: unknown): string {
+  if (typeof error === 'string') return error;
+  if (isObject(error)) {
+    const message = typeof error.message === 'string' ? error.message : '';
+    const code = typeof error.code === 'number' || typeof error.code === 'string' ? error.code : undefined;
+    if (message.length > 0) return code !== undefined ? `${message} (code ${code})` : message;
+    if (code !== undefined) return `MCP error (code ${code})`;
+  }
+  try {
+    const json = JSON.stringify(error);
+    return json === undefined ? String(error) : json;
+  } catch {
+    return String(error);
+  }
+}
+
+/**
  * Global registry of live stdio MCP clients (M1). The agent's SIGTERM
  * handler uses `shutdownAllMcpClients()` for orderly teardown so `runs kill`
  * does not orphan MCP server processes. Clients register on successful
@@ -307,8 +329,9 @@ export class McpStdioClient {
     name: string,
     args: Record<string, unknown>,
     timeoutMs?: number,
+    signal?: AbortSignal,
   ): Promise<McpCallResult> {
-    const result = await this.request('tools/call', { name, arguments: args }, timeoutMs);
+    const result = await this.request('tools/call', { name, arguments: args }, timeoutMs, signal);
     if (!isObject(result)) return { content: [], isError: false };
     const content = Array.isArray(result.content)
       ? result.content.filter(isObject).map((c) => c as McpContent)
@@ -338,20 +361,50 @@ export class McpStdioClient {
     }
   }
 
-  private request(method: string, params: Record<string, unknown>, timeoutMs?: number): Promise<unknown> {
+  private request(
+    method: string,
+    params: Record<string, unknown>,
+    timeoutMs?: number,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
     const id = this.nextId++;
     return new Promise<unknown>((resolve, reject) => {
+      // A dispatch-timeout (or run abort) cancels the in-flight request
+      // instead of leaving it pending until the server answers or the
+      // per-request timeout fires.
+      const onAbort = (): void => {
+        if (this.pending.delete(id)) {
+          clearTimeout(timer);
+          reject(new McpError(`request "${method}" aborted`));
+        }
+      };
       const timer = setTimeout(() => {
         if (this.pending.delete(id)) {
+          if (signal) signal.removeEventListener('abort', onAbort);
           reject(new McpError(`request "${method}" timed out after ${timeoutMs ?? this.requestTimeoutMs}ms`));
         }
       }, timeoutMs ?? this.requestTimeoutMs);
-      this.pending.set(id, { resolve, reject, timer });
+      // Completions detach the abort listener, so a settled request does
+      // not pin the pending entry through the signal.
+      const wrappedResolve = (value: unknown): void => {
+        if (signal) signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      };
+      const wrappedReject = (err: Error): void => {
+        if (signal) signal.removeEventListener('abort', onAbort);
+        reject(err);
+      };
+      this.pending.set(id, { resolve: wrappedResolve, reject: wrappedReject, timer });
+      if (signal) {
+        if (signal.aborted) onAbort();
+        else signal.addEventListener('abort', onAbort, { once: true });
+      }
       try {
         this.send({ jsonrpc: '2.0', id, method, params });
       } catch (err) {
         this.pending.delete(id);
         clearTimeout(timer);
+        if (signal) signal.removeEventListener('abort', onAbort);
         reject(err instanceof McpError ? err : new McpError(String(err)));
       }
     });
@@ -411,7 +464,7 @@ export class McpStdioClient {
       if (!pending) return;
       this.pending.delete(res.id);
       clearTimeout(pending.timer);
-      if (res.error) pending.reject(new McpError(`${res.error.message} (code ${res.error.code})`));
+      if (res.error) pending.reject(new McpError(describeRpcError(res.error)));
       else pending.resolve(res.result);
       return;
     }

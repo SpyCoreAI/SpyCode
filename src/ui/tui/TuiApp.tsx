@@ -20,15 +20,12 @@ import {
   randomBytes,
 } from 'node:crypto';
 import {
-  isAbsolute,
   join,
   relative,
   resolve,
-  sep,
 } from 'node:path';
 import {
   readFileSync,
-  statSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -57,6 +54,12 @@ import {
 import {
   sanitizeForDisplay,
 } from '../../lib/sanitize-display.js';
+import {
+  loadSecretGuardSync,
+} from '../../lib/agent/secrets.js';
+import {
+  resolveMentionTarget,
+} from './mention-guard.js';
 import {
   ApprovalView,
   errMessage,
@@ -474,6 +477,13 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
           gitignore: true,
           onlyFiles: true,
           deep: 5,
+          // Symlinked directories are not followed: an escaping link would
+          // make the mount-time index enumerate an outside tree (a link to
+          // / or $HOME) and slow startup for a suggestions list that is
+          // best-effort anyway. Symlinked FILES inside the workspace are
+          // still listed by their link path - only directory traversal is
+          // cut, matching the read tools' containment discipline.
+          followSymbolicLinks: false,
           ignore: ['**/node_modules/**', '**/.git/**'],
         });
         if (!cancelled) fileListRef.current = (files as string[]).slice(0, 2000).sort();
@@ -490,6 +500,9 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
   const resolveMentions = (text: string): { text: string; context: string } => {
     const seen = new Set<string>();
     const blocks: string[] = [];
+    // One secret guard for the whole call (denylist + .spycoreignore),
+    // shared across tokens by resolveMentionTarget.
+    const guard = loadSecretGuardSync(cwd);
     const re = /(^|\s)@([^\s@][^\s]*)/g;
     let m: RegExpExecArray | null;
     while ((m = re.exec(text)) !== null && blocks.length < MAX_MENTION_FILES) {
@@ -498,15 +511,14 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
       seen.add(rawPath);
       const abs = resolve(cwd, rawPath);
       // D4: contain mentions under cwd - `@../../etc/passwd` or `@/etc/passwd`
-      // must not exfiltrate files outside the project.
-      const rel = relative(cwd, abs);
-      if (rel.startsWith('..') || isAbsolute(rel)) continue;
-      // D4: skip dotfiles (.env, .ssh, etc.) - never auto-attach secrets.
-      if (rel.split(sep).some((part) => part.startsWith('.'))) continue;
+      // must not exfiltrate files outside the project. The check is done on
+      // the RESOLVED path (mention-guard.ts): the old spelling-only check
+      // let a `notes.md -> .env` symlink read the secret file out in full.
+      // One guard is built for the whole call, not one per token.
+      const target = resolveMentionTarget(cwd, abs, { maxBytes: MAX_MENTION_BYTES, guard });
+      if (!target) continue;
       try {
-        const st = statSync(abs);
-        if (!st.isFile() || st.size > MAX_MENTION_BYTES) continue;
-        const content = readFileSync(abs, 'utf8');
+        const content = readFileSync(target.realAbs, 'utf8');
         const lines = content.split('\n');
         const shown = lines.slice(0, MAX_MENTION_LINES).join('\n');
         blocks.push(
@@ -1007,19 +1019,19 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
     if (lines.length === 1) {
       const candidate = lines[0]!.trim();
       if (candidate.length > 0 && candidate.length <= 500 && !candidate.includes('\0')) {
-        try {
-          const abs = resolve(cwd, candidate);
-          // D4: same containment + dotfile policy as @-mentions.
-          const rel = relative(cwd, abs);
-          if (!rel.startsWith('..') && !isAbsolute(rel) && !rel.split(sep).some((p) => p.startsWith('.'))) {
-            const st = statSync(abs);
-            if (st.isFile() && st.size <= MAX_MENTION_BYTES) {
-              updateComposer((prev) => insertText(prev, `@${rel} `));
-              return;
-            }
-          }
-        } catch {
-          /* not a readable file - fall through to plain insert */
+        // D4: same resolved-path policy as @-mentions (mention-guard.ts) -
+        // a pasted path naming a symlinked file used to auto-become an
+        // @-mention and flow through resolveMentions with only a
+        // spelling-only check, so a link to a secret file was attachable
+        // with one paste. The inserted token keeps the pasted (lexical)
+        // spelling; resolveMentions re-checks the resolved target at submit.
+        const target = resolveMentionTarget(cwd, resolve(cwd, candidate), {
+          maxBytes: MAX_MENTION_BYTES,
+        });
+        if (target) {
+          const rel = relative(cwd, target.abs);
+          updateComposer((prev) => insertText(prev, `@${rel} `));
+          return;
         }
       }
       updateComposer((prev) => insertText(prev, text));
@@ -1095,7 +1107,11 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
       summary = summary.trim();
       if (summary.length === 0) throw new Error('The model returned an empty summary.');
       const count = serial.count;
-      setItems([{ kind: 'summary', id: nextId.current++, text: summary, items: count }]);
+      // Sanitize at push time, like every other model-text push: the summary
+      // is model-generated and rendered raw by the Markdown view (and by the
+      // transcript-search excerpt), so an injected ANSI/OSC sequence here
+      // would reach the terminal.
+      setItems([{ kind: 'summary', id: nextId.current++, text: sanitizeForDisplay(summary), items: count }]);
       // N1: the old transcript is gone - its peek entries must go with it.
       elidedRef.current.clear();
       pushNotice('success', `Transcript compacted: ${count} items summarized.`);
@@ -1199,7 +1215,7 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
         } catch (err) {
           pushNotice(
             'warning',
-            `Undo failed: ${err instanceof Error ? err.message : 'unknown error'} - files unchanged.`,
+            sanitizeForDisplay(`Undo failed: ${err instanceof Error ? err.message : 'unknown error'} - files unchanged.`),
           );
         }
         forceRender();
@@ -1257,7 +1273,7 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
         } catch (err) {
           pushNotice(
             'warning',
-            `Redo failed: ${err instanceof Error ? err.message : 'unknown error'} - files unchanged.`,
+            sanitizeForDisplay(`Redo failed: ${err instanceof Error ? err.message : 'unknown error'} - files unchanged.`),
           );
         }
         forceRender();
@@ -1273,7 +1289,7 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
     try {
       target = resolveResumeTarget(cwd, ref ?? true);
     } catch (err) {
-      pushNotice('error', errMessage(err));
+      pushNotice('error', sanitizeForDisplay(errMessage(err)));
       return;
     }
     const { session, state } = target;
@@ -1632,7 +1648,7 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
             const result = await getTypeScriptDiagnostics(cwd);
             pushNotice('info', formatDiagnostics(result));
           } catch (err) {
-            pushNotice('warning', `Diagnostics failed: ${err instanceof Error ? err.message : 'unknown error'}`);
+            pushNotice('warning', sanitizeForDisplay(`Diagnostics failed: ${err instanceof Error ? err.message : 'unknown error'}`));
           }
           forceRender();
         })();
@@ -2538,7 +2554,7 @@ export function TuiApp({ initialTheme, probedMode, loggedIn, apiUrl, commandRule
             <Box flexDirection="column" marginTop={1}>
               {suggestions.slice(0, 6).map((s) => (
                 <Text key={s} color={colors.muted}>
-                  {`  ${s}`}
+                  {`  ${sanitizeForDisplay(s)}`}
                 </Text>
               ))}
               <Text color={colors.muted}>Tab to accept</Text>

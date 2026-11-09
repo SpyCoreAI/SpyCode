@@ -3,7 +3,7 @@
  * ranks tasks above transcript noise, and the FTS5 query builder cannot be
  * injected through (quotes neutralize FTS5 operators).
  */
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
@@ -12,6 +12,7 @@ import {
   chunkText,
   indexRun,
   indexedRunCount,
+  openSessionIndex,
   searchSessions,
   toFts5Query,
   unindexRun,
@@ -59,6 +60,18 @@ describe('chunkText / toFts5Query', () => {
 });
 
 describe('indexRun / searchSessions', () => {
+  test('the index DB is created at 0600 like the journals', () => {
+    const d = freshDir();
+    const p = join(d, 'sessions.sqlite');
+    openSessionIndex(p);
+    __closeSessionIndexForTests();
+    // Windows has no POSIX modes: Node reports 0o666 for every file whatever
+    // was requested. Only the mode assertion is POSIX-only.
+    if (process.platform !== 'win32') {
+      expect(statSync(p).mode & 0o777).toBe(0o600);
+    }
+  });
+
   test('a task is findable by keyword', () => {
     const d = freshDir();
     indexRun({ ...RUN, logFile: '' }, join(d, 'idx.db'));

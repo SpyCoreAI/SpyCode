@@ -22,6 +22,15 @@ describe('toBudgetCaps', () => {
     expect(toBudgetCaps({ maxTokens: 1000.9 })).toEqual({ maxTokens: 1000 });
   });
 
+  test('fractional caps below 1 throw instead of silently uncapping', () => {
+    // A value in (0, 1) passes the positivity check but floors to 0, and a
+    // 0 cap reads as "uncapped" downstream - so --max-tokens 0.5 used to
+    // run with NO token cap at all.
+    expect(() => toBudgetCaps({ maxTokens: 0.5 })).toThrow('--max-tokens must be at least 1');
+    expect(() => toBudgetCaps({ maxTimeMs: 0.5 })).toThrow('--max-time must be at least 1ms');
+    expect(() => toBudgetCaps({ maxTurns: 0.5 })).toThrow('--max-turns must be at least 1');
+  });
+
   test('non-positive / non-finite caps throw instead of silently uncapping', () => {
     // --max-tokens abc / 0 used to run with NO token cap at all.
     for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {

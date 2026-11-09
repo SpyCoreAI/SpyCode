@@ -138,6 +138,29 @@ describe('memory tool dispatch arms', () => {
     expect(readDurableFile('memory', cfgDir)).toContain('keep me');
   });
 
+  test('the landed write is exactly the approved diff, even if the file changed during approval', async () => {
+    // TOCTOU: the approved diff was computed from the pre-approval read,
+    // but the write used to RE-READ the file - so for `remove`, a line
+    // added during the (unbounded) approval pause that matched the needle
+    // was deleted without ever appearing in the approved diff. The write
+    // now reuses the approved snapshot, so exactly the approved diff lands.
+    // Trade-off, pinned here: a concurrent edit made during the pause is
+    // overwritten by the approved snapshot (same last-writer-wins as an
+    // approved write_file), rather than silently changing what lands.
+    appendDurableMemory('memory', ['keep me'], cfgDir);
+    const mutatingApproval = async (): Promise<{ approved: boolean }> => {
+      appendDurableMemory('memory', ['concurrent line, added during approval'], cfgDir);
+      return { approved: true };
+    };
+    const added = await dispatchTool(
+      'memory',
+      { action: 'add', text: 'a new entry' },
+      { cwd: tmpdir(), limits: DEFAULT_LIMITS, requestApproval: mutatingApproval },
+    );
+    expect(added.ok).toBe(true);
+    expect(readDurableFile('memory', cfgDir)).toBe('- keep me\n- a new entry\n');
+  });
+
   test('remove of two lines reports the plural', async () => {
     appendDurableMemory('memory', ['drop one', 'drop two', 'keep me'], cfgDir);
     const removed = await run({ action: 'remove', match: 'drop' });

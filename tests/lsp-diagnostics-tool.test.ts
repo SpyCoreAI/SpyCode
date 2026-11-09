@@ -79,6 +79,21 @@ describe('diagnostics tool', () => {
     expect(res.content).toMatch(/TS2304/);
   });
 
+  test('refuses a non-regular file instead of blocking on the read', async () => {
+    // A FIFO reports size 0, passes the size cap, and readFileSync blocks
+    // until a writer opens it - the timeout only covers waiting for
+    // diagnostics. A directory exercises the same isFile() refusal without
+    // hanging the suite (a FIFO would block the old code indefinitely).
+    writeLspConfig({
+      enabled: true,
+      servers: { typescript: { command: process.execPath, args: [FIXTURE] } },
+    });
+    mkdirSync(join(cwd, 'dir.ts'));
+    const res = await dispatchTool('diagnostics', { path: 'dir.ts' }, ctx);
+    expect(res.ok).toBe(false);
+    expect(res.content).toMatch(/not a regular file/);
+  });
+
   test('rejects paths outside the sandbox', async () => {
     process.env.SPYCODE_LSP = '1';
     const res = await dispatchTool('diagnostics', { path: '../escape.ts' }, ctx);

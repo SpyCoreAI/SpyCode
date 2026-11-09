@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { freshConfigDir } from './helpers.js';
-import { McpStdioClient, MCP_PROTOCOL_VERSION, isMcpTextContent } from '../src/lib/agent/mcp-client.js';
+import { McpStdioClient, MCP_PROTOCOL_VERSION, describeRpcError, isMcpTextContent } from '../src/lib/agent/mcp-client.js';
 import { buildMinimalEnv, writeScope } from '../src/lib/agent/mcp-config.js';
 import { isWorkspaceTrusted, trustWorkspace } from '../src/lib/config.js';
 import { setupMcpBridge } from '../src/lib/agent/mcp.js';
@@ -104,6 +104,28 @@ describe('McpStdioClient (real stdio handshake)', () => {
     } finally {
       await client.shutdown();
     }
+  });
+
+  test('a non-object JSON-RPC error keeps its text (no "undefined (code undefined)")', async () => {
+    // A server may answer {"error": "boom"} with a bare string: reading
+    // .message/.code off it used to reject with the content-free
+    // "undefined (code undefined)" and swallow the actual error text.
+    const env = buildMinimalEnv(undefined, { ...process.env, FIXTURE_STRING_ERROR: '1' } as NodeJS.ProcessEnv);
+    const client = await startFixture({ ...env, FIXTURE_STRING_ERROR: '1' });
+    try {
+      await expect(client.callTool('echo', { text: 'x' })).rejects.toThrow('boom');
+    } finally {
+      await client.shutdown();
+    }
+  });
+
+  test('describeRpcError renders string, object, and other error shapes', () => {
+    expect(describeRpcError('boom')).toBe('boom');
+    expect(describeRpcError({ code: -32600, message: 'bad request' })).toBe('bad request (code -32600)');
+    expect(describeRpcError({ message: 'no code' })).toBe('no code');
+    expect(describeRpcError(42)).toBe('42');
+    expect(describeRpcError(null)).toBe('null');
+    expect(describeRpcError({ code: 7 })).toBe('MCP error (code 7)');
   });
 
   test('stdout flooded with no newline past the cap fails the call and kills the server (CL5)', async () => {

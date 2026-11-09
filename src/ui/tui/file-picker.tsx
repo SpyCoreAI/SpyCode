@@ -32,12 +32,19 @@
  * SAFETY (mirrors the D4 @-mention policy): the picker is CONTAINED under
  * `root` (the TUI's cwd) - `filePickerUp` never escapes it and a start
  * directory outside it is clamped in. Dotfiles are hidden (the same
- * "never surface secrets" rule as `resolveMentions`). Symlinks are not
- * followed for preview.
+ * "never surface secrets" rule as `resolveMentions`). Symlinks are followed
+ * ONLY after a realpath check: a link whose target escapes the root or
+ * resolves to a denylisted/dotfile path (e.g. `notes.md -> .env`) is hidden
+ * from the listing and refused for preview; links staying inside the root
+ * are followed. The old docstring claimed "Symlinks are not followed for
+ * preview" - that was false (`statSync`/`readFileSync` follow them), and
+ * the code now enforces the check the docstring claimed.
  */
 import { Box, Text } from 'ink';
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { lstatSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { basename, join, relative, resolve, sep } from 'node:path';
+import { isInsideReal, realRoot } from '../../lib/path-containment.js';
+import { matchesBuiltinDenylist } from '../../lib/agent/secrets.js';
 import type { ReactNode } from 'react';
 import {
   computePickerViewport,
@@ -76,12 +83,34 @@ const FILE_PICKER_PREVIEW_BYTES = 64 * 1024;
 const FILE_PICKER_PREVIEW_MAX_FILE = 4 * 1024 * 1024;
 
 /**
+ * True when a symlinked entry is safe to list/preview: its resolved target
+ * stays inside `root` (when given) and does not resolve to a denylisted or
+ * dotfile path. Non-symlinks always pass (their own name was already
+ * dotfile-filtered by the caller). Dangling links fail: nothing to show.
+ */
+export function isSafePickerSymlink(absPath: string, root?: string): boolean {
+  let real: string;
+  try {
+    real = realpathSync(absPath);
+  } catch {
+    return false;
+  }
+  if (basename(real).startsWith('.')) return false;
+  if (matchesBuiltinDenylist(real)) return false;
+  if (root !== undefined && !isInsideReal(realRoot(root), real)) return false;
+  return true;
+}
+
+/**
  * List one directory: directories first, then files, each alphabetical
  * (case-insensitive). Dotfiles are hidden (D4 parity). Unreadable entries
  * and broken symlinks are skipped silently - the picker degrades, never
- * throws, so a flaky directory can't take the TUI down.
+ * throws, so a flaky directory can't take the TUI down. Symlinked entries
+ * are listed only when their target passes isSafePickerSymlink (inside the
+ * root, not a secret path) - a link to `.env` or to a file outside the root
+ * never appears.
  */
-export function listDirectoryEntries(dir: string): FilePickerEntry[] {
+export function listDirectoryEntries(dir: string, root?: string): FilePickerEntry[] {
   let names: string[];
   try {
     names = readdirSync(dir);
@@ -92,16 +121,32 @@ export function listDirectoryEntries(dir: string): FilePickerEntry[] {
   for (const name of names) {
     if (name.startsWith('.')) continue;
     const absPath = join(dir, name);
-    let st;
+    let lst;
     try {
-      st = statSync(absPath);
+      lst = lstatSync(absPath);
     } catch {
       continue;
     }
-    if (st.isDirectory()) {
+    if (lst.isSymbolicLink()) {
+      if (!isSafePickerSymlink(absPath, root)) continue;
+      // Safe link: resolve once to learn whether it is a dir or a file.
+      let tst;
+      try {
+        tst = statSync(absPath);
+      } catch {
+        continue;
+      }
+      if (tst.isDirectory()) {
+        entries.push({ name: `${name}/`, absPath, isDir: true, size: 0 });
+      } else if (tst.isFile()) {
+        entries.push({ name, absPath, isDir: false, size: tst.size });
+      }
+      continue;
+    }
+    if (lst.isDirectory()) {
       entries.push({ name: `${name}/`, absPath, isDir: true, size: 0 });
-    } else if (st.isFile()) {
-      entries.push({ name, absPath, isDir: false, size: st.size });
+    } else if (lst.isFile()) {
+      entries.push({ name, absPath, isDir: false, size: lst.size });
     }
   }
   const rank = (e: FilePickerEntry): number => (e.isDir ? 0 : 1);
@@ -127,7 +172,18 @@ function isBinaryBuffer(buf: Buffer): boolean {
 export function readFilePreview(
   entry: FilePickerEntry,
   maxLines: number = FILE_PICKER_PREVIEW_LINES,
+  root?: string,
 ): FilePreview {
+  // A symlinked entry is re-checked here, not just at listing time: the
+  // entry may have been built before the link was retargeted, and a caller
+  // can construct entries directly. Refuse before any read.
+  try {
+    if (lstatSync(entry.absPath).isSymbolicLink() && !isSafePickerSymlink(entry.absPath, root)) {
+      return { lines: ['[unreadable]'], truncated: false, binary: true, size: entry.size };
+    }
+  } catch {
+    return { lines: ['[unreadable]'], truncated: false, binary: true, size: entry.size };
+  }
   if (entry.isDir) {
     let count = 0;
     try {
@@ -187,10 +243,17 @@ export interface FilePickerModel {
   filter: string;
 }
 
-/** Clamp a directory under the containment root. */
+/** Clamp a directory under the containment root. Lexical first, then the resolved path: a symlinked directory can be lexically inside the root while resolving outside it. */
 function clampToRoot(root: string, dir: string): string {
   const rel = relative(root, dir);
-  if (rel === '' || (!rel.startsWith('..') && !rel.startsWith(sep))) return dir;
+  if (rel === '' || (!rel.startsWith('..') && !rel.startsWith(sep))) {
+    try {
+      if (!isInsideReal(realRoot(root), realpathSync(dir))) return root;
+    } catch {
+      /* unresolvable - the lexical check governs */
+    }
+    return dir;
+  }
   return root;
 }
 
@@ -201,12 +264,12 @@ function withSelection(model: FilePickerModel, selected: number): FilePickerMode
   return {
     ...model,
     selected: clamped,
-    preview: current ? readFilePreview(current) : null,
+    preview: current ? readFilePreview(current, FILE_PICKER_PREVIEW_LINES, model.root) : null,
   };
 }
 
 function applyFilter(model: FilePickerModel, filter: string): FilePickerModel {
-  const all = listDirectoryEntries(model.dir);
+  const all = listDirectoryEntries(model.dir, model.root);
   const q = filter.toLowerCase();
   const entries = q.length === 0 ? all : all.filter((e) => e.name.toLowerCase().includes(q));
   return withSelection({ ...model, filter, entries }, 0);
@@ -216,7 +279,7 @@ function applyFilter(model: FilePickerModel, filter: string): FilePickerModel {
 export function createFilePickerModel(rootDir: string, startDir?: string): FilePickerModel {
   const root = resolve(rootDir);
   const dir = clampToRoot(root, startDir ? resolve(startDir) : root);
-  const entries = listDirectoryEntries(dir);
+  const entries = listDirectoryEntries(dir, root);
   const model: FilePickerModel = { root, dir, entries, selected: 0, preview: null, filter: '' };
   return withSelection(model, 0);
 }
@@ -249,11 +312,16 @@ export function filePickerEnter(model: FilePickerModel): FilePickerEnterResult {
   const entry = model.entries[model.selected] ?? null;
   if (!entry) return { model, picked: null };
   if (entry.isDir) {
+    // Descent is clamped through the realpath-aware clampToRoot: a listed
+    // symlinked directory is inside the root, but clamp again in case the
+    // link was retargeted after listing. Entries are listed from the
+    // CLAMPED dir, never from the raw link path.
+    const dir = clampToRoot(model.root, entry.absPath);
     const next: FilePickerModel = {
       ...model,
-      dir: entry.absPath,
+      dir,
       filter: '',
-      entries: listDirectoryEntries(entry.absPath),
+      entries: listDirectoryEntries(dir, model.root),
     };
     return { model: withSelection(next, 0), picked: null };
   }
@@ -269,7 +337,7 @@ export function filePickerUp(model: FilePickerModel): FilePickerModel {
     ...model,
     dir,
     filter: '',
-    entries: listDirectoryEntries(dir),
+    entries: listDirectoryEntries(dir, model.root),
   };
   // Keep the highlight on the directory we just came from, when visible.
   const cameFrom = basename(model.dir);

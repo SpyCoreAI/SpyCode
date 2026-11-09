@@ -52,6 +52,11 @@ const isPos = (n: number | undefined): n is number =>
  * cap at all. (The same holds for `--max-turns`: it reaches here pre-clamped
  * by resolveMaxTurns, but a direct caller passing 0/NaN gets the same error
  * instead of a silent uncapped run.)
+ *
+ * Fractional values are floored, then validated: a value in (0, 1) passes
+ * the positivity check but floors to 0, and a 0 cap reads as "uncapped"
+ * everywhere downstream (`isPos(0)` is false) - so `--max-tokens 0.5` used
+ * to run with NO token cap. Anything flooring below 1 throws like 0 does.
  */
 export function toBudgetCaps(input: {
   maxTokens?: number | undefined;
@@ -68,6 +73,13 @@ export function toBudgetCaps(input: {
       );
     }
     caps.maxTokens = Math.floor(input.maxTokens);
+    if (caps.maxTokens < 1) {
+      throw new SpycoreCliError(
+        `--max-tokens must be at least 1 (got ${String(input.maxTokens)})`,
+        EXIT_USER_ERROR,
+        'Omit the flag for no token cap.',
+      );
+    }
   }
   if (input.maxTimeMs !== undefined) {
     if (!isPos(input.maxTimeMs)) {
@@ -78,6 +90,13 @@ export function toBudgetCaps(input: {
       );
     }
     caps.maxTimeMs = Math.floor(input.maxTimeMs);
+    if (caps.maxTimeMs < 1) {
+      throw new SpycoreCliError(
+        `--max-time must be at least 1ms (got ${String(input.maxTimeMs / 1000)}s)`,
+        EXIT_USER_ERROR,
+        'Omit the flag for no time cap.',
+      );
+    }
   }
   if (input.maxTurns !== undefined) {
     if (!isPos(input.maxTurns)) {
@@ -88,6 +107,13 @@ export function toBudgetCaps(input: {
       );
     }
     caps.maxTurns = Math.floor(input.maxTurns);
+    if (caps.maxTurns < 1) {
+      throw new SpycoreCliError(
+        `--max-turns must be at least 1 (got ${String(input.maxTurns)})`,
+        EXIT_USER_ERROR,
+        'Omit the flag for the default turn limit.',
+      );
+    }
   }
   return caps;
 }

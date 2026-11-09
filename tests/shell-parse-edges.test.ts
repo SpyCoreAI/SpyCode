@@ -55,6 +55,22 @@ describe('quoting corners', () => {
     expect(parseShell(String.raw`echo $'\cA'`).commands[0]!.words[1]!.value).toBe('\u0001');
   });
 
+  test('an out-of-range $\\U code point stays verbatim instead of throwing', () => {
+    // parseShell promises never to throw, but String.fromCodePoint throws
+    // past 0x10FFFF - and the screeners call it unguarded, so --verify died
+    // after the agent work with a cryptic RangeError. The escape is kept
+    // literally, like any unrecognised escape.
+    for (const bad of [String.raw`echo $'\U00110000'`, String.raw`echo $'\UFFFFFFFF'`]) {
+      // Must not throw: parseShell promises never to throw.
+      const parsed = parseShell(bad);
+      expect(parsed.commands[0]!.words[1]!.value).toContain('\\U');
+    }
+    // In-range escapes still resolve (including the top of the range).
+    expect(parseShell(String.raw`echo $'\U0010FFFF'`).commands[0]!.words[1]!.value).toBe(
+      String.fromCodePoint(0x10ffff),
+    );
+  });
+
   test('a $() with an unterminated single quote fails closed', () => {
     expect(parseShell("echo $(echo 'abc)").confident).toBe(false);
   });

@@ -232,6 +232,25 @@ describe('the shipped SECURITY.md guarantee, proved on the bytes Ink writes', ()
     }
   });
 
+  test('CONTROL - the assistant FOOTER model name is sanitized at render too', async () => {
+    // The header sanitized the same value but the footer rendered it raw:
+    // a compromised/malicious BYOK endpoint returning a model id with ANSI
+    // escapes got it rendered in the persistent footer. The footer only
+    // renders when an elapsed time or a status is present.
+    const out = await draw({
+      kind: 'assistant',
+      id: 1,
+      content: 'body',
+      model: POISON,
+      skills: [],
+      elapsedMs: 1000,
+    });
+    expect(out.length, 'Ink wrote nothing - the capture is broken').toBeGreaterThan(0);
+    expect(out.includes(`${ESC}[8m`), 'conceal sequence reached stdout via the footer').toBe(false);
+    expect(out.includes(`${ESC}]0;`), 'OSC title write reached stdout via the footer').toBe(false);
+    expect(out.includes(`${ESC}]52;`), 'OSC clipboard write reached stdout via the footer').toBe(false);
+  });
+
   test('the guarantee HOLDS - the sanitized value emits no terminal control', async () => {
     const clean = sanitizeForDisplay(POISON);
     const assistant = await draw({ kind: 'assistant', id: 1, content: 'body', model: clean, skills: [clean] });

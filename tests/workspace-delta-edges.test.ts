@@ -43,6 +43,25 @@ describe('snapshotWorkspace capture rules', () => {
     expect(s.entries.get('bin.dat')?.sha).toHaveLength(64);
   });
 
+  test('a UTF-16 text file is captured, not treated as binary', async () => {
+    // The delta module carried its own looksBinary without tool-core's
+    // UTF-16 handling, so a UTF-16 file was reported uncaptured and never
+    // journaled while read_file read it fine. Both the BOM form and the
+    // bare NUL-parity form must classify as text.
+    const withBom = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('hello world', 'utf16le')]);
+    writeFileSync(fp('notes.txt'), withBom);
+    const bare = Buffer.from('hello world', 'utf16le');
+    writeFileSync(fp('bare.txt'), bare);
+    const s = await snap();
+    expect(s.entries.get('notes.txt')?.content).not.toBeNull();
+    expect(s.entries.get('bare.txt')?.content).not.toBeNull();
+    // And a change to it diffs as a journalable change, not uncaptured.
+    writeFileSync(fp('notes.txt'), Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('hello again', 'utf16le')]));
+    const d = await diffWorkspace(s, new Set());
+    expect(d.uncaptured).not.toContain('notes.txt');
+    expect(d.changes.some((c) => c.path === fp('notes.txt'))).toBe(true);
+  });
+
   test('hash-only entries carry the true streaming sha256', async () => {
     // The oversize branch hashes by stream, never by reading the whole
     // file into memory - the digest must still be exactly sha256 of the

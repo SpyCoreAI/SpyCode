@@ -78,6 +78,7 @@ import { join, relative, resolve, sep } from 'node:path';
 import { containmentBound, realRoot } from '../path-containment.js';
 import type { RecordedChange } from './checkpoint.js';
 import { loadSecretGuard } from './secrets.js';
+import { looksBinary } from './tool-core.js';
 
 /** Directory names always excluded - mirrors `tools.ts` ALWAYS_IGNORE_GLOBS. */
 const ALWAYS_IGNORE_GLOBS = [
@@ -138,19 +139,6 @@ export interface WorkspaceDelta {
    * binary, or over the per-file cap. Relative, for display.
    */
   uncaptured: string[];
-}
-
-/** True for content that is almost certainly not text - mirrors `tools.ts`. */
-function looksBinary(buf: Buffer): boolean {
-  const len = Math.min(buf.length, 8000);
-  if (len === 0) return false;
-  let suspicious = 0;
-  for (let i = 0; i < len; i += 1) {
-    const b = buf[i] as number;
-    if (b === 0) return true;
-    if (b < 9 || (b > 13 && b < 32)) suspicious += 1;
-  }
-  return suspicious / len > 0.3;
 }
 
 function sha256(buf: Buffer): string {

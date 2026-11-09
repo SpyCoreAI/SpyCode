@@ -232,10 +232,18 @@ export function appendDurableMemory(
   file: 'memory' | 'user',
   lines: string[],
   configDir?: string,
+  /**
+   * Already-read file content. The `memory` tool passes the snapshot it
+   * showed in the approval diff: re-reading here would let a file change
+   * made during the (unbounded) approval pause land without ever appearing
+   * in the approved diff. Callers without an approved snapshot omit it and
+   * the file is read fresh, as before.
+   */
+  currentText?: string,
 ): { chars: number; capChars: number } {
   const clean = cleanEntryLines(lines);
   if (clean.length === 0) throw new ToolError('nothing to remember - the text was empty');
-  const current = readDurableFile(file, configDir);
+  const current = currentText ?? readDurableFile(file, configDir);
   const addition = clean.map((l) => `- ${l}`).join('\n');
   const next = appendText(current, addition);
   if (next.length > DURABLE_MEMORY_CAP_CHARS) {
@@ -284,11 +292,18 @@ export function removeDurableMemoryLines(
   file: 'memory' | 'user',
   match: string,
   configDir?: string,
+  /**
+   * Already-read file content - same single-read discipline as
+   * appendDurableMemory: the `memory` tool passes the snapshot behind the
+   * approved diff, so a line added during the approval pause cannot be
+   * deleted without ever appearing in that diff.
+   */
+  currentText?: string,
 ): { removed: number; chars: number } {
   const needle = match.trim().toLowerCase();
   if (needle.length === 0) throw new ToolError('match must not be empty');
   const p = filePath(file, configDir);
-  const current = readDurableFile(file, configDir);
+  const current = currentText ?? readDurableFile(file, configDir);
   if (current.length === 0) return { removed: 0, chars: 0 };
   const kept = current.split('\n').filter((l) => !l.toLowerCase().includes(needle));
   const removed = current.split('\n').length - kept.length;
@@ -361,13 +376,19 @@ registerTool({
       // Approval BEFORE the write, on the exact diff that will land:
       // the tool is mutating (plan mode blocks it at dispatch) and every
       // execute-mode write pauses for the user like write_file does.
+      // Single-read: the approved diff is computed from `current`, and the
+      // write below reuses that same snapshot instead of re-reading the
+      // file - otherwise a change made during the approval pause could land
+      // (add) or be deleted (remove) without ever appearing in the diff.
+      // Trade-off, stated: a concurrent edit made during the pause is
+      // overwritten by the approved snapshot rather than preserved.
       const current = readDurableFile(f);
       const clean = cleanEntryLines(text.split('\n'));
       if (clean.length === 0) throw new ToolError('nothing to remember - the text was empty');
       const addition = clean.map((l) => `- ${l}`).join('\n');
       const gate = await approveMemoryWrite(ctx, f, current, appendText(current, addition));
       if (!gate.approved) return memoryWriteRejected(f, gate.reason);
-      const res = appendDurableMemory(f, text.split('\n'));
+      const res = appendDurableMemory(f, text.split('\n'), undefined, current);
       return {
         ok: true,
         summary: `remembered in ${f === 'memory' ? DURABLE_MEMORY_FILE : DURABLE_USER_FILE}`,
@@ -386,7 +407,7 @@ registerTool({
       const kept = current.split('\n').filter((l) => !l.toLowerCase().includes(needle));
       const gate = await approveMemoryWrite(ctx, f, current, kept.join('\n'));
       if (!gate.approved) return memoryWriteRejected(f, gate.reason);
-      const res = removeDurableMemoryLines(f, match);
+      const res = removeDurableMemoryLines(f, match, undefined, current);
       return {
         ok: true,
         summary: `${res.removed} line${res.removed === 1 ? '' : 's'} removed`,
