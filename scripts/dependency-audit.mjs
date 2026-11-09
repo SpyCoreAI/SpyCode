@@ -242,6 +242,12 @@ export function evaluateAuditReport(data) {
   // JSON. The old code defaulted a missing key to `[]` and exited 0 with
   // "clean: 0 advisories scanned", passing vacuously. A real clean audit
   // carries the key with an empty object; only a missing key fails here.
+  // R4-1: the same applies to a PRESENT-but-malformed value. `null`, a
+  // string, or a number used to collapse to `[]` through the ternary below
+  // and pass as a clean 0-advisory scan, so the key-presence check alone
+  // did not close the hole. `advisories` must be an object or an array -
+  // mirroring `verdictFrom` in scripts/audit-resolved-install.mjs, which
+  // rejects a non-object `vulnerabilities` value outright.
   if (!('advisories' in data)) {
     throw new Error(
       'audit report has no `advisories` key - cannot tell a clean audit from a changed/error payload; refusing a vacuous pass',
@@ -250,8 +256,12 @@ export function evaluateAuditReport(data) {
   // pnpm's JSON nests advisories under `advisories` (object keyed by GHSA id or
   // an array); be liberal in what we accept, strict in what we allow.
   const adv = data.advisories;
-  const list = Array.isArray(adv) ? adv : adv && typeof adv === 'object' ? Object.values(adv) : [];
-  if (!Array.isArray(list)) throw new Error('unexpected pnpm audit JSON shape');
+  if (adv === null || typeof adv !== 'object') {
+    throw new Error(
+      '`advisories` is not an object or array - cannot tell a clean audit from a changed/error payload; refusing a vacuous pass',
+    );
+  }
+  const list = Array.isArray(adv) ? adv : Object.values(adv);
 
   const HIGH = new Set(['high', 'critical']);
   let blocked = 0;

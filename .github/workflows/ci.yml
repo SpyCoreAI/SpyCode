@@ -18,7 +18,8 @@ jobs:
   test:
     # M-6 - the suite runs on all three supported platforms, not just Ubuntu.
     # Windows runs via the suite's own `skipIf(win32)` guards for POSIX-only
-    # assertions; native Windows remains otherwise untested per SECURITY.md.
+    # assertions; native Windows runs the full suite in CI, with live
+    # execution proof through cmd.exe still missing (see SECURITY.md).
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -26,6 +27,15 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-latest, windows-latest]
         node-version: [22, 24]
+        include:
+          # R4-5 - a bare major resolves to the latest 22.x/24.x, so the
+          # matrix never ran the declared minimum (engines >=22.5.0, the
+          # version node:sqlite landed in). One extra Ubuntu leg pins
+          # the floor; a dependency on a newer Node API would otherwise
+          # pass CI everywhere and break on exactly the oldest version
+          # the package claims to support.
+          - os: ubuntu-24.04
+            node-version: '22.5.0'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       # standalone: pnpm runs on its own bundled runtime — pnpm 11.6+ needs
@@ -150,8 +160,8 @@ jobs:
     # pack-verify.sh cannot run on Windows (no sh), so the installed
     # artifact gets a Windows smoke instead: pack, install the tarball into
     # an isolated prefix, and check the shim starts, reports the manifest
-    # version, and lists commands. Native Windows remains otherwise
-    # untested per SECURITY.md.
+    # version, and lists commands. Native Windows runs the full suite in
+    # CI with POSIX-only assertions skipped (see SECURITY.md).
     runs-on: windows-latest
     timeout-minutes: 30
     steps:

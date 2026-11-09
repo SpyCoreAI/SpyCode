@@ -594,7 +594,9 @@ say "[pack-verify] package @spycore/cli version=$VERSION node=$(node -v)"
 # runs the build, so a tree whose `build/` predates its `src/` cannot be packed
 # stale. Measured before/after so the script REPORTS when it saved us.
 BEFORE_HASH="(no pre-existing build)"
+BUILD_EXISTED=0
 if [ -d "$PKG_ROOT/build" ]; then
+  BUILD_EXISTED=1
   BEFORE_HASH="$(find "$PKG_ROOT/build" -type f -exec cat {} + | hash_stdin)" || {
     say "PACK-VERIFY FAIL (stage: no SHA-256 tool available to hash build/)"
     exit 1
@@ -615,6 +617,12 @@ AFTER_HASH="$(find "$PKG_ROOT/build" -type f -exec cat {} + | hash_stdin)" || {
 }
 if [ "$BEFORE_HASH" = "$AFTER_HASH" ]; then
   ok "build/ was already current before packing"
+elif [ "$BUILD_EXISTED" -eq 0 ]; then
+  # R4-2: build/ never existed before packing (the normal CI path - the
+  # audit job has no build step before this script), so there was no stale
+  # tree for prepack to save us from. Saying DRIFT CAUGHT here cried wolf
+  # on every green CI run; only a real pre-existing hash that changed is drift.
+  ok "build/ did not exist before packing; prepack built it from scratch"
 else
   say "[pack-verify]  DRIFT CAUGHT: build/ changed during prepack - the tree was STALE"
   say "[pack-verify]   before: $BEFORE_HASH"

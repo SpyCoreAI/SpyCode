@@ -493,7 +493,7 @@ describe('the differential against the published 0.6.0', () => {
    * refuse. This is the assertion that makes "the screen was rebuilt" a
    * measurable claim instead of a hopeful one.
    */
-  test('NO shape the published 0.6.0 blocks is allowed by HEAD', () => {
+  test('NO shape the published 0.6.0 blocks is allowed by HEAD', { timeout: 60_000 }, () => {
     const excused = continuationFalsePositives();
     const escaped: string[] = [];
     for (const input of catastrophicCorpus()) {

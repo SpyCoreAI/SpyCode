@@ -586,7 +586,10 @@ describe('N35 runtime import cycles', () => {
   });
 
   // Mutations: re-add command-rules.ts -> tools.ts; add any other cycle.
-  test('N35 the static value-import graph of src/ has no cycles', () => {
+  // R4-6: whole-tree Tarjan scan, several times slower under v8 coverage
+  // instrumentation than the 10 s default allows - same scale as the
+  // sibling screen-differential floor test.
+  test('N35 the static value-import graph of src/ has no cycles', { timeout: 60_000 }, () => {
     const files = walk(SRC);
     expect(files.length, 'walked almost nothing - this gate measured nothing').toBeGreaterThan(200);
     const exists = (p: string): boolean => existsSync(p) && statSync(p).isFile();

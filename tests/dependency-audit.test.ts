@@ -33,6 +33,16 @@ describe('evaluateAuditReport - the non-vacuous guard', () => {
     ).toThrow(/audit endpoint error/);
   });
 
+  test('a present-but-malformed advisories value fails loudly (R4-1)', () => {
+    // A present key with a non-object value used to collapse to [] and pass
+    // as a clean 0-advisory scan - the same vacuous pass the missing-key
+    // guard above was written for. An empty object/array is still a real
+    // clean audit (see the next test); anything else refuses.
+    expect(() => evaluateAuditReport({ advisories: null })).toThrow(/not an object or array/);
+    expect(() => evaluateAuditReport({ advisories: 'oops' })).toThrow(/not an object or array/);
+    expect(() => evaluateAuditReport({ advisories: 42 })).toThrow(/not an object or array/);
+  });
+
   test('a real clean audit - advisories key present but empty - passes', () => {
     expect(evaluateAuditReport({ advisories: {} })).toEqual({ scanned: 0, waived: 0, blocked: 0 });
     expect(evaluateAuditReport({ advisories: [] })).toEqual({ scanned: 0, waived: 0, blocked: 0 });
@@ -107,6 +117,12 @@ describe('dependency-audit.mjs end-to-end (fake pnpm, no network)', () => {
     const r = runWithFakePnpm('{"advisories":{}}');
     expect(r.status).toBe(0);
     expect(r.output).toMatch(/clean: 0 advisorie\(s\) scanned/);
+  });
+
+  test('a pnpm payload with advisories: null exits 1, not a vacuous 0 (R4-1)', () => {
+    const r = runWithFakePnpm('{"advisories":null}');
+    expect(r.status).toBe(1);
+    expect(r.output).toMatch(/not an object or array/);
   });
 });
 

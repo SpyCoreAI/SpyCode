@@ -194,15 +194,18 @@ output, file contents, and MCP server responses are all treated as
 ## Platform stance (v1)
 
 **Supported: macOS and Linux.** Windows is supported **via WSL**; native
-Windows is untested in this release (sandbox path semantics and
-process-group kill behavior differ) and prints a warning. Native Windows
-support is planned post-launch.
+Windows runs the full suite in CI (`windows-latest`) with POSIX-only
+assertions skipped, and the packed artifact gets a Windows smoke install
+check — sandbox path semantics and process-group kill behavior still
+differ, and it prints a warning. Native Windows support is planned
+post-launch.
 
-Linux verified 2026-11-08 (full suite, 3220 tests, on node 22): lines
-73.94%, statements 73.44%, functions 77.99%, branches 67.45%, with the
+Linux verified 2026-11-09 (full suite, 3658 tests, on node 24), with the
 `multi-tool`, `symlink-escape`, `catastrophic-guard` and `config-0600`
-checks green. Node 20 is not supported: `engines` requires `>=22.5.0`
-and the CI matrix runs node 22 only.
+checks green. Coverage was last measured 2026-11-08: lines 73.94%,
+statements 73.44%, functions 77.99%, branches 67.45% (re-stamp at release
+prep). Node 20 is not supported: `engines` requires `>=22.5.0` and the CI
+matrix runs node 22 and 24, plus the 22.5.0 minimum on Ubuntu.
 
 **amd64 is not verified in this release.** Only emulated amd64 was available
 here, and under emulation the heaviest checks exceed their time limits and fail

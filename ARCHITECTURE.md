@@ -16,8 +16,8 @@ tsup). Three surfaces share one agent engine:
   same engine.
 
 Plus a set of management commands (`mcp`, `provider`, `runs`, `cron`,
-`memory`, `skills`, `projects`, `conversations`, `files`, `git-workflow`,
-`rewind`, `config`, `auth`, ...) that are mostly independent of the agent.
+`memory`, `skills`, `projects`, `conversations`, `files`, `commit`, `pr`,
+`branch`, `login`, `logout`, `whoami`, `rewind`, `config`, ...) that are mostly independent of the agent.
 
 ```
 src/index.ts            CLI entry: builds the commander program,
@@ -141,7 +141,7 @@ Each group registers itself on the commander program from `index.ts`
 Notable commands: `agent` (one-shot runs, `--detached` spawns a
 background run managed by `runs`), `rewind` (reverses a session's file
 changes), `runs` (list/attach/kill detached runs; attach tails the log),
-`cron` (scheduled prompts), `git-workflow` (commit/PR flows).
+`cron` (scheduled prompts), `commit` / `pr` / `branch` (git flows).
 
 ## UI (`src/ui/`)
 

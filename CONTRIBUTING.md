@@ -47,10 +47,13 @@ own tsconfig.
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for the full map. The short version:
 
 - `src/index.ts` - CLI entry; registers every command.
-- `src/commands/` - one directory per command group (`agent`, `mcp`,
-  `provider`, `runs`, `cron`, `memory`, `skills`, `projects`,
-  `conversations`, `files`, `git-workflow`, `rewind`, ...). Each exposes a
-  `register*Command(program)` function.
+- `src/commands/` - mostly flat files (`agent.ts`, `runs.ts`, `rewind.ts`,
+  `git-workflow.ts`, ...); directories only where a group has several
+  commands (`auth/`, `config/`, `conversations/`, `cron/`, `files/`, `mcp/`,
+  `memory/`, `projects/`, `provider/`, `skills/`). Each exposes a
+  `register*Command(program)` function. Note the file/group name is not
+  always the command name: `git-workflow.ts` registers `commit`, `pr` and
+  `branch`; `auth/` registers the top-level `login`, `logout` and `whoami`.
 - `src/lib/agent/` - the agent engine: `loop.ts` (the turn loop) and its
   per-run modules `run-events.ts`, `run-context.ts`, `run-delegate.ts`,
   `run-dispatch.ts`, `run-session.ts`, `run-prompt.ts`; `tools.ts` (the
