@@ -52,6 +52,31 @@ n/n`) for CI to grep.
   `file-contains` (with `path` + `text`), `no-mutation`,
   `turns-under` (with `n`).
 
+### Top-level fields (`tasks.json`)
+
+The file is one object with three top-level fields; the example above is a
+single entry of the `tasks` array, not the whole file:
+
+```json
+{
+  "version": 1,
+  "note": "Fixed behavioral task set for SpyCode's agent-behavior regression harness (A-4). ...",
+  "tasks": [ { "id": "read-then-report", "...": "..." } ]
+}
+```
+
+- `version`: the format version of this file. Currently `1`. Bump it if
+  the task shape ever changes (a new required field, a renamed check type),
+  so a reader can tell which shape a copy of the file follows.
+- `note`: what this set is and how to treat it. The current note says these
+  are regression pins, not suggestions: a task that starts failing is a
+  behavior change to investigate, not a task to edit until it passes.
+- Both fields are metadata only - the harness (`tests/eval-harness.test.ts`)
+  reads just `tasks` and never validates `version` or `note`. That is why
+  they need documenting here: nothing in code will complain if they are
+  dropped or left stale. Keep both when editing `tasks.json`, and keep the
+  note truthful if the set's purpose changes.
+
 ## Adding a task
 
 Append to `tasks.json`. Keep ids unique and the set small enough to stay

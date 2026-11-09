@@ -461,7 +461,13 @@ describe('dispatchTool CLI-wide timeout', () => {
   test('a wedged tool becomes an ok:false result, never a hang', async () => {
     const start = Date.now();
     const r = await dispatchTool('hang', {}, tctx({ dispatchTimeoutMs: 200 }));
-    expect(Date.now() - start).toBeLessThan(10_000);
+    // Bound the 200ms budget, NOT vitest's own 10s test timeout - a limit
+    // equal to the harness's limit asserts nothing except that the harness
+    // fired. The watchdog ticks every 1000ms (tools.ts), so the cutoff lands
+    // at the first tick past the deadline, ~1s in; 2500 gives that tick 2.5x
+    // headroom for loaded-runner timer slop (a sibling test measured 2000ms
+    // here once) while still proving the cutoff - a 9s timeout fails.
+    expect(Date.now() - start).toBeLessThan(2_500);
     expect(r.ok).toBe(false);
     expect(r.content).toMatch(/timed out after/);
   });

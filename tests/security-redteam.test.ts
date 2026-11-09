@@ -566,6 +566,94 @@ describe('E. secrets hygiene', () => {
     expect(errMsg.length).toBeGreaterThan(0);
     expect(errMsg).not.toContain('sk-SUPERSECRET123');
   });
+
+  test('BYOK error chains never include the API key, whatever its shape', async () => {
+    // One hard-coded key cannot prove the error path is shape-proof: a key
+    // with a newline, a quote, or non-ASCII bytes could slip through a
+    // redaction that assumes a single clean token. Obviously-fake keys only.
+    const shapedKeys: Array<{ label: string; value: string; fragments: string[] }> = [
+      {
+        label: 'newline',
+        value: 'SENTINEL_KEY_NL_A1B2\nSENTINEL_KEY_NL_C3D4',
+        fragments: ['SENTINEL_KEY_NL_A1B2', 'SENTINEL_KEY_NL_C3D4'],
+      },
+      {
+        label: 'quotes',
+        value: `SENTINEL_KEY_QT_A1B2"C3D4'E5F6`,
+        fragments: [`SENTINEL_KEY_QT_A1B2"C3D4'E5F6`],
+      },
+      {
+        label: 'non-ASCII',
+        value: 'SENTINEL_KEY_UNI_A1B2_Üñïçødé_Z9Y8',
+        fragments: ['SENTINEL_KEY_UNI_A1B2_Üñïçødé_Z9Y8'],
+      },
+    ];
+    const { OpenAICompatibleProvider } = await import('../src/lib/providers/openai-compatible.js');
+    for (const shaped of shapedKeys) {
+      responder = () => jsonResp(401, { error: { message: 'bad auth' } });
+      const p = new OpenAICompatibleProvider({ baseURL: 'https://h.example/v1', apiKey: shaped.value });
+      const id = await p.createConversation({ model: 'm' });
+      let errMsg = '';
+      for await (const ev of p.streamChat({ conversationId: id, message: 'hi', model: 'm' })) {
+        if (ev.type === 'error') errMsg = ev.message;
+      }
+      expect(errMsg.length, shaped.label).toBeGreaterThan(0);
+      for (const fragment of shaped.fragments) {
+        expect(errMsg, shaped.label).not.toContain(fragment);
+      }
+    }
+  });
+
+  test('mcp list never echoes env VALUES of any shape', async () => {
+    // `mcp list` prints names only (`TOKEN (literal)`) by construction, but
+    // the suite pinned that with one clean value. A value carrying a newline,
+    // a quote, or non-ASCII bytes must not change what reaches stdout.
+    // Obviously-fake values only.
+    const shapedValues: Array<{ label: string; value: string; fragments: string[] }> = [
+      {
+        label: 'newline',
+        value: 'SENTINEL_ENV_NL_A1B2\nSENTINEL_ENV_NL_C3D4',
+        fragments: ['SENTINEL_ENV_NL_A1B2', 'SENTINEL_ENV_NL_C3D4'],
+      },
+      {
+        label: 'quotes',
+        value: `SENTINEL_ENV_QT_A1B2"C3D4'E5F6`,
+        fragments: [`SENTINEL_ENV_QT_A1B2"C3D4'E5F6`],
+      },
+      {
+        label: 'non-ASCII',
+        value: 'SENTINEL_ENV_UNI_A1B2_Üñïçødé_Z9Y8',
+        fragments: ['SENTINEL_ENV_UNI_A1B2_Üñïçødé_Z9Y8'],
+      },
+    ];
+    const { Command } = await import('commander');
+    const { registerMcpCommand } = await import('../src/commands/mcp/index.js');
+    const { configureOutput } = await import('../src/lib/output.js');
+    configureOutput({ json: false, color: false });
+    const prevCwd = process.cwd();
+    process.chdir(workDir);
+    try {
+      for (const [i, shaped] of shapedValues.entries()) {
+        stdoutChunks = [];
+        stderrChunks = [];
+        const program = new Command();
+        program.name('spycore').option('--api-url <url>').option('--json').option('--no-color');
+        registerMcpCommand(program);
+        await program.parseAsync([
+          'node', 'spycore', 'mcp', 'add', `shape${i}`, '--env', `TOKEN=${shaped.value}`, '--', 'node', 's.js',
+        ]);
+        await program.parseAsync(['node', 'spycore', 'mcp', 'list']);
+        const all = stdoutChunks.join('') + stderrChunks.join('');
+        expect(all, shaped.label).toContain('TOKEN'); // the NAME is fine
+        for (const fragment of shaped.fragments) {
+          expect(all, shaped.label).not.toContain(fragment);
+        }
+      }
+    } finally {
+      process.chdir(prevCwd);
+    }
+  });
+
 });
 
 // ═══ F. MISC + WIRE-PINS ═══

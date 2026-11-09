@@ -267,7 +267,7 @@ describe('skills sync - path-traversal hardening (SEC-012)', () => {
     }
     for (const bad of [
       '', '..', '../evil', '../../etc/passwd', 'a/b', 'a\\b', '/abs', '.hidden',
-      '-lead', 'trail-', 'a--b', 'Upper', 'with space', 'dot.name', 'a b',
+      '-lead', 'trail-', 'a--b', 'Upper', 'with space', 'dot.name', 'a\x00b',
       'a~b', 'node_modules', '.', '~', `${'x'.repeat(65)}`,
     ]) {
       expect(isValidSkillName(bad)).toBe(false);

@@ -17,7 +17,12 @@ import { ALLOWED_MODELS, MODEL_DISPLAY } from '../src/lib/models.js';
  * SpyCore's own models plus the documented BYOK provider types. Any token
  * SHAPED like a model id - letter-led segments joined by `-` or `.` with a
  * digit somewhere (`whatever-4o`, `acme-2.5-coder`) - fails the gate unless
- * it is explicitly allowed below.
+ * it is explicitly allowed below. A token with NO digit fails it too when
+ * its first segment is a known third-party model family (`claude-opus`,
+ * `gpt-oss`, `deepseek-chat`): model ids without a version digit exist, so
+ * the digit alone cannot be the shape test. Single-segment names (`llama`,
+ * `grok`) cannot be shape-gated by TOKEN_RE at all - see the residual note
+ * at the bottom of this file's contract.
  */
 
 /** BYOK provider types documented on the CLI surface. */
@@ -31,6 +36,36 @@ const PROVIDER_TYPES = new Set<string>(['spycore', 'openai', 'anthropic', 'googl
 const ALLOWED_TOKENS = new Set<string>([
   'apache-2.0', // the license id (README, package metadata)
   'config-0600', // file-permission shorthand (SECURITY.md)
+  'claude.md', // the Claude Code project file (README) - not a model id
+  'claude-code-class', // the Claude Code product, as a compound noun (CHANGELOG)
+  'openai-compatible', // the documented BYOK provider type (README, CHANGELOG, spec)
+]);
+
+/**
+ * First segments of known third-party model families. A model-shaped token
+ * led by one of these is treated as a model id even with no version digit
+ * anywhere (`claude-opus`, `gpt-oss`, `deepseek-chat`, `gemini-pro-vision`).
+ * Add a stem here when a new model family ships; anything led by an unknown
+ * stem still passes unless it carries a digit, which is the gate's known
+ * residual - see the test at the bottom of this file.
+ */
+const MODEL_FAMILY_STEMS = new Set<string>([
+  'anthropic',
+  'claude',
+  'cohere',
+  'deepseek',
+  'gemini',
+  'glm',
+  'google',
+  'grok',
+  'gpt',
+  'kimi',
+  'llama',
+  'meta',
+  'mistral',
+  'openai',
+  'perplexity',
+  'qwen',
 ]);
 
 const TOKEN_RE = /\b[a-z][a-z0-9]*(?:[-.][a-z0-9]+)+\b/gi;
@@ -40,7 +75,12 @@ function modelShapedViolations(text: string): string[] {
   const bad = new Set<string>();
   for (const match of text.matchAll(TOKEN_RE)) {
     const tok = match[0].toLowerCase();
-    if (!/\d/.test(tok)) continue; // model ids carry a version digit somewhere
+    // Model ids carry a version digit somewhere - OR they are led by a known
+    // model-family stem, which catches the digit-less ids (`claude-opus`,
+    // `gpt-oss`). A token meeting neither test is ordinary hyphenated prose.
+    const hasDigit = /\d/.test(tok);
+    const familyLed = MODEL_FAMILY_STEMS.has(tok.split(/[-.]/)[0] as string);
+    if (!hasDigit && !familyLed) continue;
     if (ALLOWED_TOKENS.has(tok)) continue;
     bad.add(tok);
   }
@@ -122,5 +162,38 @@ describe('identity allowlist - user-facing surfaces', () => {
       // Brand names: one or two capitalised words, no digits, no separators.
       expect(display).toMatch(/^[A-Z][a-z]+(?: [A-Z][a-z]+)?$/);
     }
+  });
+
+  test('digit-less third-party model ids are flagged, allowlisted terms are not', () => {
+    // The old gate skipped every token without a digit, so `claude-opus`
+    // sailed through. These ids have no version digit anywhere.
+    expect(
+      modelShapedViolations(
+        'we also support claude-opus, gpt-oss, deepseek-chat, gemini-pro and mistral-large',
+      ),
+    ).toEqual([
+      'claude-opus',
+      'deepseek-chat',
+      'gemini-pro',
+      'gpt-oss',
+      'mistral-large',
+    ]);
+    // A three-segment digit-less id is flagged too (`gemini-pro-vision`).
+    expect(modelShapedViolations('try gemini-pro-vision instead')).toEqual([
+      'gemini-pro-vision',
+    ]);
+    // The allowlist still admits the legitimate lookalikes: the Claude Code
+    // project file and product name, and the BYOK provider type.
+    expect(
+      modelShapedViolations('see claude.md and the claude-code-class note; openai-compatible providers'),
+    ).toEqual([]);
+    // Residual, pinned: a model id from a family this file has never heard
+    // of, with no digit, still passes the shape gate - the gate can only
+    // enumerate families it knows. Adding the stem is the fix when one ships.
+    expect(modelShapedViolations('try futuremodel-turbo instead')).toEqual([]);
+    // Same for single-segment names: TOKEN_RE needs two segments, so
+    // `llama` and `grok` alone never match. Only the exact-name tests above
+    // (spec values, registry) can catch those.
+    expect(modelShapedViolations('try llama and grok instead')).toEqual([]);
   });
 });

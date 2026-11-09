@@ -261,6 +261,83 @@ describe('no context-assembly reader hands the model a secret file', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────
+// The secret's SHAPE must not change the guard's reach. The suite used a
+// single hard-coded sentinel everywhere, so a guard path that broke on a
+// newline, a quote, or a non-ASCII byte - a regex that stops at the first
+// line, a quote that ends a quoted context, a byte mangled by a lossy
+// encoding step - would stay green. These are obviously-fake sentinels.
+// ─────────────────────────────────────────────────────────────────────────
+describe('secret shape does not change the guard', () => {
+  /** Obviously-fake sentinel values, one per awkward shape. */
+  const SHAPED_SECRETS: Array<{ label: string; value: string; fragments: string[] }> = [
+    {
+      label: 'newline inside the value',
+      value: 'SENTINEL_NL_A1B2C3_DO_NOT_LEAK\nSENTINEL_NL_D4E5F6_DO_NOT_LEAK',
+      fragments: ['SENTINEL_NL_A1B2C3_DO_NOT_LEAK', 'SENTINEL_NL_D4E5F6_DO_NOT_LEAK'],
+    },
+    {
+      label: 'quotes inside the value',
+      value: `SENTINEL_QT_A1B2"C3D4'E5F6_DO_NOT_LEAK`,
+      fragments: [`SENTINEL_QT_A1B2"C3D4'E5F6_DO_NOT_LEAK`],
+    },
+    {
+      label: 'non-ASCII inside the value',
+      value: 'SENTINEL_UNI_A1B2_Üñïçødé_Z9Y8_DO_NOT_LEAK',
+      fragments: ['SENTINEL_UNI_A1B2_Üñïçødé_Z9Y8_DO_NOT_LEAK'],
+    },
+  ];
+
+  /** Like withBed, but the .env holds the given shaped sentinel. */
+  function withShapedBed(
+    secret: string,
+    fn: (b: Bed) => void | Promise<void>,
+  ): Promise<void> | void {
+    const root = mkdtempSync(join(tmpdir(), 'spy-reach-shape-'));
+    const ws = join(root, 'ws');
+    const home = join(root, 'home');
+    mkdirSync(join(ws, '.git'), { recursive: true });
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(ws, 'package.json'), '{"name":"probe"}');
+    writeFileSync(join(ws, '.env'), `API_KEY=${secret}\n`);
+    const done = (): void => rmSync(root, { recursive: true, force: true });
+    let out: void | Promise<void>;
+    try {
+      out = fn({ ws, home });
+    } catch (e) {
+      done();
+      throw e;
+    }
+    if (out && typeof (out as Promise<void>).then === 'function') {
+      return (out as Promise<void>).finally(done);
+    }
+    done();
+    return undefined;
+  }
+
+  for (const shaped of SHAPED_SECRETS) {
+    test(`@import of .env never hands the model a secret with a ${shaped.label}`, () => {
+      withShapedBed(shaped.value, (b) => {
+        writeFileSync(join(b.ws, 'SPYCODE.md'), '# m\n\n@.env\n');
+        const block = injected(b);
+        for (const fragment of shaped.fragments) {
+          expect(block).not.toContain(fragment);
+        }
+      });
+    });
+
+    test(`generated codebase guide never carries a secret with a ${shaped.label}`, async () => {
+      await withShapedBed(shaped.value, async (b) => {
+        symlinkSync(join(b.ws, '.env'), join(b.ws, 'README.md'));
+        const guide = generateCodebaseGuide(await scanRepo(b.ws));
+        for (const fragment of shaped.fragments) {
+          expect(guide).not.toContain(fragment);
+        }
+      });
+    });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────
 // The benign direction - a guard users route around is worse than none
 // ─────────────────────────────────────────────────────────────────────────
 

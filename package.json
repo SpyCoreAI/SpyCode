@@ -14,7 +14,7 @@
     "url": "git+https://github.com/SpyCoreAI/SpyCode.git"
   },
   "bugs": {
-    "url": "https://spycore.ai/support"
+    "url": "https://github.com/SpyCoreAI/SpyCode/issues"
   },
   "publishConfig": {
     "access": "public",

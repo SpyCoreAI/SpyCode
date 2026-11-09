@@ -6,11 +6,11 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## 0.9.9 - 2026-11-05
 
-CI repair for the 0.9.8 release. Clears the six high/critical advisories the
-audit gate caught on main (two critical tinypool RCEs, one vite advisory,
-three undici advisories) by moving undici to 6.29.1 and vitest to 4.1.12,
-which drops tinypool from the tree and resolves vite 7.3.7, and clears the
-critical UI server advisory the round 2 audit caught on the 4.0 line. Fixes the
+CI repair for the 0.9.8 release. Clears the seven high/critical advisories the
+audit gates caught (six on main - two critical tinypool RCEs, one vite advisory,
+three undici advisories - plus the critical UI server advisory the round 2
+audit caught on the 4.0 line) by moving undici to 6.29.1 and vitest to 4.1.12,
+which drops tinypool from the tree and resolves vite 7.3.7. Fixes the
 Windows test failures from the same run (sixteen at first, eighteen once the
 worker lived long enough to run the later files, then a worker death with
 zero failed tests): four POSIX-only tests are now skipped
