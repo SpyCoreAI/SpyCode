@@ -32,21 +32,55 @@ function runCommandMatching(call: EvidenceCall, re: RegExp): boolean {
   return call.tool === 'run_command' && call.ok && re.test(call.command ?? '');
 }
 
+/**
+ * A successful `delegate` call backs any claim: the child run is opaque to
+ * this check - its tool calls are not in this run's evidence - so warning
+ * whenever the tests ran inside a child would be a false positive by
+ * construction. The check is warn-only; unknowable evidence must not warn.
+ */
+function delegateBacking(call: EvidenceCall): boolean {
+  return call.tool === 'delegate' && call.ok;
+}
+
+/**
+ * An MCP tool call whose tool segment names the work (`mcp__<server>__<tool>`):
+ * `run_tests`, `build`, `lint` and their compounds back the matching claim.
+ * Only the tool NAME is visible here (no args), so this matches on whole
+ * `_`/`-`-separated segments of the tool segment - `run_tests` backs the
+ * test claim, `testify` does not. The command regexes above cannot do this:
+ * their `\b` never fires inside a snake_case name.
+ */
+const MCP_TEST_TOOLS = new Set(['test', 'tests', 'jest', 'vitest', 'pytest', 'phpunit', 'rspec', 'ctest']);
+const MCP_BUILD_TOOLS = new Set(['build', 'tsc', 'vite', 'webpack', 'esbuild', 'gradle']);
+const MCP_LINT_TOOLS = new Set(['lint', 'eslint', 'ruff', 'flake8', 'clippy', 'gofmt', 'prettier']);
+
+function mcpToolMatching(call: EvidenceCall, tools: ReadonlySet<string>): boolean {
+  if (!call.ok || !call.tool.startsWith('mcp__')) return false;
+  const toolPart = call.tool.slice(call.tool.lastIndexOf('__') + 2);
+  return toolPart
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .some((seg) => tools.has(seg));
+}
+
 const CLAIM_RULES: ClaimRule[] = [
   {
     claim: /\btests?\s+(passed|succeeded|successful|are passing|all green)\b/i,
     name: 'tests passed',
-    satisfiedBy: (c) => runCommandMatching(c, TEST_COMMAND_RE),
+    satisfiedBy: (c) =>
+      runCommandMatching(c, TEST_COMMAND_RE) || delegateBacking(c) || mcpToolMatching(c, MCP_TEST_TOOLS),
   },
   {
     claim: /\bbuild\s+(passed|succeeded|successful)\b/i,
     name: 'build succeeded',
-    satisfiedBy: (c) => runCommandMatching(c, BUILD_COMMAND_RE),
+    satisfiedBy: (c) =>
+      runCommandMatching(c, BUILD_COMMAND_RE) || delegateBacking(c) || mcpToolMatching(c, MCP_BUILD_TOOLS),
   },
   {
     claim: /\blint\s+(passed|clean|succeeded)\b/i,
     name: 'lint passed',
-    satisfiedBy: (c) => runCommandMatching(c, LINT_COMMAND_RE),
+    satisfiedBy: (c) =>
+      runCommandMatching(c, LINT_COMMAND_RE) || delegateBacking(c) || mcpToolMatching(c, MCP_LINT_TOOLS),
   },
 ];
 

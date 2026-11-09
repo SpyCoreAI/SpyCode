@@ -117,11 +117,14 @@ export async function runVerifyLoop(
 
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     if (opts.signal?.aborted) {
-      return { ran: true, passed: false, attempts: attempt - 1, cancelled: true, lastTail };
+      // Aborted before the first attempt: nothing ran (`attempts` is 0),
+      // so `ran` is false - the old `ran: true` claimed a verification
+      // that never happened. Same for the budget stop below.
+      return { ran: attempt - 1 > 0, passed: false, attempts: attempt - 1, cancelled: true, lastTail };
     }
     // A cost/runaway cap hit (e.g. during the prior fix) stops everything.
     if (opts.budget?.check()) {
-      return { ran: true, passed: false, attempts: attempt - 1, cancelled: false, lastTail, stoppedByBudget: true };
+      return { ran: attempt - 1 > 0, passed: false, attempts: attempt - 1, cancelled: false, lastTail, stoppedByBudget: true };
     }
     opts.onEvent?.({ type: 'verify_start', command: opts.verifyCommand, attempt, attempts });
 

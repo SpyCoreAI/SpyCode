@@ -9,6 +9,8 @@
  * each phase in isolation. The clock is injectable so tests are deterministic.
  */
 
+import { EXIT_USER_ERROR, SpycoreCliError } from '../errors.js';
+
 export type BudgetReason = 'tokens' | 'time' | 'turns';
 
 export interface BudgetCaps {
@@ -42,16 +44,51 @@ export interface Budget {
 const isPos = (n: number | undefined): n is number =>
   typeof n === 'number' && Number.isFinite(n) && n > 0;
 
-/** Normalize raw flag inputs into caps; silently drops non-positive / non-finite values. */
+/**
+ * Normalize raw flag inputs into caps. `undefined` means "flag not passed"
+ * and stays uncapped. Any PROVIDED value that is non-positive or non-finite
+ * is invalid input and throws a user error naming the flag - the old code
+ * silently dropped it to uncapped, so `--max-tokens abc` ran with NO token
+ * cap at all. (The same holds for `--max-turns`: it reaches here pre-clamped
+ * by resolveMaxTurns, but a direct caller passing 0/NaN gets the same error
+ * instead of a silent uncapped run.)
+ */
 export function toBudgetCaps(input: {
   maxTokens?: number | undefined;
   maxTimeMs?: number | undefined;
   maxTurns?: number | undefined;
 }): BudgetCaps {
   const caps: BudgetCaps = {};
-  if (isPos(input.maxTokens)) caps.maxTokens = Math.floor(input.maxTokens);
-  if (isPos(input.maxTimeMs)) caps.maxTimeMs = Math.floor(input.maxTimeMs);
-  if (isPos(input.maxTurns)) caps.maxTurns = Math.floor(input.maxTurns);
+  if (input.maxTokens !== undefined) {
+    if (!isPos(input.maxTokens)) {
+      throw new SpycoreCliError(
+        `--max-tokens must be a positive number (got ${String(input.maxTokens)})`,
+        EXIT_USER_ERROR,
+        'Omit the flag for no token cap.',
+      );
+    }
+    caps.maxTokens = Math.floor(input.maxTokens);
+  }
+  if (input.maxTimeMs !== undefined) {
+    if (!isPos(input.maxTimeMs)) {
+      throw new SpycoreCliError(
+        `--max-time must be a positive number of seconds (got ${String(input.maxTimeMs / 1000)})`,
+        EXIT_USER_ERROR,
+        'Omit the flag for no time cap.',
+      );
+    }
+    caps.maxTimeMs = Math.floor(input.maxTimeMs);
+  }
+  if (input.maxTurns !== undefined) {
+    if (!isPos(input.maxTurns)) {
+      throw new SpycoreCliError(
+        `--max-turns must be a positive number (got ${String(input.maxTurns)})`,
+        EXIT_USER_ERROR,
+        'Omit the flag for the default turn limit.',
+      );
+    }
+    caps.maxTurns = Math.floor(input.maxTurns);
+  }
   return caps;
 }
 

@@ -20,7 +20,7 @@ export const REDACTED = '***redacted***';
 // `private` and `credential` are in the pattern because a `*_PRIVATE_KEY`
 // value IS the secret (not a name for one), and a `*CREDENTIALS*` name
 // points at a credential file - both used to pass the screen verbatim.
-const SECRET_KEY_PATTERN = /token|secret|password|apikey|api_key|bearer|private|credential/i;
+const SECRET_KEY_PATTERN = /token|secret|password|apikey|api_key|accesskey|access_key|bearer|private|credential/i;
 
 /** True if a config key name should have its value redacted in dumped output. */
 export function isSecretKey(key: string): boolean {
@@ -39,6 +39,22 @@ export function isSecretKey(key: string): boolean {
  */
 export function redactSecrets(value: unknown): unknown {
   if (Array.isArray(value)) return value.map((item) => redactSecrets(item));
+  // Maps and Sets are containers, not plain objects: the old code fell
+  // through to the object branch and `Object.entries` returned [] for them,
+  // so a Map/Set of secrets came back as `{}` with its entries silently
+  // dropped. Redact them in kind, preserving the container and its keys.
+  if (value instanceof Map) {
+    const out = new Map<unknown, unknown>();
+    for (const [key, val] of value) {
+      out.set(key, typeof key === 'string' && isSecretKey(key) ? REDACTED : redactSecrets(val));
+    }
+    return out;
+  }
+  if (value instanceof Set) {
+    const out = new Set<unknown>();
+    for (const val of value) out.add(redactSecrets(val));
+    return out;
+  }
   if (value !== null && typeof value === 'object') {
     const out: Record<string, unknown> = {};
     for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
@@ -207,7 +223,7 @@ function redactProvider(entry: unknown): unknown {
  *
  * Returns the input with matches replaced by REDACTED.
  */
-const BEARER_RE = /\bBearer\s+[A-Za-z0-9\-._~+/=]{16,}/g;
+const BEARER_RE = /\bBearer\s+[A-Za-z0-9\-._~+/=]{8,}/g;
 const KEY_PREFIX_RE =
   /\b(?:sk-[A-Za-z0-9_-]{20,}|sk_(?:live|test)_[A-Za-z0-9]{16,}|ghp_[A-Za-z0-9]{16,}|gho_[A-Za-z0-9]{16,}|ghs_[A-Za-z0-9]{16,}|ghu_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,}|glpat-[A-Za-z0-9_-]{16,}|npm_[A-Za-z0-9]{16,}|pypi-[A-Za-z0-9_-]{50,}|hf_[A-Za-z0-9]{16,}|xox[baprse]-[A-Za-z0-9-]{16,}|xapp-[A-Za-z0-9-]{16,}|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,}|ya29\.[A-Za-z0-9_-]{20,}|dop_v1_[a-f0-9]{64}|SG\.[A-Za-z0-9_-]{22,}|tskey-api-[A-Za-z0-9_-]{30,}|xai-[A-Za-z0-9]{32,}|mfa\.[A-Za-z0-9_-]{84}|[0-9]{8,10}:[A-Za-z0-9_-]{35}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})\b/g;
 const LABELED_SECRET_RE =

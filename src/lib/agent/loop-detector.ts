@@ -52,6 +52,15 @@ export const LOOP_BREAKER_REPEATS = 4;
 /** Turns with no mutating success and no new information before wandering fires. */
 export const LOOP_WANDER_WARN_TURNS = 8;
 export const LOOP_WANDER_VETO_TURNS = 12;
+/**
+ * Bound on remembered result contents (SHA-256 per distinct result). The
+ * wandering check only needs to know whether a result is NEW - once the
+ * set is full the oldest hash is evicted, so memory stays bounded and a
+ * very old result may count as new once more. Deliberately generous
+ * (a run has at most a few hundred calls), far above what the detector
+ * can observe in one run.
+ */
+export const MAX_SEEN_CONTENT = 1024;
 
 function contentHash(content: string): string {
   return createHash('sha256').update(content, 'utf8').digest('hex');
@@ -105,7 +114,11 @@ export function createLoopDetector(): LoopDetector {
       // File re-read without change: read_file on a path whose content hash
       // matches the last read AND no mutating call happened in between. A
       // mutating call may have changed the file, so any of them clears the map.
+      // The streak counts at most ONE per turn: four identical re-reads in a
+      // single turn are one observation, not four - the old code let one turn
+      // trip the breaker on its own.
       let sawMutatingSuccess = false;
+      let readRepeatCountedThisTurn = false;
       for (const c of trace.calls) {
         if (c.mutating) {
           lastReadHash.clear();
@@ -116,7 +129,10 @@ export function createLoopDetector(): LoopDetector {
           const h = contentHash(c.content);
           const prev = lastReadHash.get(c.argsKey);
           if (prev !== undefined && prev === h) {
-            readRepeatStreak += 1;
+            if (!readRepeatCountedThisTurn) {
+              readRepeatStreak += 1;
+              readRepeatCountedThisTurn = true;
+            }
             repeated = true;
           } else {
             lastReadHash.set(c.argsKey, h);
@@ -132,6 +148,13 @@ export function createLoopDetector(): LoopDetector {
         if (!c.ok) continue;
         const h = contentHash(c.content);
         if (!seenContent.has(h)) {
+          // Bounded memory: evict the oldest hash when full (insertion
+          // order - Set iterates oldest first). An evicted result may count
+          // as new once more; the wandering clock only needs recent memory.
+          if (seenContent.size >= MAX_SEEN_CONTENT) {
+            const oldest = seenContent.values().next().value;
+            if (oldest !== undefined) seenContent.delete(oldest);
+          }
           seenContent.add(h);
           newInformation = true;
         }

@@ -312,9 +312,17 @@ export function createRunDispatcher({
    * agent run must stay serial (one approval UX, one journal, no interleaved
    * event streams). Unknown tools stay serial too, so their "unknown tool"
    * error surfaces exactly as before.
+   *
+   * `load_skill` is excluded as well: it check-then-adds on the run's SHARED
+   * `loadedSkills` set, and a parallel batch hands each call a shallow copy
+   * of the context that still shares that one set - two concurrent loads of
+   * the same skill could both pass the check and both inject the full body.
+   * Serializing it closes the race; a skill load is a local file read, so
+   * the cost is nil. (No other read-only tool mutates shared context state.)
    */
   const isParallelizable = (name: string): boolean => {
     if (name === DELEGATE_TOOL_NAME) return false;
+    if (name === 'load_skill') return false;
     const tool = ctx.extraTools?.get(name) ?? REGISTRY.get(name);
     return tool !== undefined && tool.mutating !== true;
   };

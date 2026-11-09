@@ -61,9 +61,12 @@ export function createDelegator({
   // PERMISSION INHERITANCE (the safety case): the child is the same agent with
   // the same rules - the parent's requestApproval gate, command rules, plan
   // mode, web-tools switch, hooks and tool limits are all threaded through
-  // unchanged. A plan-phase run cannot smuggle writes past approval by
-  // delegating: the child's own dispatch blocks mutating tools in plan mode.
-  // What is deliberately NOT shared: loadedSkills (a FRESH set - the child's
+  // unchanged, along with the per-turn tool-call cap, the disabled toolsets
+  // and the guardian threshold: a child that did not inherit them could run
+  // more calls per turn, use tools the parent had disabled, or veto-proof
+  // its way past the denial circuit breaker. A plan-phase run cannot smuggle
+  // writes past approval by delegating: the child's own dispatch blocks
+  // mutating tools in plan mode. What is deliberately NOT shared: loadedSkills (a FRESH set - the child's
   // conversation never saw the parent's injections, so "already loaded" would
   // lie), the conversation/session (fresh), attachments and plan-phase state
   // (parent-specific), and onRunState (the child's conversation id must never
@@ -138,6 +141,9 @@ export function createDelegator({
         model: childModel,
         provider,
         maxTurns: input.maxTurns ?? DEFAULT_CHILD_MAX_TURNS,
+        maxToolCallsPerTurn: opts.maxToolCallsPerTurn,
+        disabledToolsets: opts.disabledToolsets,
+        guardianThreshold: opts.guardianThreshold,
         apiUrlOverride,
         signal: opts.signal,
         cwd: opts.cwd,

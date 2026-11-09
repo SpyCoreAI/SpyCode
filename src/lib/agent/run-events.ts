@@ -31,6 +31,20 @@ export function createEventSink(opts: Pick<RunAgentOptions, 'onEvent'>): {
     // Bound the retained event log: a runaway run emitting an event per
     // token would otherwise grow this array without limit. Oldest dropped;
     // the live onEvent stream is unaffected.
+    //
+    // NOTE (4a2, item 11) - the per-event `splice(0, n)` below is O(n)
+    // memmove per event past the cap, and it STAYS: the retained log's
+    // contract is exact - `events` holds precisely the last
+    // MAX_RETAINED_EVENTS at every observation (pinned by
+    // tests/run-internals.test.ts `createEventSink drops the oldest events
+    // past the retained cap` and tests/loop-run-seams.test.ts N9, which
+    // assert exact length and exact contents). Any chunked/amortized trim
+    // leaves transient slack (up to a chunk over the bound) and breaks
+    // both pins. Removing the O(n) without breaking exactness needs a
+    // different representation (ring buffer behind the sink) plus updates
+    // to those tests - a coordinator decision, not a silent weakening
+    // here. The memmove itself is ~10k pointers (~80KB) per event, i.e.
+    // microseconds, and only fires past 10,000 events.
     if (events.length > MAX_RETAINED_EVENTS) {
       events.splice(0, events.length - MAX_RETAINED_EVENTS);
     }

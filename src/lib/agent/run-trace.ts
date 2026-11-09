@@ -11,9 +11,13 @@
  * the trace id), so a background run is always replayable.
  *
  * The writer buffers in memory and commits atomically (tmp + rename) on
- * `close` - a killed run leaves no half-written trace behind.
+ * `close` - a killed run leaves no half-written trace behind. The buffer is
+ * BOUNDED (MAX_TRACE_EVENTS / MAX_TRACE_BYTES): past the cap further events
+ * are dropped and the count is recorded on the closing line, so a runaway
+ * run cannot grow the buffer without limit. Nothing touches disk until
+ * `close` - the bound is in memory only, by design.
  */
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { getConfigPath } from '../config.js';
 import { redactFreeText } from '../redact.js';
@@ -23,6 +27,10 @@ import type { AgentEvent } from './loop.js';
 export const RUN_TRACE_VERSION = 1;
 /** Subdirectory of the CLI config dir holding trace files. */
 export const RUN_TRACE_DIRNAME = 'traces';
+/** Max event lines buffered in memory per trace (past this, events drop). */
+export const MAX_TRACE_EVENTS = 10_000;
+/** Max buffered JSON bytes per trace (past this, events drop). */
+export const MAX_TRACE_BYTES = 32 * 1024 * 1024;
 
 /** Where trace files live (created on first write, never on read). */
 export function runTraceDir(configDir?: string): string {
@@ -64,6 +72,11 @@ export interface RunTraceResult {
   reachedMaxTurns: boolean;
   budgetStop: string | null;
   endedAt: string;
+  /**
+   * Events dropped by the writer's memory cap (MAX_TRACE_EVENTS /
+   * MAX_TRACE_BYTES). Present only when > 0 - the trace is otherwise whole.
+   */
+  droppedEvents?: number | undefined;
 }
 
 export interface RunTraceWriter {
@@ -111,11 +124,23 @@ export function createRunTraceWriter(opts: {
       detached: opts.detached,
     } satisfies RunTraceHeader),
   ];
+  // Bounded buffer: the header line is always kept; event lines stop being
+  // appended past either cap and the dropped count is recorded on close.
+  let eventCount = 0;
+  let bufferedBytes = lines[0]!.length;
+  let droppedEvents = 0;
   return {
     traceId: opts.traceId,
     append: (event: AgentEvent): void => {
       try {
-        lines.push(JSON.stringify(scrubEvent(event)));
+        const line = JSON.stringify(scrubEvent(event));
+        if (eventCount >= MAX_TRACE_EVENTS || bufferedBytes + line.length > MAX_TRACE_BYTES) {
+          droppedEvents += 1;
+          return;
+        }
+        lines.push(line);
+        eventCount += 1;
+        bufferedBytes += line.length;
       } catch {
         /* an unserializable event must not break the run */
       }
@@ -125,6 +150,7 @@ export function createRunTraceWriter(opts: {
         ...result,
         finalText: redactFreeText(result.finalText).slice(0, 20_000),
         endedAt: new Date().toISOString(),
+        ...(droppedEvents > 0 ? { droppedEvents } : {}),
       };
       lines.push(JSON.stringify({ v: RUN_TRACE_VERSION, result: ended }));
       const dir = runTraceDir(opts.configDir);
@@ -143,11 +169,24 @@ export function listRunTraces(configDir?: string): string[] {
   const dir = runTraceDir(configDir);
   try {
     if (!existsSync(dir)) return [];
+    // Newest first by file mtime, not by id string: lexicographic order is
+    // only chronological for `trace-<ts>-<rand>` ids, while detached runs
+    // use `run_<hex>` ids whose hex suffix sorts arbitrarily. Name is the
+    // tie-break for files written within the same millisecond.
     return readdirSync(dir)
       .filter((f) => f.endsWith('.jsonl'))
       .map((f) => f.slice(0, -'.jsonl'.length))
-      .sort()
-      .reverse();
+      .map((id) => {
+        let mtimeMs = 0;
+        try {
+          mtimeMs = statSync(join(dir, `${id}.jsonl`)).mtimeMs;
+        } catch {
+          /* an unreadable file sorts last */
+        }
+        return { id, mtimeMs };
+      })
+      .sort((a, b) => b.mtimeMs - a.mtimeMs || b.id.localeCompare(a.id))
+      .map((e) => e.id);
   } catch {
     return [];
   }

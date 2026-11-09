@@ -162,6 +162,10 @@ export function assembleFirstTurn({
   // assembly-time clamp (provider-aware) plus the warning event. Anything
   // the model will see is decided by the pure half, which is why tests can
   // pin its bytes exactly.
+  // `provider` stays in the signature (callers pass it, and a future
+  // provider-specific cap would branch on it again); the clamp itself no
+  // longer branches on it - every provider gets the same bound.
+  void provider;
   const { parts, taskPartIdx } = planFirstTurn({
     cwd: opts.cwd,
     maxTurns,
@@ -180,19 +184,20 @@ export function assembleFirstTurn({
     planEdited: opts.planEdited,
     planFeedback: opts.planFeedback,
   });
-  // 1.8: the single assembly-time clamp, SpyCore wire only - its provider
-  // re-joins `${system}\n\n${message}` into ONE message field under the
-  // server's hard 32,000-char cap (an oversized project-context block could
-  // previously 400 the run at start). Priority task/user content > attached
-  // files > project-context tail; every cut leaves an explicit in-band
-  // marker + a one-line event - never silent. BYOK providers carry `system`
-  // natively with no such wire cap and stay byte-identical.
+  // 1.8: the single assembly-time clamp. The SpyCore provider re-joins
+  // `${system}\n\n${message}` into ONE message field under the server's hard
+  // 32,000-char cap (an oversized project-context block could previously
+  // 400 the run at start). BYOK providers carry `system` natively, but a
+  // huge assembly blows their context the same way - an uncapped first turn
+  // is a run that fails at start on every provider. The clamp is
+  // byte-identical under the cap, so ordinary runs are unchanged on all
+  // providers; over the cap, priority task/user content > attached files >
+  // project-context tail, every cut leaves an explicit in-band marker + a
+  // one-line event - never silent.
   let firstTurnTexts = parts.map((p) => `${p.pre ?? ''}${p.body}${p.post ?? ''}`);
-  if (provider.id === 'spycore') {
-    const clamped = clampWireAssembly(parts);
-    if (clamped.warning) emit({ type: 'context_clamped', text: clamped.warning });
-    firstTurnTexts = clamped.texts;
-  }
+  const clamped = clampWireAssembly(parts);
+  if (clamped.warning) emit({ type: 'context_clamped', text: clamped.warning });
+  firstTurnTexts = clamped.texts;
   // Reassemble across the system/message seam: everything before TASK is
   // the system prompt; the rest is the message, minus the leading joiner
   // the SpyCore and compatible-endpoint providers re-add on re-join (BYOK sends

@@ -463,10 +463,43 @@ export function makeContainmentFilter(cwd: string): (relResult: string) => boole
   };
 }
 
+/**
+ * True for UTF-16 text: a BOM, or NULs on one parity with text bytes on the
+ * other across most of the sample. UTF-16LE writes `a\0b\0…` - the NUL in
+ * every second byte made the old check call it binary, so read_file /
+ * edit_file / write_file rejected UTF-16 files outright. The bar is high
+ * (≥80% of byte pairs fit the pattern, ≥4 pairs) so real binary - whose NULs
+ * sit next to non-text bytes - still reads as binary. Non-ASCII UTF-16
+ * (CJK, emoji) has non-zero high bytes and only matches via the BOM; that
+ * is the documented limit of the heuristic, not a second binary rule.
+ */
+function looksUtf16Text(buf: Buffer, len: number): boolean {
+  const pairs = Math.floor(len / 2);
+  if (pairs < 4) return false;
+  const isTextByte = (b: number): boolean =>
+    b === 9 || b === 10 || b === 11 || b === 12 || b === 13 || (b >= 32 && b <= 126) || b >= 128;
+  let le = 0;
+  let be = 0;
+  for (let i = 0; i < pairs; i += 1) {
+    const lo = buf[i * 2] as number;
+    const hi = buf[i * 2 + 1] as number;
+    if (hi === 0 && isTextByte(lo)) le += 1;
+    if (lo === 0 && isTextByte(hi)) be += 1;
+  }
+  return Math.max(le, be) / pairs >= 0.8;
+}
+
 /** True for content that is almost certainly not text (NUL or many controls). */
 export function looksBinary(buf: Buffer): boolean {
   const len = Math.min(buf.length, 8000);
   if (len === 0) return false;
+  // UTF-16 first: its NULs are text, not binary evidence.
+  if (len >= 2) {
+    const b0 = buf[0] as number;
+    const b1 = buf[1] as number;
+    if ((b0 === 0xff && b1 === 0xfe) || (b0 === 0xfe && b1 === 0xff)) return false;
+  }
+  if (looksUtf16Text(buf, len)) return false;
   let suspicious = 0;
   for (let i = 0; i < len; i += 1) {
     const b = buf[i] as number;

@@ -146,7 +146,12 @@ export function validateSkillAuthoring(input: SkillAuthoringInput): SkillStandar
       });
     }
     const body = desc.endsWith('.') ? desc.slice(0, -1) : desc;
-    if (/[.!?]/.test(body)) {
+    // Version strings carry periods that are not sentence breaks: strip
+    // `v1.2.3` / `1.2.3` / `v2.0` before the one-sentence check, so a
+    // description that merely names a version does not trip the rule. The
+    // length and trailing-period checks above still read the original text.
+    const withoutVersions = body.replace(/\bv?\d+(?:\.\d+)+\b/gi, 'VERSION');
+    if (/[.!?]/.test(withoutVersions)) {
       findings.push({
         rule: 'description-sentence',
         message: 'description must be ONE sentence - no interior periods, exclamations, or questions',
@@ -155,9 +160,14 @@ export function validateSkillAuthoring(input: SkillAuthoringInput): SkillStandar
     if (!desc.endsWith('.')) {
       findings.push({ rule: 'description-period', message: 'description must end with a period' });
     }
-    const lowered = ` ${desc.toLowerCase()} `;
+    // Match marketing words as whole words, ignoring attached punctuation:
+    // `ultimate!` and `best-in-class.` are the same hype as the bare words.
+    // Both sides are normalized the same way (non-alphanumerics to spaces),
+    // so hyphenated and spaced spellings match one entry each.
+    const normalized = ` ${desc.toLowerCase().replace(/[^a-z0-9]+/g, ' ')} `;
     for (const w of MARKETING_WORDS) {
-      if (lowered.includes(` ${w} `) || lowered.includes(` ${w}.`) || lowered.includes(` ${w},`)) {
+      const nw = w.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+      if (nw.length > 0 && normalized.includes(` ${nw} `)) {
         findings.push({
           rule: 'description-marketing',
           message: `description reads like marketing ("${w}") - describe the trigger, not the hype`,

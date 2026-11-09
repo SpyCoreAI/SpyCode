@@ -117,6 +117,11 @@ async function drive(
   return { result, events };
 }
 
+// 4b1's ProviderEvent 'warning' is not in this clone's ProviderEvent yet;
+// the cast stands in until the variant lands in types.ts.
+const warn = (message: string): ScriptStep =>
+  ({ type: 'warning', message }) as unknown as ScriptStep;
+
 // ─────────────────────────── N4 ───────────────────────────
 
 describe('N4 per-run isolation', () => {
@@ -962,5 +967,37 @@ describe('N22 native-turn edges', () => {
     const { result } = await drive(provider, { task: 'abort', cwd, requestApproval: approve, signal: controller.signal });
     expect(result).toMatchObject({ cancelled: true, turns: 1, toolCalls: 1, finalText: '' });
     expect(existsSync(join(cwd, 'n2.txt'))).toBe(false);
+  });
+});
+
+// ─────────────────────────── provider warning ───────────────────────────
+
+describe('provider warning event', () => {
+  // 4b1: BYOK adapters yield a ProviderEvent 'warning' when the model stops
+  // on a finish reason (truncation). The loop must surface it as an
+  // AgentEvent 'warning' instead of dropping it silently; the partial reply
+  // is still the final answer. Mutation: drop the `warning` branch in
+  // `streamTurn` — the warning event vanishes and this turns red.
+  test('a warning event surfaces as an AgentEvent warning and the partial reply still stands', async () => {
+    const cwd = workspace('spycli-warn-');
+    const provider = new ScriptProvider({
+      script: byTurn([
+        [
+          { type: 'text', text: 'Partial answer.' },
+          warn('Response truncated (max tokens hit) - the reply may be incomplete.'),
+          { type: 'usage', input: 1, output: 1 },
+          { type: 'done' },
+        ],
+      ]),
+    });
+    const { result, events } = await drive(provider, { task: 'warn', cwd, requestApproval: WRITES_ONLY });
+    expect(only(events, 'warning')).toEqual([
+      {
+        type: 'warning',
+        turn: 1,
+        text: 'Response truncated (max tokens hit) - the reply may be incomplete.',
+      },
+    ]);
+    expect(result.finalText).toBe('Partial answer.');
   });
 });

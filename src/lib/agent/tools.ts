@@ -172,10 +172,16 @@ export function validateArgs(params: ToolParameters, args: Record<string, unknow
       errors.push(`unknown parameter "${key}"`);
       continue;
     }
-    if (val === undefined || val === null) continue;
+    // Only an ABSENT optional is skipped: `null` is not a valid string /
+    // number / integer / boolean, so it used to pass silently and reached
+    // the tool as a value no schema allows. `NaN` likewise passed the
+    // `number` check (`typeof NaN === 'number'`) and then poisoned any
+    // arithmetic downstream. Both are errors now.
+    if (val === undefined) continue;
     const t = prop.type;
     if (t === 'string' && typeof val !== 'string') errors.push(`"${key}" must be a string`);
-    else if (t === 'number' && typeof val !== 'number') errors.push(`"${key}" must be a number`);
+    else if (t === 'number' && (typeof val !== 'number' || !Number.isFinite(val)))
+      errors.push(`"${key}" must be a number`);
     else if (t === 'integer' && (typeof val !== 'number' || !Number.isInteger(val))) {
       errors.push(`"${key}" must be an integer`);
     } else if (t === 'boolean' && typeof val !== 'boolean') errors.push(`"${key}" must be a boolean`);

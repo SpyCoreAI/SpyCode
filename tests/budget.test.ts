@@ -5,21 +5,35 @@ import {
   formatBudgetBar,
   describeBudgetStop,
 } from '../src/lib/agent/budget.js';
+import { SpycoreCliError } from '../src/lib/errors.js';
 
 describe('toBudgetCaps', () => {
-  test('keeps positive finite caps and drops the rest', () => {
+  test('keeps positive finite caps; undefined means no cap', () => {
     expect(toBudgetCaps({ maxTokens: 5000, maxTimeMs: 60000, maxTurns: 8 })).toEqual({
       maxTokens: 5000,
       maxTimeMs: 60000,
       maxTurns: 8,
     });
-    // zero / negative / NaN / undefined are all dropped (no cap)
-    expect(toBudgetCaps({ maxTokens: 0, maxTimeMs: -1, maxTurns: Number.NaN })).toEqual({});
     expect(toBudgetCaps({})).toEqual({});
+    expect(toBudgetCaps({ maxTokens: undefined, maxTimeMs: undefined, maxTurns: undefined })).toEqual({});
   });
 
   test('floors fractional caps', () => {
     expect(toBudgetCaps({ maxTokens: 1000.9 })).toEqual({ maxTokens: 1000 });
+  });
+
+  test('non-positive / non-finite caps throw instead of silently uncapping', () => {
+    // --max-tokens abc / 0 used to run with NO token cap at all.
+    for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => toBudgetCaps({ maxTokens: bad })).toThrow('--max-tokens must be a positive number');
+      expect(() => toBudgetCaps({ maxTimeMs: bad })).toThrow('--max-time must be a positive number');
+      expect(() => toBudgetCaps({ maxTurns: bad })).toThrow('--max-turns must be a positive number');
+    }
+    expect(() => toBudgetCaps({ maxTokens: 0 })).toThrow(SpycoreCliError);
+    expect(() => toBudgetCaps({ maxTokens: 0 })).toThrow('--max-tokens must be a positive number (got 0)');
+    expect(() => toBudgetCaps({ maxTimeMs: Number.NaN })).toThrow(
+      '--max-time must be a positive number of seconds (got NaN)',
+    );
   });
 });
 

@@ -16,6 +16,7 @@
  * Pin state lives in `<userSkillsDir>/.curator.json`.
  */
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { userSkillsDir } from './skills.js';
 
@@ -63,6 +64,45 @@ function readJsonFile<T>(path: string): T | null {
   }
 }
 
+/**
+ * Write a JSON state file atomically (unique tmp file + rename). A direct
+ * write can tear mid-crash and leave a truncated file, which the next read
+ * treats as corrupt and resets - silently losing every recorded view. The
+ * rename makes the file either the old or the new contents, never a torn
+ * mix. Best-effort: a failure to write the tmp file leaves the old file
+ * untouched.
+ */
+function writeJsonAtomic(path: string, value: unknown): void {
+  const tmp = `${path}.tmp-${process.pid}-${randomUUID()}`;
+  writeFileSync(tmp, JSON.stringify(value, null, 2), 'utf8');
+  renameSync(tmp, path);
+}
+
+/**
+ * True when the file exists but does not parse as JSON. Used before an
+ * overwrite: a corrupt telemetry file must be quarantined (renamed aside,
+ * never deleted), not silently reset to empty by the next write.
+ */
+function isCorruptJsonFile(path: string): boolean {
+  try {
+    if (!existsSync(path)) return false;
+    JSON.parse(readFileSync(path, 'utf8'));
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+/** Move a corrupt state file aside so its contents survive for inspection. */
+function quarantineCorruptFile(path: string): void {
+  try {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    renameSync(path, `${path}.corrupt-${stamp}`);
+  } catch {
+    /* best-effort: the write below still replaces the corrupt file */
+  }
+}
+
 /** Read the usage telemetry ({} when the file is missing/corrupt). */
 export function readSkillUsage(userDir: string = userSkillsDir()): Record<string, SkillUsageEntry> {
   const file = readJsonFile<SkillUsageFile>(usagePath(userDir));
@@ -72,20 +112,28 @@ export function readSkillUsage(userDir: string = userSkillsDir()): Record<string
 
 /**
  * Record one `load_skill` view. Best-effort by contract - telemetry must
- * never throw into a run, so every failure is swallowed here.
+ * never throw into a run, so every failure is swallowed here. The write is
+ * atomic (tmp + rename): the old read-modify-write could tear mid-write and
+ * the next read then reset the whole file to empty. A corrupt file is
+ * quarantined aside instead of silently reset, so its views survive for
+ * inspection. (Cross-process increments can still race - two CLI processes
+ * recording the same skill at the same instant may lose one count; the
+ * atomic rename only guarantees neither write tears the file.)
  */
 export function recordSkillLoad(name: string, userDir: string = userSkillsDir()): void {
   try {
     const key = name.trim();
     if (key.length === 0) return;
     mkdirSync(userDir, { recursive: true });
+    const path = usagePath(userDir);
+    if (isCorruptJsonFile(path)) quarantineCorruptFile(path);
     const skills = readSkillUsage(userDir);
     const prev = skills[key];
     skills[key] = {
       views: (prev?.views ?? 0) + 1,
       lastActivityAt: new Date().toISOString(),
     };
-    writeFileSync(usagePath(userDir), JSON.stringify({ version: 1, skills }, null, 2), 'utf8');
+    writeJsonAtomic(path, { version: 1, skills });
   } catch {
     /* telemetry is best-effort */
   }
@@ -100,7 +148,7 @@ export function readCuratorState(userDir: string = userSkillsDir()): CuratorStat
 
 function writeCuratorState(state: CuratorState, userDir: string): void {
   mkdirSync(userDir, { recursive: true });
-  writeFileSync(curatorPath(userDir), JSON.stringify(state, null, 2), 'utf8');
+  writeJsonAtomic(curatorPath(userDir), state);
 }
 
 /** True when the skill is pinned (exempt from every curator transition). */
@@ -152,7 +200,14 @@ export interface FindStaleSkillsOpts {
  */
 export function findStaleSkills(opts: FindStaleSkillsOpts = {}): StaleSkill[] {
   const userDir = opts.userDir ?? userSkillsDir();
-  const inactiveDays = opts.inactiveDays ?? DEFAULT_STALE_DAYS;
+  // A negative or non-finite threshold is invalid input, not "everything is
+  // stale": a negative thresholdMs makes every skill's age satisfy the check.
+  // Fall back to the default instead of returning the whole catalog.
+  const rawDays = opts.inactiveDays ?? DEFAULT_STALE_DAYS;
+  const inactiveDays =
+    typeof rawDays === 'number' && Number.isFinite(rawDays) && rawDays >= 0
+      ? rawDays
+      : DEFAULT_STALE_DAYS;
   const now = opts.now ?? Date.now();
   const thresholdMs = inactiveDays * 24 * 60 * 60 * 1000;
   const usage = readSkillUsage(userDir);

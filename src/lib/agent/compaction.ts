@@ -50,6 +50,23 @@ export interface PruneResult {
 }
 
 /**
+ * Cap `text` at `cap` chars, never splitting a UTF-16 surrogate pair: when
+ * the cut would fall between a high surrogate and its low half, the high
+ * half is dropped too (one char short beats a lone surrogate, which renders
+ * as U+FFFD and corrupts the transcript).
+ */
+function capText(text: string, cap: number): string {
+  if (text.length <= cap) return text;
+  let end = cap;
+  if (end > 0) {
+    const last = text.charCodeAt(end - 1);
+    const next = text.charCodeAt(end);
+    if (last >= 0xd800 && last <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) end -= 1;
+  }
+  return `${text.slice(0, end)}… [pruned]`;
+}
+
+/**
  * Stage 1: deterministically shrink a transcript without any model call.
  * - tool/command items older than the most recent K collapse to
  *   `name + summary` stubs (the full output tail is what costs);
@@ -104,7 +121,7 @@ export function pruneTranscriptItems(
     }
     if (it.kind === 'assistant' && !it.final && typeof it.text === 'string' && it.text.length > COMPACT_ASSISTANT_CAP) {
       pruned += 1;
-      out.push({ ...it, text: `${it.text.slice(0, COMPACT_ASSISTANT_CAP)}… [pruned]` });
+      out.push({ ...it, text: capText(it.text, COMPACT_ASSISTANT_CAP) });
       continue;
     }
     out.push(it);

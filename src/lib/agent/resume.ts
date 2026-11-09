@@ -240,6 +240,16 @@ export function buildResumeContinueMessage(input: {
 }
 
 /**
+ * How long one `makeRunStateHook` instance reuses its git fingerprint before
+ * re-running `git rev-parse HEAD`. The hook fires at every turn boundary; a
+ * synchronous spawn per boundary is pure overhead in the common case (HEAD
+ * moves rarely mid-run, and when it does the next re-check still records
+ * it - resume drift detection compares the recorded fingerprint against the
+ * live one, so a move is never missed, only attributed to the next boundary).
+ */
+const GIT_HEAD_CACHE_MS = 30_000;
+
+/**
  * Per-phase `onRunState` hook: mirrors each completed step boundary into the
  * recorder (conversation binding, cumulative turn count, budget consumption,
  * loaded skills, git fingerprint). Build a fresh hook per runAgent call - it
@@ -252,6 +262,14 @@ export function makeRunStateHook(input: {
   loadedSkills: ReadonlySet<string>;
 }): (s: AgentRunState) => void {
   const base = input.recorder.state().turnsCompleted;
+  let cachedHead: { head: string | null; at: number } | null = null;
+  const gitHead = (): string | null => {
+    const now = Date.now();
+    if (cachedHead === null || now - cachedHead.at >= GIT_HEAD_CACHE_MS) {
+      cachedHead = { head: currentGitHead(input.cwd), at: now };
+    }
+    return cachedHead.head;
+  };
   return (s) => {
     const snap = input.budget.snapshot();
     input.recorder.update({
@@ -260,7 +278,7 @@ export function makeRunStateHook(input: {
       turnsCompleted: base + s.turnsCompleted,
       budget: { ...snap, caps: input.budget.caps },
       loadedSkills: [...input.loadedSkills],
-      gitHead: currentGitHead(input.cwd),
+      gitHead: gitHead(),
     });
   };
 }

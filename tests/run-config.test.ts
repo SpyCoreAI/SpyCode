@@ -68,9 +68,15 @@ describe('resolveBudgetCaps', () => {
       resolveBudgetCaps({ maxTokens: undefined, maxTime: undefined, maxTurnsExplicit: true, maxTurns: 10 }),
     ).toEqual({ maxTurns: 10 });
   });
-  test('non-positive values are dropped', () => {
-    expect(
+  test('non-positive --max-tokens / --max-time throw instead of silently uncapping', () => {
+    expect(() =>
       resolveBudgetCaps({ maxTokens: '0', maxTime: '-5', maxTurnsExplicit: true, maxTurns: 0 }),
-    ).toEqual({});
+    ).toThrow('--max-tokens must be a positive number');
+    expect(() =>
+      resolveBudgetCaps({ maxTokens: 'abc', maxTime: undefined, maxTurnsExplicit: false, maxTurns: 25 }),
+    ).toThrow('--max-tokens must be a positive number (got NaN)');
+    expect(() =>
+      resolveBudgetCaps({ maxTokens: undefined, maxTime: '0', maxTurnsExplicit: false, maxTurns: 25 }),
+    ).toThrow('--max-time must be a positive number');
   });
 });

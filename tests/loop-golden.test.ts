@@ -113,6 +113,9 @@ describe('N3 first-turn bytes', () => {
       expected['clamp/spycore']!.events.length,
       'the clamp case no longer clamps - the clamp path would go unpinned',
     ).toBe(1);
-    expect(expected['clamp/byok-unclamped']!.events, 'the bring-your-own-key case clamps').toEqual([]);
+    expect(
+      expected['clamp/byok-unclamped']!.events.length,
+      'the bring-your-own-key case now clamps too (4a2 item 13: the wire clamp applies to all providers)',
+    ).toBe(1);
   });
 });

@@ -146,9 +146,14 @@ function scanRoot(root: string, source: 'project' | 'user'): DiscoveredSkill[] {
   }
   // A SKILL.md is a repository-supplied path. Its parsed DESCRIPTION lands in
   // the system prompt before any tool call, and `load_skill` later returns its
-  // whole body - so an unguarded read here leaks twice over.
+  // body (capped by capSkillBody) - so an unguarded read here leaks twice over.
   const isSecret = loadSecretGuardSync(root);
-  for (const d of dirents) {
+  // Deterministic order: two project skills sharing one frontmatter `name`
+  // used to resolve by readdirSync order (filesystem-dependent winner). The
+  // dirents are sorted by directory name first, so the winner is defined:
+  // the alphabetically-last directory wins the collision within one root.
+  const sorted = [...dirents].sort((a, b) => a.name.localeCompare(b.name));
+  for (const d of sorted) {
     if (!d.isDirectory()) continue;
     const file = join(root, d.name, 'SKILL.md');
     try {

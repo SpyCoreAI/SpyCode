@@ -51,7 +51,13 @@ export function parseTier(text: string): ComplexityTier | null {
 export function resolveAllowedModels(plan: string | undefined): Set<AgentModelSlug> | null {
   if (!plan) return null;
   const p = plan.toLowerCase();
-  if (p === 'free' || p.includes('free')) return new Set<AgentModelSlug>(['hermes']);
+  // The free tier - and only the free tier - clamps to Hermes-only. The old
+  // `p.includes('free')` clamped ANY slug containing "free" (`carefree`,
+  // `pro-free-addon`, …). A slug is a free-tier slug when it IS `free` or a
+  // named free variant (`free_trial`, `free-tier`); anything else is not.
+  if (p === 'free' || p.startsWith('free_') || p.startsWith('free-')) {
+    return new Set<AgentModelSlug>(['hermes']);
+  }
   return new Set<AgentModelSlug>(['hermes', 'minos', 'styx', 'charon']);
 }
 

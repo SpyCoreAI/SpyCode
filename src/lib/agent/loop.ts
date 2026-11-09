@@ -14,7 +14,7 @@
 import { EXIT_USER_ERROR, SpycoreCliError } from '../errors.js';
 import { WIRE_MESSAGE_MAX_CHARS, clampToWireMax } from '../wire-limits.js';
 import { SpyCoreProvider } from '../providers/spycore.js';
-import type { Provider, ToolDecl, ToolResultDecl } from '../providers/types.js';
+import type { Provider, ProviderEvent, ToolDecl, ToolResultDecl } from '../providers/types.js';
 import { parseTurn } from './protocol.js';
 import type { ResolvedMcpServer } from './mcp-config.js';
 import { REGISTRY, type ToolLimits, type ToolResult } from './tools.js';
@@ -25,6 +25,7 @@ import {
   autoCompactPct,
   createAutoCompactTrigger,
 } from './auto-compact.js';
+import { estimateTokensFromChars } from '../context-meter.js';
 import type { EffectiveCommandRules } from './command-rules.js';
 // F1 sub-agent orchestration: the `delegate` tool's constants. The Delegator
 // interface is implemented in run-delegate.ts. delegate.ts imports only types
@@ -114,6 +115,9 @@ export type AgentEvent =
   | { type: 'tool_call_started'; turn: number; index: number; name: string; depth?: number }
   /** Server-side skills the SpyCore backend activated this turn (informational; spycore provider only). */
   | { type: 'skills'; turn: number; skills: string[]; depth?: number }
+  /** BYOK finish-reason warning (4b1): the model stopped before a natural end
+   * (e.g. truncation on max tokens) — the reply so far may be incomplete. */
+  | { type: 'warning'; turn: number; text: string; depth?: number }
   /** A connected MCP server (dim, informational): startup warning or a ready summary. */
   | { type: 'mcp_notice'; level: 'warn' | 'info'; text: string; depth?: number }
   /** Project skills withheld by the workspace trust gate (warn, names the remedy). */
@@ -442,6 +446,8 @@ interface StreamTurnInput {
   attachments: string[] | undefined;
   onToken: (chunk: string) => void;
   onSkills: (skills: string[]) => void;
+  /** 4b1: a BYOK finish-reason warning (e.g. truncation on max tokens). */
+  onWarning: (message: string) => void;
   onToolStarted: ((index: number, name: string) => void) | undefined;
   shouldStop: (() => boolean) | undefined;
 }
@@ -458,6 +464,18 @@ interface StreamTurnInput {
  * run at the turn boundary. We never act on a partial reply, so no mutation can
  * be left half-applied.
  */
+/**
+ * 4b1 added ProviderEvent 'warning' (BYOK finish_reason truncation). This
+ * clone's ProviderEvent predates the variant, so the discriminant is read
+ * through a widened string — once the variant lands in types.ts this still
+ * compiles and matches the same way. Do not "simplify" to
+ * `event.type === 'warning'` until then: tsc rejects it (TS2367 while
+ * variants remain, TS2339 once the chain narrows to `never`).
+ */
+function isWarningEvent(event: ProviderEvent): boolean {
+  return (event as { type: string }).type === 'warning';
+}
+
 async function streamTurn(input: StreamTurnInput): Promise<TurnResult> {
   let text = '';
   let inputTokens = 0;
@@ -489,6 +507,11 @@ async function streamTurn(input: StreamTurnInput): Promise<TurnResult> {
     } else if (event.type === 'skills') {
       // Informational (spycore provider only): server-side skills activated.
       input.onSkills(event.skills);
+    } else if (isWarningEvent(event)) {
+      // 4b1: BYOK adapters yield this when the model stops on a finish
+      // reason (e.g. truncation on max tokens). The text so far is still
+      // the reply; the warning says it may be incomplete.
+      input.onWarning((event as unknown as { message: string }).message);
     } else if (event.type === 'error') {
       throw new SpycoreCliError(event.message, EXIT_USER_ERROR);
     } else if (event.type === 'done') {
@@ -744,6 +767,18 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentResult> {
   };
 
   /**
+   * A-9 - every tool call of the run, for the evidence check at close.
+   * Declared HERE, above the closures that read it: `finalizeAnswer` and
+   * `checkLoop` close over these three, and declaring them after the
+   * closures left a `let`/`const` TDZ shape that only worked because the
+   * closures run later. Declaring first makes the order load-bearing
+   * instead of accidental.
+   */
+  const evidenceCalls: EvidenceCall[] = [];
+  let hitTurnCap = false;
+  let turnBudgetHit = false;
+
+  /**
    * A-9 - close out a model final answer: run the evidence check first (warn
    * only, never block), then emit `final` and return. Every model-produced
    * final answer goes through here.
@@ -805,6 +840,13 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentResult> {
   // F4: the previous turn's `usage` `input` - the full assembled context the
   // model just read - is the exact reading for the auto-compact decision.
   let lastInputTokens = 0;
+  // F4: running estimate of the same reading, for providers that never
+  // publish `usage`. It accumulates the new transcript material each turn
+  // (chars/4, the context meter's own heuristic) and re-anchors on the exact
+  // reading whenever one arrives, so auto-compact can still fire instead of
+  // staying blind at 0 forever. It only ever grows between re-anchors, so a
+  // stale over-estimate compacts early - the safe direction.
+  let estimatedInputTokens = 0;
   // F4: one-shot auto-compact trigger, conversation-scoped.
   const autoCompact = createAutoCompactTrigger();
 
@@ -841,10 +883,6 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentResult> {
   // summary-only step. Instead of a hard cut at the cap, the model gets one
   // final turn to summarize; tool calls emitted there are never dispatched.
   const summaryTurn = maxTurns + 1;
-  // A-9: every tool call of the run, for the evidence check at close.
-  const evidenceCalls: EvidenceCall[] = [];
-  let hitTurnCap = false;
-  let turnBudgetHit = false;
   try {
   for (let turn = 1; turn <= summaryTurn; turn += 1) {
     const isSummaryTurn = turn === summaryTurn;
@@ -898,6 +936,13 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentResult> {
     let reply: string;
     let replyToolCalls: ProviderToolCallLite[] = [];
     try {
+      // F4: the material this turn adds to the transcript, for the
+      // no-usage estimate below (system once, message, fed-back tool
+      // results). Captured before the call - `pending` is reassigned after.
+      const sentChars =
+        (pendingSystem?.length ?? 0) +
+        pending.length +
+        (pendingToolResults?.reduce((n, r) => n + r.content.length, 0) ?? 0);
       // A-6 + H-1: the system prompt goes out at most once per run (turn 1
       // of a fresh conversation). Verify the bytes before they go out - a
       // future code path that regenerates the system mid-run trips here
@@ -917,6 +962,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentResult> {
         attachments: pendingAttachments,
         onToken: (chunk) => emit({ type: 'assistant_token', turn, chunk }),
         onSkills: (activated) => emit({ type: 'skills', turn, skills: activated }),
+        onWarning: (message) => emit({ type: 'warning', turn, text: message }),
         onToolStarted: nativeMode
           ? (index, name) => emit({ type: 'tool_call_started', turn, index, name })
           : undefined,
@@ -926,7 +972,16 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentResult> {
       });
       reply = turnRes.text;
       replyToolCalls = turnRes.toolCalls;
-      lastInputTokens = turnRes.inputTokens; // F4: the reading for the next turn's auto-compact check
+      if (turnRes.inputTokens > 0) {
+        // Exact reading: use it, and re-anchor the estimate on it.
+        lastInputTokens = turnRes.inputTokens; // F4: the reading for the next turn's auto-compact check
+        estimatedInputTokens = turnRes.inputTokens;
+      } else {
+        // No `usage` from this provider: estimate the new material instead
+        // of leaving the reading at 0, which would never trip auto-compact.
+        estimatedInputTokens += estimateTokensFromChars(sentChars + reply.length);
+        lastInputTokens = estimatedInputTokens;
+      }
       pendingSystem = undefined; // delivered with turn 1; later turns send only the message
       pendingAttachments = undefined; // delivered with turn 1, exactly like the system prompt
       pendingToolResults = undefined; // consumed; the native branch re-sets it per round

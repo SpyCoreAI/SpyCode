@@ -239,3 +239,39 @@ describe('redactConfigDump - MCP server command/args', () => {
     });
   });
 });
+
+describe('redact (4a2 pins: access keys, Map/Set, short bearer tokens)', () => {
+  test('isSecretKey flags accessKey / accessKeyId', () => {
+    expect(isSecretKey('accessKey')).toBe(true);
+    expect(isSecretKey('accessKeyId')).toBe(true);
+    expect(isSecretKey('AWS_ACCESS_KEY_ID')).toBe(true);
+  });
+
+  test('redactSecrets preserves Map and Set instead of returning {}', () => {
+    const map = redactSecrets(
+      new Map<string, unknown>([
+        ['apiKey', 'k1'],
+        ['safe', 1],
+      ]),
+    ) as Map<string, unknown>;
+    expect(map).toBeInstanceOf(Map);
+    expect(map.get('apiKey')).toBe(REDACTED);
+    expect(map.get('safe')).toBe(1);
+    const set = redactSecrets(new Set<unknown>([{ apiKey: 'k2' }, 'plain'])) as Set<unknown>;
+    expect(set).toBeInstanceOf(Set);
+    expect([...set]).toContainEqual({ apiKey: REDACTED });
+    expect([...set]).toContain('plain');
+    // Nested inside a plain object, and the input is not mutated.
+    const input = { creds: new Map<string, unknown>([['password', 'p']]) };
+    const out = redactSecrets(input) as { creds: Map<string, unknown> };
+    expect(out.creds).toBeInstanceOf(Map);
+    expect(out.creds.get('password')).toBe(REDACTED);
+    expect(input.creds.get('password')).toBe('p');
+  });
+
+  test('redactFreeText redacts short bearer tokens (8+ chars)', () => {
+    expect(redactFreeText('Authorization: Bearer aB3dEfGh9')).toBe(`Authorization: Bearer ${REDACTED}`);
+    // Below the 8-char floor a bare word after Bearer is prose, not a token.
+    expect(redactFreeText('Authorization: Bearer abcdefg')).toBe('Authorization: Bearer abcdefg');
+  });
+});
