@@ -16,6 +16,7 @@ import {
 } from '../../lib/agent/mcp-config.js';
 import { EXIT_USER_ERROR, EXIT_NETWORK_ERROR, SpycoreCliError } from '../../lib/errors.js';
 import { sanitizeForDisplay } from '../../lib/sanitize-display.js';
+import { truncateSafe } from '../../lib/text.js';
 import { redactUrlCredentials } from '../../lib/redact.js';
 import {
   getTrustedWorkspaces,
@@ -570,7 +571,7 @@ function registerTest(group: Command): void {
         }
         print(`${tools.length} tool${tools.length === 1 ? '' : 's'}:`);
         for (const t of tools) {
-          const desc = t.description ? ` - ${sanitizeForDisplay(t.description.replace(/\s+/g, ' ')).slice(0, 100)}` : '';
+          const desc = t.description ? ` - ${truncateSafe(sanitizeForDisplay(t.description.replace(/\s+/g, ' ')), 100)}` : '';
           print(`  mcp__${trimmed}__${sanitizeForDisplay(t.name)}${desc}`);
         }
       } finally {

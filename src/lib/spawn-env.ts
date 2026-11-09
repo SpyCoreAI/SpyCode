@@ -27,6 +27,11 @@ import { isSecretKey } from './redact.js';
 const CREDENTIAL_FILE_VARS: ReadonlySet<string> = new Set([
   'GOOGLE_APPLICATION_CREDENTIALS',
   'AWS_SHARED_CREDENTIALS_FILE',
+  // R3-8: the AWS config file can hold credentials, and DOCKER_CONFIG
+  // points at a config.json holding registry auths - the same
+  // off-default credential-file pointer class as the three above.
+  'AWS_CONFIG_FILE',
+  'DOCKER_CONFIG',
   'KUBECONFIG',
 ]);
 

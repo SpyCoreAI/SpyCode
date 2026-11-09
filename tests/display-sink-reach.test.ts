@@ -752,6 +752,10 @@ describe('§12 the sink CATEGORIES - prompt, spinner, completion line', () => {
     // every message's content passes redactFreeText, and the render sites
     // (toMarkdown / JSON.stringify) are separately covered.
     'src/commands/conversations/export.ts :: redactedExport',
+    // R3-11 (Phase 5 pass 3): the title/model now pass redactFreeText too
+    // (they derive from the first user message) - same payload -> clean
+    // carrier as redactedExport, same separately-covered render sites.
+    'src/commands/conversations/export.ts :: redactFreeText',
     'src/commands/conversations/handoff.ts :: buildHandoffContinueMessage',
     'src/commands/conversations/handoff.ts :: createRunRecorder',
     'src/commands/conversations/handoff.ts :: fireHookEvent',
@@ -760,11 +764,16 @@ describe('§12 the sink CATEGORIES - prompt, spinner, completion line', () => {
     'src/commands/conversations/share.ts :: buildShareBody',
     'src/commands/conversations/share.ts :: redactFreeText',
     'src/commands/files/download.ts :: createExclusiveTempWriteStream',
-    'src/commands/files/download.ts :: request',
+    // R3-1 (Phase 5 pass 3): the presigned download URL now enters
+    // requestWithRedirects instead of undici's request (undici 6.29.1
+    // throws on maxRedirections) - same fetch-only carrier as the request
+    // pin it replaces; the write/render sites are separately covered.
+    'src/commands/files/download.ts :: requestWithRedirects',
     'src/commands/files/list.ts :: bucketByRecency',
     'src/commands/files/show.ts :: isImageMime',
     'src/commands/files/show.ts :: isTextMime',
-    'src/commands/files/show.ts :: request',
+    // R3-1 (Phase 5 pass 3): the preview fetch, same rename as download.
+    'src/commands/files/show.ts :: requestWithRedirects',
     'src/commands/skills/index.ts :: planSkillSync',
     'src/commands/skills/index.ts :: writeSyncedSkill',
     'src/commands/usage.ts :: renderBucket',
@@ -776,6 +785,11 @@ describe('§12 the sink CATEGORIES - prompt, spinner, completion line', () => {
     'src/lib/git-generate.ts :: appendCappedText',
     'src/lib/git-generate.ts :: collectTurn',
     'src/lib/slash/registry.ts :: conversationToMarkdown',
+    // R3-12 (Phase 5 pass 3): /save's atomic writer - the value entering
+    // it is the already-redacted transcript (conversationToMarkdown, pinned
+    // above), and the write target is the user's own chosen /save path.
+    // It renders/logs/forwards nothing beyond that one file write.
+    'src/lib/slash/registry.ts :: writeSaveAtomic',
     'src/lib/version-check.ts :: compareVersions',
     'src/lib/version-check.ts :: writeCache',
     'src/ui/chat/ChatApp.tsx :: pushNotice',

@@ -1,7 +1,9 @@
 import { Command } from 'commander';
 import { api } from '../../lib/api.js';
 import { getOutputOptions, json, print } from '../../lib/output.js';
+import { requestWithRedirects } from '../../lib/http-redirect.js';
 import { sanitizeForDisplay } from '../../lib/sanitize-display.js';
+import { decodeUtf8Prefix, truncateSafe } from '../../lib/text.js';
 import {
   formatFileSize,
   isImageMime,
@@ -57,6 +59,14 @@ export function registerFilesShowCommand(program: Command): void {
         return;
       }
 
+      // R3-4: a non-string server mimeType/filename used to crash
+      // shortMimeLabel (t.startsWith / extname) with a raw TypeError.
+      // Coerce to '' (the files/list.ts guard) instead of trusting the
+      // declared shape. isTextMime/isImageMime below take the coerced
+      // values, so they never see a non-string either.
+      if (typeof file.mimeType !== 'string') file.mimeType = '';
+      if (typeof file.filename !== 'string') file.filename = '';
+
       // Server-controlled strings (id, filename, mimeType, category, status)
       // cross the display sanitizer before the terminal (SEC-013). Numbers and
       // the relativeTime/formatFileSize helpers produce bounded computed text.
@@ -88,12 +98,12 @@ export function registerFilesShowCommand(program: Command): void {
         file.url
       ) {
         try {
-          const { request } = await import('undici');
           // Presigned URLs 302: follow redirects like a normal client.
           // Total timeout: the preview is best-effort and small - a
-          // stalled response must not hang the command.
-          const res = await request(file.url, {
-            maxRedirections: 5,
+          // stalled response must not hang the command. Redirects are
+          // followed manually (lib/http-redirect.ts): undici 6.29.1 throws
+          // on `maxRedirections` passed to request().
+          const res = await requestWithRedirects(file.url, {
             signal: AbortSignal.timeout(30_000),
           });
           if (res.statusCode >= 200 && res.statusCode < 300) {
@@ -110,9 +120,12 @@ export function registerFilesShowCommand(program: Command): void {
               total += Math.min(buf.length, room);
               if (total >= PREVIEW_MAX_BYTES) break;
             }
-            const text = Buffer.concat(chunks).toString('utf8');
+            // Decode UTF-8 boundary-aware (R3-6): the 8 KiB byte cut can
+            // split a multi-byte sequence, and a plain toString('utf8')
+            // would render the split char as U+FFFD.
+            const text = decodeUtf8Prefix(Buffer.concat(chunks));
             const clipped =
-              text.length > PREVIEW_MAX_BYTES ? `${text.slice(0, PREVIEW_MAX_BYTES)}…` : text;
+              text.length > PREVIEW_MAX_BYTES ? `${truncateSafe(text, PREVIEW_MAX_BYTES)}…` : text;
             print('');
             print('--- preview ---');
             // Untrusted file content → through the display sanitizer (SEC-013).

@@ -3,9 +3,11 @@ import {
   coerceValue,
   getConfigPath,
   getConfigStore,
+  getStoredTokenFromFile,
   isKnownKey,
   listKnownKeys,
   peekStoredValue,
+  setStoredTokenInFile,
   type CliConfigSchema,
 } from '../../lib/config.js';
 import {
@@ -230,7 +232,13 @@ export function registerConfigCommand(program: Command): void {
           return;
         }
       }
+      // R3-3: the file-backed `__token__` lives in the same store, so a
+      // bare clear() logged the user out on headless Linux (no keychain)
+      // despite the help text promising the token survives. Preserve it
+      // across the reset, matching the help text.
+      const token = getStoredTokenFromFile();
       getConfigStore().clear();
+      if (token !== null) setStoredTokenInFile(token);
       if (getOutputOptions().json) {
         json({ status: 'reset' });
       } else {

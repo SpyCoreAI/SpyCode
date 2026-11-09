@@ -572,17 +572,50 @@ export function getStoredMcpServers(): McpServerConfig[] {
   // A missing url (http) or command (stdio) is deliberately NOT filtered
   // out: `mcp list` tolerates and renders those rows, and `mcp test` on
   // them fails cleanly at connect time ("Failed to connect") - both are
-  // pinned behavior, not a crash.
-  return raw.filter(
-    (e): e is McpServerConfig =>
-      !!e &&
-      typeof e === 'object' &&
-      typeof (e as McpServerConfig).name === 'string' &&
-      (e as McpServerConfig).name.length > 0 &&
-      ((e as McpServerConfig).args === undefined ||
-        (Array.isArray((e as McpServerConfig).args) &&
-          ((e as McpServerConfig).args as unknown[]).every((a) => typeof a === 'string'))),
-  );
+  // pinned behavior, not a crash. But a PRESENT wrong-typed field is
+  // filtered (R3-2, pass-3): `command: 42` crashed describeServerTarget
+  // (`n.replace is not a function` inside redactFreeText) and `env:
+  // 'oops'` crashed the JSON list (`(h.env ?? []).map is not a function`).
+  // `env`/`headers` must be an array of objects / a string-valued record
+  // when present, for the same reason.
+  return raw.filter((e): e is McpServerConfig => {
+    if (!e || typeof e !== 'object') return false;
+    const s = e as McpServerConfig;
+    if (typeof s.name !== 'string' || s.name.length === 0) return false;
+    if (
+      s.args !== undefined &&
+      (!Array.isArray(s.args) ||
+        (s.args as unknown[]).some((a) => typeof a !== 'string'))
+    ) {
+      return false;
+    }
+    if (s.command !== undefined && typeof s.command !== 'string') return false;
+    if (s.url !== undefined && typeof s.url !== 'string') return false;
+    if (
+      s.env !== undefined &&
+      (!Array.isArray(s.env) ||
+        (s.env as unknown[]).some(
+          (v) =>
+            !v ||
+            typeof v !== 'object' ||
+            typeof (v as { name?: unknown }).name !== 'string',
+        ))
+    ) {
+      return false;
+    }
+    if (
+      s.headers !== undefined &&
+      (typeof s.headers !== 'object' ||
+        s.headers === null ||
+        Array.isArray(s.headers) ||
+        Object.values(s.headers as Record<string, unknown>).some(
+          (v) => typeof v !== 'string',
+        ))
+    ) {
+      return false;
+    }
+    return true;
+  });
 }
 
 export function setStoredMcpServers(list: McpServerConfig[]): void {

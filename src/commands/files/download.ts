@@ -1,7 +1,6 @@
 import { Command, Option } from 'commander';
 import { existsSync, renameSync, unlinkSync } from 'node:fs';
 import { basename, dirname, resolve as resolvePath } from 'node:path';
-import { request } from 'undici';
 import type { Ora } from 'ora';
 import { createSpinner } from '../../lib/spinner.js';
 import { Readable } from 'node:stream';
@@ -16,6 +15,7 @@ import {
   isSpycoreCliError,
 } from '../../lib/errors.js';
 import { createExclusiveTempWriteStream, formatFileSize } from '../../lib/files.js';
+import { requestWithRedirects } from '../../lib/http-redirect.js';
 import { display } from '../../lib/sanitize-display.js';
 
 interface FileDetail {
@@ -59,12 +59,27 @@ export function registerFilesDownloadCommand(program: Command): void {
           throw err;
         }
 
-        const downloadUrl = file.url;
+        const downloadUrl = typeof file.url === 'string' ? file.url : undefined;
         if (!downloadUrl) {
           throw new SpycoreCliError(
             'No download URL available for this file.',
             EXIT_NETWORK_ERROR,
             'The file may be expired or inaccessible.',
+          );
+        }
+        // R3-4: a non-string server filename/mimeType used to crash
+        // basename() below with a raw TypeError. Coerce to '' (the
+        // files/list.ts guard) instead of trusting the declared shape.
+        if (typeof file.filename !== 'string') file.filename = '';
+        if (typeof file.mimeType !== 'string') file.mimeType = '';
+        // A coerced-empty filename with no --output would resolve to the
+        // working directory itself and fail mid-download with a confusing
+        // EISDIR - refuse up front with a clean, actionable error instead.
+        if ((!opts.output || opts.output.length === 0) && file.filename.length === 0) {
+          throw new SpycoreCliError(
+            'The server did not provide a filename for this file.',
+            EXIT_USER_ERROR,
+            'Pass --output <path> to choose where to save it.',
           );
         }
 
@@ -109,9 +124,10 @@ export function registerFilesDownloadCommand(program: Command): void {
         // Presigned S3/R2 URLs 302 to the object: follow redirects like a
         // normal client (bounded), instead of failing with "HTTP 302".
         // Total timeout: a stalled/trickling response must not hang the
-        // command past the undici 300 s inactivity defaults.
-        const res = await request(downloadUrl, {
-          maxRedirections: 5,
+        // command past the undici 300 s inactivity defaults. Redirects are
+        // followed manually (lib/http-redirect.ts): undici 6.29.1 throws on
+        // `maxRedirections` passed to request().
+        const res = await requestWithRedirects(downloadUrl, {
           signal: AbortSignal.timeout(120_000),
         });
         if (res.statusCode < 200 || res.statusCode >= 300) {

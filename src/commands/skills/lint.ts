@@ -7,11 +7,12 @@
  * exits non-zero when any finding exists (for CI).
  */
 import { Command, Option } from 'commander';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   discoverSkills,
   parseSkillFile,
+  readSkillFileCapped,
   type DiscoveredSkill,
 } from '../../lib/agent/skills.js';
 import {
@@ -23,10 +24,10 @@ import { formatOption, getOutputOptions, info, json, print, resolveFormat } from
 import { sanitizeForDisplay } from '../../lib/sanitize-display.js';
 
 function lintOne(skill: DiscoveredSkill): { name: string; source: string; findings: { rule: string; message: string }[] } {
-  let raw: string;
-  try {
-    raw = readFileSync(skill.path, 'utf8');
-  } catch {
+  // R3-9: capped read (1 MB, the discovery cap) - an over-cap skill used
+  // to be read whole here even though discovery skips it.
+  const raw = readSkillFileCapped(skill.path);
+  if (raw === null) {
     return { name: skill.name, source: skill.source, findings: [{ rule: 'unreadable', message: 'SKILL.md could not be read' }] };
   }
   const parsed = parseSkillFile(raw, skill.name);

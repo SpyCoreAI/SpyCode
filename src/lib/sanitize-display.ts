@@ -21,6 +21,10 @@
  * (\r\n is normalised to \n first);
  * 5. map remaining C0 controls (except \n and \t, which are preserved) to
  * their Unicode control pictures (U+2400 + code).
+ * 6. strip bidi / invisible formatting controls (U+202A–202E, U+2066–2069,
+ * U+200B): they reorder or hide text (Trojan Source class), so displayed
+ * text could read differently from its bytes. U+200D (ZWJ, emoji joins)
+ * is kept.
  *
  * DISPLAY-ONLY by contract: never applied to bytes bound for the model, the
  * server, files, or --json output (JSON.stringify already escapes C0 per the
@@ -60,8 +64,15 @@ const ESC_SEQUENCES =
 // eslint-disable-next-line no-control-regex
 const C1_CONTROLS = /[\u0080-\u009f]/g;
 
-// Remaining C0 controls except \t (0x09) and \n (0x0a). \r is handled
-// separately so \r\n can collapse to a plain newline first.
+// Bidi / invisible formatting controls (Trojan Source class): U+202A–202E
+// (embeds/overrides), U+2066–2069 (isolates), and U+200B (zero-width space)
+// reorder or hide text, so displayed text can read differently from its
+// bytes. Stripped outright - they are never legitimate in agent/file text.
+// U+200D (ZWJ) is deliberately KEPT: it is legitimately used in emoji
+// sequences. U+200E/U+200F (LRM/RLM) are kept too: they are explicit
+// direction marks, not overrides.
+// eslint-disable-next-line no-control-regex, no-misleading-character-class
+const BIDI_CONTROLS = /[\u202a-\u202e\u2066-\u2069\u200b]/g;
 // eslint-disable-next-line no-control-regex
 const C0_CONTROLS = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g;
 
@@ -87,6 +98,7 @@ export function sanitizeForDisplay(text: string): string {
   // it visible instead of letting the terminal interpret what follows.
   out = out.replace(/\x1b/g, '␛'); // eslint-disable-line no-control-regex
   out = out.replace(C1_CONTROLS, '');
+  out = out.replace(BIDI_CONTROLS, '');
   // CRLF → LF (legitimate Windows line endings render fine), then any lone
   // \r becomes visible - a bare \r is the classic overwrite-the-line trick.
   out = out.replace(/\r\n/g, '\n');

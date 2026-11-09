@@ -45,6 +45,21 @@ const DESCRIPTION_CAP = 160;
 export const SKILL_FILE_READ_CAP_BYTES = 1_048_576;
 
 /**
+ * Read one SKILL.md with the same 1 MB stat-size guard discovery uses
+ * (R3-9): an over-cap project skill is skipped by discovery but used to be
+ * read whole by lint/show. Returns null when missing, unreadable, or over
+ * the cap - the callers treat null as unreadable, never as empty content.
+ */
+export function readSkillFileCapped(path: string): string | null {
+  try {
+    if (statSync(path).size > SKILL_FILE_READ_CAP_BYTES) return null;
+    return readFileSync(path, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Cap on one skill body as returned by `load_skill`. A skill file is
  * repository-supplied content; without a cap a multi-megabyte SKILL.md rides
  * into the conversation whole and crowds the wire cap. Bodies over the cap

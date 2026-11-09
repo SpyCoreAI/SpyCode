@@ -24,6 +24,7 @@ import { indexRun, searchSessions } from '../lib/agent/session-search.js';
 import { formatOption, getOutputOptions, info, json, print, resolveFormat, success, warn } from '../lib/output.js';
 import { EXIT_USER_ERROR, SpycoreCliError } from '../lib/errors.js';
 import { sanitizeForDisplay } from '../lib/sanitize-display.js';
+import { truncateSafe } from '../lib/text.js';
 
 /*
  * F14 - DETACHED / HOSTED RUNS (client-local scaffolding).
@@ -245,7 +246,8 @@ function writeRecord(rec: DetachedRunRecord): void {
   // Atomic write via tmp+rename (m4): a crash mid-write must not leave a
   // torn record.
   const path = recordPath(rec.id);
-  const tmp = `${path}.tmp-${process.pid}`;
+  // R3-10: random temp name (the R3-15 pattern) - a pid-only name is guessable.
+  const tmp = `${path}.tmp-${process.pid}-${randomBytes(8).toString('hex')}`;
   writeFileSync(tmp, JSON.stringify(next, null, 2), { encoding: 'utf-8', mode: 0o600 });
   try {
     renameSync(tmp, path);
@@ -407,7 +409,7 @@ export async function launchDetachedRun(
 
   writeRecord({
     id,
-    task: task.length > MAX_TASK_SNIPPET ? `${task.slice(0, MAX_TASK_SNIPPET)}…` : task,
+    task: task.length > MAX_TASK_SNIPPET ? `${truncateSafe(task, MAX_TASK_SNIPPET)}…` : task,
     cwd: process.cwd(),
     pid: child.pid ?? null,
     status: 'running',
@@ -739,7 +741,7 @@ function printReplay(lines: Array<Record<string, unknown>>): void {
   const hasResult = lastLine !== undefined && typeof lastLine['result'] === 'object';
   const events = hasResult ? lines.slice(1, -1) : lines.slice(1);
   const str = (v: unknown): string => (typeof v === 'string' ? v : '');
-  const cap = (s: string, n = 400): string => (s.length > n ? `${s.slice(0, n)}…` : s);
+  const cap = (s: string, n = 400): string => (s.length > n ? `${truncateSafe(s, n)}…` : s);
 
   print(`Trace ${sanitizeForDisplay(str(header['traceId']))} - ${sanitizeForDisplay(cap(str(header['task']), 120))}`);
   print(

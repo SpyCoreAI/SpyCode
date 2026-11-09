@@ -20,6 +20,7 @@
  * disk; this clamp fits the assembled result to the WIRE.
  */
 import { WIRE_MESSAGE_MAX_CHARS } from './attachments.js';
+import { truncateSafe } from './text.js';
 
 /** How a part may be cut when the assembly is over budget. */
 export type WirePartKind = 'fixed' | 'user' | 'attachments' | 'injection';
@@ -85,7 +86,7 @@ export function clampWireAssembly(
       // Keeping `keep` chars of body costs pre+keep+marker+post.
       const keep = p.body.length - need - tMarker.length;
       if (keep > 0) {
-        const next = `${pre}${p.body.slice(0, keep)}${tMarker}${post}`;
+        const next = `${pre}${truncateSafe(p.body, keep)}${tMarker}${post}`;
         total -= texts[i]!.length - next.length;
         texts[i] = next;
       } else {
@@ -116,8 +117,8 @@ export function clampWireAssembly(
       const room = Math.max(0, t.length - over);
       const next =
         keep > 0
-          ? `${t.slice(0, keep)}${marker}`
-          : omitMarker(p.label).slice(0, room);
+          ? `${truncateSafe(t, keep)}${marker}`
+          : truncateSafe(omitMarker(p.label), room);
       total -= t.length - next.length;
       texts[i] = next;
       if (next !== t) trimmed.push(p.label);

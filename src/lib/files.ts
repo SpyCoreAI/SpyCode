@@ -49,14 +49,14 @@ const IMAGE_MIMES = new Set([
 
 /** Determine if file is text (for terminal preview). */
 export function isTextMime(mime: string): boolean {
-  if (!mime) return false;
+  if (typeof mime !== 'string' || !mime) return false;
   if (mime.startsWith('text/')) return true;
   return TEXT_MIMES.has(mime);
 }
 
 /** Determine if file is an image. */
 export function isImageMime(mime: string): boolean {
-  return IMAGE_MIMES.has(mime);
+  return typeof mime === 'string' && IMAGE_MIMES.has(mime);
 }
 
 /**
@@ -64,6 +64,12 @@ export function isImageMime(mime: string): boolean {
  * column doesn't end up with "application/vnd.…" verbosity.
  */
 export function shortMimeLabel(mime: string, filename?: string): string {
+  // R3-4: server-controlled fields arrive typed as strings but a live
+  // server can send a number - a non-string used to throw inside
+  // startsWith/extname with a raw TypeError. Coerce to '' (the
+  // files/list.ts guard) instead of trusting the declared shape.
+  if (typeof mime !== 'string') mime = '';
+  if (typeof filename !== 'string') filename = undefined;
   if (!mime) return 'file';
   if (mime === 'application/pdf') return 'PDF';
   if (mime === 'application/json') return 'JSON';

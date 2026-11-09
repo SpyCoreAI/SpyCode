@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
 import { Command, Option } from 'commander';
 import {
   discoverSkills,
   parseSkillFile,
   projectSkillsDir,
+  readSkillFileCapped,
   userSkillsDir,
 } from '../../lib/agent/skills.js';
 import {
@@ -102,10 +102,10 @@ function registerShow(group: Command): void {
             : 'No skills are installed - see `spycore skills list`.',
         );
       }
-      let raw: string;
-      try {
-        raw = readFileSync(skill.path, 'utf8');
-      } catch {
+      // R3-9: capped read (1 MB, the discovery cap) - an over-cap skill
+      // used to be read whole here even though discovery skips it.
+      const raw = readSkillFileCapped(skill.path);
+      if (raw === null) {
         throw new SpycoreCliError(`Skill "${skill.name}" could not be read.`, EXIT_USER_ERROR);
       }
       const parsed = parseSkillFile(raw, skill.name);

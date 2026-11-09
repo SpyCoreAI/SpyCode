@@ -226,8 +226,12 @@ export function describeHeader(name: string, rawValue: string): string {
 export function describeServerTarget(s: McpServerConfig): string {
   if (isRemoteServer(s)) return redactUrlCredentials(s.url ?? '');
   // Same screen as the config dump: a literal token in command/args must
-  // not print cleartext from `mcp list` / `mcp test` either.
-  return [s.command ?? '', ...(s.args ?? [])].map((a) => redactFreeText(a)).join(' ');
+  // not print cleartext from `mcp list` / `mcp test` either. Non-string
+  // parts (a hand-edited config reaching here unfiltered) render empty
+  // instead of throwing inside redactFreeText (R3-2).
+  return [s.command ?? '', ...(s.args ?? [])]
+    .map((a) => redactFreeText(typeof a === 'string' ? a : ''))
+    .join(' ');
 }
 
 /**

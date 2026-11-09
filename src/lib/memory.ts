@@ -47,6 +47,7 @@ import { loadSecretGuardSync, type SecretGuard } from './agent/secrets.js';
 import { scanRepo, type RepoScan } from './repo-scan.js';
 import { GUIDE_FILE, readGuideForContext } from './codebase-guide.js';
 import { CHANGELOG_FILE, readRecentChangelog } from './codebase-changelog.js';
+import { truncateSafe } from './text.js';
 
 /** The committed, team-visible memory file. */
 export const MEMORY_FILE = 'SPYCODE.md';
@@ -320,7 +321,7 @@ function applyBudget(sections: Section[], budget: number, notices: string[]): Se
     const only = work[0]!.s;
     const marker = '\n\n<!-- … truncated to fit the memory budget -->';
     const room = Math.max(0, budget - only.header.length - 1 - marker.length);
-    only.body = `${only.body.slice(0, room)}${marker}`;
+    only.body = `${truncateSafe(only.body, room)}${marker}`;
     notices.push(`Truncated ${only.file.label} to fit the ${budget}-char memory budget`);
   }
 
@@ -593,7 +594,7 @@ function fitContextParts(work: WorkPart[], budget: number, notices: string[]): v
     if (remaining > PART_MIN_USEFUL_CHARS) {
       const marker = '\n\n<!-- … truncated to fit the combined context budget -->';
       const room = Math.max(0, remaining - w.header.length - 1 - marker.length);
-      w.body = `${w.body.slice(0, room)}${marker}`;
+      w.body = `${truncateSafe(w.body, room)}${marker}`;
       w.included = true;
       w.status = 'truncated';
       used = budget;

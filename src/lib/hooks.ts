@@ -58,6 +58,7 @@ import {
 } from './config.js';
 import { releaseChildStdio, STDIO_DRAIN_MS } from './child-stdio.js';
 import { sanitizeForDisplay } from './sanitize-display.js';
+import { truncateSafe } from './text.js';
 
 export type HookEvent =
   | 'session-start'
@@ -248,7 +249,7 @@ export async function loadHookSession(
         }
         if (!opts?.approveProjectHook) {
           notices.push(
-            `Skipped unapproved project hook (${def.event}): ${sanitizeForDisplay(def.command).slice(0, 80)} - approve it in an interactive session.`,
+            `Skipped unapproved project hook (${def.event}): ${truncateSafe(sanitizeForDisplay(def.command), 80)} - approve it in an interactive session.`,
           );
           continue;
         }
@@ -299,7 +300,7 @@ export interface HookFireResult {
 function digest(text: string, cap: number): string {
   // eslint-disable-next-line no-control-regex
   const clean = text.replace(/\u0000/g, '');
-  return clean.length > cap ? clean.slice(0, cap) : clean;
+  return clean.length > cap ? truncateSafe(clean, cap) : clean;
 }
 
 /**
@@ -321,7 +322,7 @@ function neutralizeHookSentinels(text: string): string {
 export function wrapHookFeedback(inner: string): string {
   let body = neutralizeHookSentinels(sanitizeForDisplay(inner));
   if (body.length > HOOK_FEEDBACK_MAX_CHARS) {
-    body = `${body.slice(0, HOOK_FEEDBACK_MAX_CHARS)}\n[hook feedback truncated at ${HOOK_FEEDBACK_MAX_CHARS} characters]`;
+    body = `${truncateSafe(body, HOOK_FEEDBACK_MAX_CHARS)}\n[hook feedback truncated at ${HOOK_FEEDBACK_MAX_CHARS} characters]`;
   }
   return [
     '<spycode-hook-feedback>',
@@ -617,7 +618,7 @@ function runHookCommand(
 
 function shortCmd(command: string): string {
   const flat = sanitizeForDisplay(command).replace(/\s+/g, ' ').trim();
-  return flat.length > 60 ? `${flat.slice(0, 59)}…` : flat;
+  return flat.length > 60 ? `${truncateSafe(flat, 59)}…` : flat;
 }
 
 /**
@@ -682,13 +683,13 @@ export async function fireHookEvent(
       outcome = await runHookCommand(effective, payload, session.cwd);
     } catch (err) {
       result.notices.push(
-        `Hook (${event}) failed to run: ${sanitizeForDisplay(err instanceof Error ? err.message : String(err)).slice(0, NOTICE_CAP)}`,
+        `Hook (${event}) failed to run: ${truncateSafe(sanitizeForDisplay(err instanceof Error ? err.message : String(err)), NOTICE_CAP)}`,
       );
       continue;
     }
     if (outcome.spawnError) {
       result.notices.push(
-        `Hook (${event}) could not start [${shortCmd(hook.command)}]: ${sanitizeForDisplay(outcome.spawnError).slice(0, NOTICE_CAP)}`,
+        `Hook (${event}) could not start [${shortCmd(hook.command)}]: ${truncateSafe(sanitizeForDisplay(outcome.spawnError), NOTICE_CAP)}`,
       );
       continue;
     }
@@ -701,14 +702,14 @@ export async function fireHookEvent(
     if (outcome.code === 0) {
       const tail = outcome.stdout.trim();
       if (tail.length > 0) {
-        result.notices.push(`Hook (${event}): ${sanitizeForDisplay(tail).slice(0, NOTICE_CAP)}`);
+        result.notices.push(`Hook (${event}): ${truncateSafe(sanitizeForDisplay(tail), NOTICE_CAP)}`);
       }
       continue;
     }
     if (outcome.code === HOOK_BLOCK_EXIT_CODE && BLOCKING_EVENTS.has(event)) {
       const reason = outcome.stderr.trim() || '(no reason given)';
       result.blocked = true;
-      result.blockReason = sanitizeForDisplay(reason).slice(0, NOTICE_CAP);
+      result.blockReason = truncateSafe(sanitizeForDisplay(reason), NOTICE_CAP);
       result.notices.push(
         `Hook (${event}) BLOCKED the action [${shortCmd(hook.command)}]: ${result.blockReason}`,
       );
@@ -725,7 +726,7 @@ export async function fireHookEvent(
     // Any other non-zero exit (including HOOK_BLOCK_EXIT_CODE on a
     // non-blocking event): warn and CONTINUE. This is the fail-open half that
     // the shipped docs used to describe as a block.
-    const detail = (outcome.stderr.trim() || outcome.stdout.trim()).slice(0, NOTICE_CAP);
+    const detail = truncateSafe(outcome.stderr.trim() || outcome.stdout.trim(), NOTICE_CAP);
     result.notices.push(
       `Hook (${event}) exited ${outcome.code} [${shortCmd(hook.command)}]${detail ? `: ${sanitizeForDisplay(detail)}` : ''} - continuing.`,
     );

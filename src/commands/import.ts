@@ -62,13 +62,78 @@ interface ImportPlan {
   items: ImportItem[];
 }
 
+/** 1 MB per-file read cap, matching the skill-discovery cap (R3-14). */
+const IMPORT_READ_CAP_BYTES = 1_048_576;
+
 function readJsonFile(path: string): unknown | null {
   try {
     if (!existsSync(path)) return null;
+    // R3-9: stat-size guard (1 MB, the discovery cap) before reading - a
+    // crafted ~/.claude.json used to be read whole into memory.
+    if (statSync(path).size > IMPORT_READ_CAP_BYTES) return null;
     return JSON.parse(readFileSync(path, 'utf8')) as unknown;
   } catch {
     return null;
   }
+}
+
+/**
+ * Read a text file only when its size is at or under the import cap;
+ * null when missing, unreadable, or over the cap. The callers treat null
+ * as "could not be compared/read" (R3-9), never as empty content.
+ */
+function readCappedTextFile(path: string): string | null {
+  try {
+    if (statSync(path).size > IMPORT_READ_CAP_BYTES) return null;
+    return readFileSync(path, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+/** Bound on one skill-directory copy: a crafted --from-dir pack can be multi-GB. */
+const IMPORT_COPY_MAX_BYTES = 10 * 1_048_576;
+const IMPORT_COPY_MAX_FILES = 1_000;
+
+/**
+ * Measure a skill directory WITHOUT following symlinks (a symlink's target
+ * size is not copied - cpSync copies the link itself). Totals stop
+ * accumulating past the bounds: the caller only needs to know "over".
+ */
+function measureSkillDir(srcDir: string): { files: number; bytes: number } {
+  let files = 0;
+  let bytes = 0;
+  const stack = [srcDir];
+  let seen = 0;
+  while (stack.length > 0) {
+    const dir = stack.pop()!;
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const e of entries) {
+      if (++seen > IMPORT_COPY_MAX_FILES * 2 + 100) return { files, bytes };
+      const p = join(dir, e.name);
+      let st;
+      try {
+        st = lstatSync(p);
+      } catch {
+        continue;
+      }
+      if (st.isSymbolicLink()) continue; // the link itself is copied, not its target
+      if (st.isDirectory()) {
+        stack.push(p);
+        continue;
+      }
+      if (st.isFile()) {
+        files += 1;
+        bytes += st.size;
+      }
+    }
+  }
+  return { files, bytes };
 }
 
 /** Absolute paths of every immediate subdirectory of `root` ([] when missing). */
@@ -147,23 +212,34 @@ function skillImportItem(srcDir: string, destDir: string, scope: 'user' | 'proje
       : '';
   let status: ImportItem['status'] = 'new';
   let detail = `new → ${destDir}${riskyNote}`;
+  // R3-9: the copy is bounded (see apply) - surface an oversize pack in
+  // the preview so --apply does not surprise the user with a refusal.
+  const pack = measureSkillDir(srcDir);
+  const packOverBound =
+    pack.files > IMPORT_COPY_MAX_FILES || pack.bytes > IMPORT_COPY_MAX_BYTES;
+  const packNote = packOverBound
+    ? ` - WARNING: skill pack is ${pack.files} file(s) / ${pack.bytes} bytes, over the import bound (${IMPORT_COPY_MAX_FILES} files / ${IMPORT_COPY_MAX_BYTES} bytes) - apply will refuse it`
+    : '';
+  detail += packNote;
   if (existsSync(destFile)) {
-    try {
-      const same = readFileSync(srcFile, 'utf8') === readFileSync(destFile, 'utf8');
-      if (same) {
-        status = 'identical';
-        detail = `already imported (identical) - skip${riskyNote}`;
-      } else {
-        status = 'conflict';
-        detail = force
-          ? `target exists with different content - will overwrite with --force${riskyNote}`
-          : `target exists with different content - skip (use --force to overwrite)${riskyNote}`;
-      }
-    } catch {
+    // R3-9: capped compare - the whole SKILL.md used to be read twice
+    // (source + dest) with no size guard. An over-cap file cannot be
+    // compared, so it lands in the conflict branch like an unreadable one.
+    const srcText = readCappedTextFile(srcFile);
+    const destText = readCappedTextFile(destFile);
+    if (srcText === null || destText === null) {
       status = 'conflict';
       detail = force
-        ? `target exists and could not be compared - will overwrite with --force${riskyNote}`
-        : `target exists and could not be compared - skip (use --force to overwrite)${riskyNote}`;
+        ? `target exists and could not be compared - will overwrite with --force${riskyNote}${packNote}`
+        : `target exists and could not be compared - skip (use --force to overwrite)${riskyNote}${packNote}`;
+    } else if (srcText === destText) {
+      status = 'identical';
+      detail = `already imported (identical) - skip${riskyNote}${packNote}`;
+    } else {
+      status = 'conflict';
+      detail = force
+        ? `target exists with different content - will overwrite with --force${riskyNote}${packNote}`
+        : `target exists with different content - skip (use --force to overwrite)${riskyNote}${packNote}`;
     }
   }
   return {
@@ -174,6 +250,16 @@ function skillImportItem(srcDir: string, destDir: string, scope: 'user' | 'proje
     status,
     detail,
     apply: () => {
+      // R3-9: bound the copy BEFORE cpSync - a crafted skill pack from
+      // --from-dir (an arbitrary directory) can be multi-GB, and the old
+      // code copied it whole. Fail closed, naming the bound.
+      if (packOverBound) {
+        throw new SpycoreCliError(
+          `Refusing to import skill "${name}": ${pack.files} file(s) / ${pack.bytes} bytes exceeds the import bound (${IMPORT_COPY_MAX_FILES} files / ${IMPORT_COPY_MAX_BYTES} bytes).`,
+          EXIT_USER_ERROR,
+          'Trim the skill directory and retry.',
+        );
+      }
       mkdirSync(destDir, { recursive: true });
       cpSync(srcDir, destDir, { recursive: true, force: true });
       if (risky.executableCount > 0 || risky.symlinkCount > 0) {
@@ -348,11 +434,15 @@ export function planClaudeCode(
   // Memory: ~/.claude/CLAUDE.md → durable MEMORY.md.
   const claudeMdPath = join(home, '.claude', 'CLAUDE.md');
   if (existsSync(claudeMdPath)) {
-    try {
-      const item = memoryImportItem(readFileSync(claudeMdPath, 'utf8'), claudeMdPath, configDir);
-      if (item) items.push(item);
-    } catch {
-      /* unreadable - skip */
+    // R3-9: capped read (1 MB) - the file used to be read whole.
+    const claudeMd = readCappedTextFile(claudeMdPath);
+    if (claudeMd !== null) {
+      try {
+        const item = memoryImportItem(claudeMd, claudeMdPath, configDir);
+        if (item) items.push(item);
+      } catch {
+        /* unreadable - skip */
+      }
     }
   }
 

@@ -142,14 +142,17 @@ export function registerUsageCommand(program: Command): void {
       const lines: string[] = [];
 
       // Plan line: display name preferred; the raw enum rides along when the
-      // two differ so support conversations have the exact tier.
+      // two differ so support conversations have the exact tier. Both
+      // values are server-controlled and this is a raw `print()` sink
+      // (R3-13) - sanitize both before printing, like the per-model table
+      // already does for unknown keys via displayName().
       const planLabel = data.planDisplay || data.plan;
       if (planLabel) {
         const rawTail =
           data.plan && data.planDisplay && data.plan.toLowerCase() !== data.planDisplay.toLowerCase()
-            ? `  (${data.plan})`
+            ? `  (${sanitizeForDisplay(data.plan)})`
             : '';
-        lines.push(`Plan: ${planLabel}${rawTail}`);
+        lines.push(`Plan: ${sanitizeForDisplay(planLabel)}${rawTail}`);
         lines.push('');
       }
 

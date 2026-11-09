@@ -14,6 +14,7 @@ import { getOutputOptions, json, print, success, warn } from '../lib/output.js';
 import { readSingleLineInput } from '../lib/prompt.js';
 import { EXIT_USER_ERROR, SpycoreCliError } from '../lib/errors.js';
 import { sanitizeForDisplay } from '../lib/sanitize-display.js';
+import { truncateSafe } from '../lib/text.js';
 
 interface RewindOpts {
   yes?: boolean;
@@ -27,7 +28,8 @@ interface RewindOpts {
 // as "400d ago" instead of "1y ago". Do not reintroduce a local copy.
 
 function truncate(s: string, n: number): string {
-  return s.length > n ? `${s.slice(0, n - 1)}…` : s;
+  // R3-6: truncateSafe - a plain slice can split a surrogate pair.
+  return s.length > n ? `${truncateSafe(s, n - 1)}…` : s;
 }
 
 function relTo(cwd: string, abs: string): string {

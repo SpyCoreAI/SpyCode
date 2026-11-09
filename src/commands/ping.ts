@@ -2,7 +2,7 @@ import { request } from 'undici';
 import { Command } from 'commander';
 import { isAuthenticated } from '../lib/auth.js';
 import { api } from '../lib/api.js';
-import { resolveApiUrl } from '../lib/config.js';
+import { resolveApiUrl, normalizeApiBase } from '../lib/config.js';
 import { readCappedJson } from '../lib/sse.js';
 import {
   fail,
@@ -40,7 +40,9 @@ export function registerPingCommand(program: Command): void {
     .description('Verify API reachability and (if logged in) authentication')
     .action(async () => {
       const parentOpts = program.opts<{ apiUrl?: string }>();
-      const baseUrl = resolveApiUrl(parentOpts.apiUrl).replace(/\/$/, '');
+      // R3-5: normalize like the rest of the CLI (api.ts/sse.ts) - a
+      // supported no-`/api` base used to 404 here (`${base}/health`).
+      const baseUrl = normalizeApiBase(resolveApiUrl(parentOpts.apiUrl));
       const healthUrl = `${baseUrl}/health`;
 
       const start = Date.now();

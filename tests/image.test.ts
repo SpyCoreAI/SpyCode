@@ -16,21 +16,20 @@ interface MockResp {
 }
 
 let responder:
-  | ((url: string, init: { method: string; body?: unknown; headers?: Record<string, string>; maxRedirections?: number }) => MockResp)
+  | ((url: string, init: { method: string; body?: unknown; headers?: Record<string, string> }) => MockResp)
   | null = null;
 
 vi.mock('undici', () => ({
   request: vi.fn(
     async (
       url: string,
-      init: { method?: string; body?: unknown; headers?: Record<string, string>; maxRedirections?: number } = {},
+      init: { method?: string; body?: unknown; headers?: Record<string, string> } = {},
     ) => {
       if (!responder) throw new Error('test forgot to set responder');
       return responder(url, {
         method: init.method ?? 'GET',
         body: init.body,
         headers: init.headers,
-        maxRedirections: init.maxRedirections,
       });
     },
   ),
@@ -140,7 +139,18 @@ describe('spycore image', () => {
       }
       if (isR2Url(url)) {
         downloadInits.push(init as unknown as Record<string, unknown>);
-        return binaryResp(png);
+        // Presigned URL 302s to the object: the first hop redirects, the
+        // second serves the bytes (R3-1: the old `maxRedirections` option
+        // threw in undici 6.29.1).
+        if (url.includes('hop=2')) return binaryResp(png);
+        return {
+          statusCode: 302,
+          headers: { location: 'https://r2.example.com/img.png?sig=abc&hop=2' },
+          body: {
+            json: async () => ({}),
+            [Symbol.asyncIterator]: () => Readable.from([])[Symbol.asyncIterator](),
+          },
+        };
       }
       throw new Error(`unexpected ${url}`);
     };
@@ -149,9 +159,8 @@ describe('spycore image', () => {
     await runCli(['a sunset', '--output', out]);
     const got = readFileSync(out);
     expect(got.equals(png)).toBe(true);
-    // Presigned URLs 302: the download follows redirects like a client.
-    expect(downloadInits).toHaveLength(1);
-    expect(downloadInits[0]?.['maxRedirections']).toBe(5);
+    // Presigned URLs 302: the download follows the redirect (two R2 hops).
+    expect(downloadInits).toHaveLength(2);
   });
 
   test('a truncated download is refused and leaves no file at the final path (L5)', async () => {

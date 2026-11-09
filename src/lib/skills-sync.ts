@@ -11,6 +11,7 @@
  * under --force). Part-1 discovery scans only directories, so the dot-file is
  * invisible to the agent catalog.
  */
+import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { userSkillsDir } from './agent/skills.js';
@@ -59,7 +60,8 @@ export function readSyncState(): SyncState {
 export function writeSyncState(state: SyncState): void {
   const path = syncStatePath();
   mkdirSync(dirname(path), { recursive: true });
-  const tmp = `${path}.${process.pid}.tmp`;
+  // R3-10: random temp name (the R3-15 pattern) - a pid-only name is guessable.
+  const tmp = `${path}.${process.pid}-${randomBytes(8).toString('hex')}.tmp`;
   writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
   renameSync(tmp, path);
 }
@@ -110,7 +112,8 @@ export function syncedSkillFile(name: string): string {
 export function writeSyncedSkill(name: string, content: string): void {
   const file = syncedSkillFile(name); // throws on an unsafe name (SEC-012)
   mkdirSync(dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.tmp`;
+  // R3-10: random temp name (the R3-15 pattern) - a pid-only name is guessable.
+  const tmp = `${file}.${process.pid}-${randomBytes(8).toString('hex')}.tmp`;
   writeFileSync(tmp, content, 'utf8');
   renameSync(tmp, file);
 }

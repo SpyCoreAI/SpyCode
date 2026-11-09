@@ -7,6 +7,7 @@
  * credentials / API keys never land on disk unscrubbed.
  */
 import { redactFreeText } from './redact.js';
+import { truncateSafe } from './text.js';
 export interface ConversationExportResp {
   id: string;
   title: string;
@@ -38,15 +39,20 @@ function sanitizeExportField(value: unknown): string {
   // eslint-disable-next-line no-control-regex
   const flat = text.replace(/[`\u0000-\u001f\u007f]+/g, ' ').trim();
   return flat.length > EXPORT_FIELD_MAX_CHARS
-    ? `${flat.slice(0, EXPORT_FIELD_MAX_CHARS - 1).trimEnd()}…`
+    ? `${truncateSafe(flat, EXPORT_FIELD_MAX_CHARS - 1).trimEnd()}…`
     : flat;
 }
 
 export function conversationToMarkdown(c: ConversationExportResp): string {
   const lines: string[] = [];
-  lines.push(`# ${sanitizeExportField(c.title) || '(untitled)'}`);
+  // R3-11: the title is server-generated from the first user message, so
+  // a secret pasted there can surface in the title - redact it (and the
+  // model) like share.ts already does, matching the message-content
+  // guarantee. sanitizeExportField flattens/caps; redaction runs first so
+  // a secret is scrubbed before it is shaped for the file.
+  lines.push(`# ${sanitizeExportField(redactFreeText(typeof c.title === 'string' ? c.title : '')) || '(untitled)'}`);
   lines.push('');
-  lines.push(`*Model:* ${sanitizeExportField(c.model)}  ·  *ID:* \`${sanitizeExportField(c.id)}\``);
+  lines.push(`*Model:* ${sanitizeExportField(redactFreeText(typeof c.model === 'string' ? c.model : ''))}  ·  *ID:* \`${sanitizeExportField(c.id)}\``);
   lines.push('');
   lines.push('---');
   lines.push('');
@@ -63,7 +69,7 @@ export function conversationToMarkdown(c: ConversationExportResp): string {
       role.toLowerCase() === 'user'
         ? '## You'
         : role.toLowerCase() === 'assistant'
-          ? `## ${m.model ? sanitizeExportField(m.model) : 'Assistant'}`
+          ? `## ${m.model ? sanitizeExportField(redactFreeText(typeof m.model === 'string' ? m.model : '')) : 'Assistant'}`
           : `## ${role}`;
     lines.push(heading);
     lines.push('');

@@ -3,7 +3,7 @@ import { existsSync, renameSync, unlinkSync } from 'node:fs';
 import { basename, dirname, extname, resolve as resolvePath } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
-import { request } from 'undici';
+import { requestWithRedirects } from '../lib/http-redirect.js';
 import type { Ora } from 'ora';
 import { createSpinner } from '../lib/spinner.js';
 import { api, streamRequest, type StreamEvent } from '../lib/api.js';
@@ -86,9 +86,10 @@ async function downloadImage(
   // Presigned S3/R2 URLs 302 to the object: follow redirects like a
   // normal client (bounded), instead of failing with "HTTP 302".
   // Total timeout: a stalled/trickling response must not hang the command
-  // past the undici 300 s inactivity defaults (L15).
-  const res = await request(url, {
-    maxRedirections: 5,
+  // past the undici 300 s inactivity defaults (L15). Redirects are
+  // followed manually (lib/http-redirect.ts): undici 6.29.1 throws on
+  // `maxRedirections` passed to request().
+  const res = await requestWithRedirects(url, {
     signal: AbortSignal.timeout(IMAGE_DOWNLOAD_TIMEOUT_MS),
   });
   if (res.statusCode < 200 || res.statusCode >= 300) {

@@ -20,7 +20,10 @@ let responder:
   | null = null;
 
 // Every undici request init, so tests can assert on the options the
-// command passes (e.g. maxRedirections on presigned-URL fetches).
+// command passes. Redirects are followed manually by
+// lib/http-redirect.ts (undici 6.29.1 throws on `maxRedirections`), so the
+// redirect behaviour is asserted by serving a 302 first hop below, not by
+// an option pin.
 let capturedInits: Array<{ url: string; init: Record<string, unknown> }> = [];
 
 vi.mock('undici', () => ({
@@ -77,6 +80,18 @@ function streamResp(buf: Buffer): MockResp {
       arrayBuffer: async () =>
         buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer,
       [Symbol.asyncIterator]: () => Readable.from([buf])[Symbol.asyncIterator](),
+    },
+  };
+}
+
+/** A 302 hop to `location`, as a presigned S3/R2 URL serves before the object. */
+function redirectResp(location: string): MockResp {
+  return {
+    statusCode: 302,
+    headers: { location },
+    body: {
+      json: async () => ({}),
+      [Symbol.asyncIterator]: () => Readable.from([])[Symbol.asyncIterator](),
     },
   };
 }
@@ -268,7 +283,11 @@ describe('files show', () => {
         });
       }
       if (isR2Url(url)) {
-        return streamResp(big);
+        // Presigned URL 302s to the object: the first hop redirects, the
+        // second serves the bytes. The command must follow it (R3-1: the
+        // old `maxRedirections` option threw in undici 6.29.1).
+        if (url.includes('hop=2')) return streamResp(big);
+        return redirectResp('https://r2.example.com/doc.md?sig=abc&hop=2');
       }
       throw new Error(`unexpected ${url}`);
     };
@@ -278,9 +297,10 @@ describe('files show', () => {
     expect(out).not.toContain('TAIL-MARKER');
     const preview = out.split('--- preview ---')[1] ?? '';
     expect(preview.length).toBeLessThanOrEqual(8192 + 16); // 8 KB + framing
-    // The presigned-URL fetch follows redirects like a normal client.
-    const r2 = capturedInits.find((c) => isR2Url(c.url));
-    expect(r2?.init.maxRedirections).toBe(5);
+    // The presigned-URL fetch follows the 302 to the object (two R2 hops).
+    const r2Calls = capturedInits.filter((c) => isR2Url(c.url));
+    expect(r2Calls).toHaveLength(2);
+    expect(r2Calls[1]?.url).toContain('hop=2');
   });
 });
 
@@ -316,7 +336,10 @@ describe('files download', () => {
         });
       }
       if (isR2Url(url)) {
-        return streamResp(payload);
+        // Presigned URL 302s to the object: the first hop redirects, the
+        // second serves the bytes (R3-1).
+        if (url.includes('hop=2')) return streamResp(payload);
+        return redirectResp('https://r2.example.com/hello.txt?sig=abc&hop=2');
       }
       throw new Error(`unexpected ${url}`);
     };
@@ -324,10 +347,10 @@ describe('files download', () => {
     await runCli(['download', 'file_1', '--output', out, '--force']);
     const got = readFileSync(out);
     expect(got.equals(payload)).toBe(true);
-    // The presigned-URL fetch follows redirects like a normal client
-    // (presigned S3/R2 URLs 302 to the object).
-    const r2 = capturedInits.find((c) => isR2Url(c.url));
-    expect(r2?.init.maxRedirections).toBe(5);
+    // The presigned-URL fetch follows the 302 to the object (two R2 hops).
+    const r2Calls = capturedInits.filter((c) => isR2Url(c.url));
+    expect(r2Calls).toHaveLength(2);
+    expect(r2Calls[1]?.url).toContain('hop=2');
   });
 
   test('a lookalike R2 host is NOT treated as the presigned-URL host', async () => {

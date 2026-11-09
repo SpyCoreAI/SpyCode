@@ -33,6 +33,7 @@ import { isTrustedTokenHost, normalizeApiBase, resolveApiUrl } from './config.js
 import { uploadFile, type UploadResult } from './upload.js';
 import { MODEL_DISPLAY } from './models.js';
 import { EXIT_USER_ERROR, SpycoreCliError } from './errors.js';
+import { truncateSafe } from './text.js';
 
 /** Image extensions accepted for upload - the web/server-allowed raster set. */
 export const IMAGE_ATTACH_EXTS = ['.png', '.jpg', '.jpeg', '.webp', '.gif'] as const;
@@ -340,7 +341,7 @@ export function inspectAttachment(rawPath: string, cwd: string): LocalAttachment
   let text = decodeTextBuffer(buf);
   let truncated = false;
   if (text.length > TEXT_ATTACH_MAX_CHARS) {
-    text = `${text.slice(0, TEXT_ATTACH_MAX_CHARS)}\n[attachment truncated at ${TEXT_ATTACH_MAX_CHARS} characters]`;
+    text = `${truncateSafe(text, TEXT_ATTACH_MAX_CHARS)}\n[attachment truncated at ${TEXT_ATTACH_MAX_CHARS} characters]`;
     truncated = true;
   }
   return {

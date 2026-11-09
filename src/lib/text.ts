@@ -64,6 +64,55 @@ export function clip(s: string, max: number): string {
 }
 
 /**
+ * Decode a byte-capped PREFIX of a file (the first `buf.length` bytes) as
+ * UTF-8 without splitting a multi-byte sequence at the cut: when the buffer
+ * ends mid-character, the incomplete trailing bytes are dropped, so the
+ * result never carries a U+FFFD replacement character. The naive
+ * `buf.toString('utf8')` inserts U+FFFD for the split sequence.
+ */
+export function decodeUtf8Prefix(buf: Buffer): string {
+  return buf.subarray(0, utf8PrefixLength(buf)).toString('utf8');
+}
+
+/** Length of `buf` with any incomplete trailing UTF-8 sequence removed. */
+function utf8PrefixLength(buf: Buffer): number {
+  let i = buf.length - 1;
+  let continuations = 0;
+  while (i >= 0 && buf[i] !== undefined && buf[i]! >= 0x80 && buf[i]! < 0xc0) {
+    continuations += 1;
+    i -= 1;
+    if (continuations >= 3) break;
+  }
+  if (i < 0) return 0; // all continuation bytes: no complete char at all
+  const lead = buf[i]!;
+  if (lead < 0x80) return buf.length; // ends on ASCII: nothing split
+  // Expected sequence length from the lead byte (2/3/4-byte forms).
+  const expected = lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : 2;
+  // Bytes present for this char = continuations + 1 (the lead itself).
+  return continuations + 1 < expected ? i : buf.length;
+}
+
+/**
+ * Decode a byte-capped SUFFIX of a file (the last `buf.length` bytes) as
+ * UTF-8 without splitting a multi-byte sequence at the START: when the
+ * buffer begins mid-character, the orphaned leading continuation bytes are
+ * dropped, so the result never starts with a U+FFFD replacement character.
+ * (The tail is the file's own end, so it is always complete.)
+ */
+export function decodeUtf8Suffix(buf: Buffer): string {
+  let start = 0;
+  while (
+    start < buf.length &&
+    buf[start] !== undefined &&
+    buf[start]! >= 0x80 &&
+    buf[start]! < 0xc0
+  ) {
+    start += 1;
+  }
+  return buf.subarray(start).toString('utf8');
+}
+
+/**
  * Collapse all whitespace to single spaces, trim, then clip to `max` chars
  * like {@link clip}. For single-line column display of multi-line text.
  */

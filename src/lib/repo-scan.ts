@@ -16,6 +16,7 @@
 import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
 import { extname, join, resolve } from 'node:path';
 import { loadSecretGuardSync } from './agent/secrets.js';
+import { decodeUtf8Prefix, decodeUtf8Suffix, truncateSafe } from './text.js';
 
 /** Directories never worth scanning - mirrors agent/tools.ts ALWAYS_IGNORE_NAMES. */
 const IGNORE_NAMES = new Set(['node_modules', '.git', 'build', 'dist']);
@@ -83,7 +84,7 @@ export function readFilePrefix(path: string, maxBytes: number): string | null {
     const size = fstatSync(fd).size;
     const buf = Buffer.alloc(Math.min(size, maxBytes));
     readSync(fd, buf, 0, buf.length, 0);
-    return buf.toString('utf8');
+    return decodeUtf8Prefix(buf);
   } catch {
     return null;
   } finally {
@@ -109,7 +110,7 @@ export function readFileSuffix(path: string, maxBytes: number): string | null {
     const len = Math.min(size, maxBytes);
     const buf = Buffer.alloc(len);
     readSync(fd, buf, 0, len, size - len);
-    return buf.toString('utf8');
+    return decodeUtf8Suffix(buf);
   } catch {
     return null;
   } finally {
@@ -311,7 +312,7 @@ function readReadmeSummary(cwd: string): string | undefined {
     const text = para.join(' ').replace(/\s+/g, ' ').trim();
     if (text.length === 0) return undefined;
     return text.length > README_SUMMARY_CAP
-      ? `${text.slice(0, README_SUMMARY_CAP).trimEnd()}…`
+      ? `${truncateSafe(text, README_SUMMARY_CAP).trimEnd()}…`
       : text;
   }
   return undefined;

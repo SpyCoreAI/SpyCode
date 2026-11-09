@@ -21,6 +21,7 @@
 import { api, streamRequest, unexpectedServerResponse, type StreamEvent } from './api.js';
 import { WIRE_MESSAGE_MAX_CHARS } from './attachments.js';
 import { EXIT_USER_ERROR, SpycoreCliError } from './errors.js';
+import { truncateSafe } from './text.js';
 import type { ModelSlug } from './models.js';
 
 /** Per-block diff budget - mirrors TEXT_ATTACH_MAX_CHARS from the 1.2 contract. */
@@ -62,7 +63,7 @@ export const TRUNCATION_MARKER = '[... truncated: diff exceeds the prompt budget
 export function truncateWithMarker(text: string, max: number): string {
   if (text.length <= max) return text;
   const keep = Math.max(0, max - TRUNCATION_MARKER.length - 2);
-  return `${text.slice(0, keep)}\n${TRUNCATION_MARKER}`;
+  return `${truncateSafe(text, keep)}\n${TRUNCATION_MARKER}`;
 }
 
 /**
@@ -206,7 +207,7 @@ export function sanitizeBranchName(raw: string): string {
   // Keep at most one slash (the type prefix separator).
   const parts = name.split('/');
   if (parts.length > 2) name = `${parts[0]}/${parts.slice(1).join('-')}`;
-  if (name.length > 60) name = name.slice(0, 60).replace(/[-/]+$/g, '');
+  if (name.length > 60) name = truncateSafe(name, 60).replace(/[-/]+$/g, '');
   return name;
 }
 

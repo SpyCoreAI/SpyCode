@@ -19,6 +19,7 @@
 import { api } from '../api.js';
 import { isSpycoreCliError } from '../errors.js';
 import { sanitizeForDisplay } from '../sanitize-display.js';
+import { truncateSafe } from '../text.js';
 
 export interface CompactFlowIo {
   /** Session-idiom notice (the Ink session pushes a Notice item). */
@@ -85,7 +86,7 @@ export async function runCompactFlow(opts: CompactFlowOpts): Promise<CompactFlow
 
   const snippet = sanitizeForDisplay(resp.summary ?? '').trim();
   const capped =
-    snippet.length > SUMMARY_SNIPPET_CAP ? `${snippet.slice(0, SUMMARY_SNIPPET_CAP)}…` : snippet;
+    snippet.length > SUMMARY_SNIPPET_CAP ? `${truncateSafe(snippet, SUMMARY_SNIPPET_CAP)}…` : snippet;
   io.notify(
     'success',
     `Compacted - ${resp.archivedCount} message${resp.archivedCount === 1 ? '' : 's'} archived (recoverable); the conversation continues in place.${capped ? `\nSummary: ${capped}` : ''}`,

@@ -41,6 +41,7 @@
  * meaningless across machines.
  * ─────────────────────────────────────────────────────────────────────────
  */
+import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { getConfigPath } from '../../lib/config.js';
@@ -133,7 +134,8 @@ export function saveProjects(entries: ProjectEntry[]): void {
   // Atomic write via tmp+rename (the runs.ts pattern): a crash mid-write
   // used to leave a torn projects.json. The direct writeFileSync is only
   // the fallback when the rename itself fails.
-  const tmp = `${file}.tmp-${process.pid}`;
+  // R3-10: random temp name (the R3-15 pattern) - a pid-only name is guessable.
+  const tmp = `${file}.tmp-${process.pid}-${randomBytes(8).toString('hex')}`;
   writeFileSync(tmp, JSON.stringify(all, null, 2) + '\n', { mode: 0o600 });
   try {
     renameSync(tmp, file);

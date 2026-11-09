@@ -11,11 +11,13 @@
  * `spycore` CLI runs - it always lives at the end-user's project root, and
  * nothing here ever writes into the CLI's own source tree.
  */
+import { randomBytes } from 'node:crypto';
 import { existsSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { countFileLines, readFilePrefix } from './repo-scan.js';
 import { loadSecretGuardSync } from './agent/secrets.js';
 import { redactFreeText } from './redact.js';
+import { truncateSafe } from './text.js';
 
 /** Cap on bytes read from CODEBASE_CHANGELOG.md for the recent-entries view. */
 const CHANGELOG_READ_CAP_BYTES = 1_048_576;
@@ -142,7 +144,7 @@ export function formatChangelogEntry(input: ChangelogEntryInput): string {
   // the one choke point every entry passes through.
   const summary = redactFreeText(oneLine(input.summary));
   const trimmed =
-    summary.length > ENTRY_SUMMARY_CAP ? `${summary.slice(0, ENTRY_SUMMARY_CAP - 1).trimEnd()}…` : summary;
+    summary.length > ENTRY_SUMMARY_CAP ? `${truncateSafe(summary, ENTRY_SUMMARY_CAP - 1).trimEnd()}…` : summary;
   const heading = trimmed.length > 0 ? `## ${input.stamp} - ${trimmed}` : `## ${input.stamp}`;
   const lines: string[] = [heading, ''];
   const group = (label: string, items: string[]): void => {
@@ -203,7 +205,8 @@ export function appendChangelogEntry(cwd: string, entryBlock: string): Changelog
       .join('\n\n');
     const blocks = [preamble.trim(), entryBlock.trim(), existing].filter((s) => s.length > 0);
     const next = `${blocks.join('\n\n')}\n`;
-    const tmp = `${path}.tmp-${process.pid}`;
+    // R3-10: random temp name (the R3-15 pattern) - a pid-only name is guessable.
+    const tmp = `${path}.tmp-${process.pid}-${randomBytes(8).toString('hex')}`;
     writeFileSync(tmp, next, 'utf8');
     try {
       renameSync(tmp, path);
@@ -281,7 +284,7 @@ export function readRecentChangelog(cwd: string, opts: RecentChangelogOptions = 
   if (opts.maxChars !== undefined && text.length > opts.maxChars) {
     const marker = '\n\n<!-- … older entries trimmed to fit -->';
     const room = Math.max(0, opts.maxChars - marker.length);
-    text = `${text.slice(0, room).replace(/\s+$/, '')}${marker}`;
+    text = `${truncateSafe(text, room).replace(/\s+$/, '')}${marker}`;
     truncated = true;
   }
   return {

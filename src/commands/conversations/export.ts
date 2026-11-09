@@ -26,9 +26,17 @@ interface ConversationGetResp {
 
 function toMarkdown(convo: ConversationGetResp): string {
   const lines: string[] = [];
-  lines.push(`# ${typeof convo.title === 'string' && convo.title ? convo.title : '(untitled)'}`);
+  // R3-11: the title is server-generated from the first user message, so
+  // a secret pasted there can surface in the title - redact it (and the
+  // model) like share.ts already does, not just the message content.
+  const title =
+    typeof convo.title === 'string' && convo.title
+      ? redactFreeText(convo.title)
+      : '(untitled)';
+  const model = typeof convo.model === 'string' ? redactFreeText(convo.model) : '';
+  lines.push(`# ${title}`);
   lines.push('');
-  lines.push(`*Model:* ${typeof convo.model === 'string' ? convo.model : ''}  ·  *ID:* \`${typeof convo.id === 'string' ? convo.id : ''}\``);
+  lines.push(`*Model:* ${model}  ·  *ID:* \`${typeof convo.id === 'string' ? convo.id : ''}\``);
   lines.push('');
   lines.push('---');
   lines.push('');
@@ -71,6 +79,11 @@ export function redactedExport(convo: ConversationGetResp): ConversationGetResp 
   );
   return {
     ...convo,
+    // R3-11: the JSON path dumps the whole object, so the title/model need
+    // the same redaction as the message content (the title derives from
+    // the first user message and can carry a pasted secret).
+    title: redactFreeText(typeof convo.title === 'string' ? convo.title : ''),
+    model: redactFreeText(typeof convo.model === 'string' ? convo.model : ''),
     messages: messages.map((m) => ({
       ...m,
       content: redactFreeText(typeof m.content === 'string' ? m.content : ''),

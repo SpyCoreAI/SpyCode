@@ -27,6 +27,7 @@ import { existsSync, lstatSync, realpathSync, renameSync, statSync, unlinkSync, 
 import { join, resolve } from 'node:path';
 import { countFileLines, readFilePrefix, readFileSuffix, scanRepo, type RepoScan } from './repo-scan.js';
 import { loadSecretGuardSync } from './agent/secrets.js';
+import { truncateSafe } from './text.js';
 
 /** Cap on bytes read from CODEBASE_GUIDE.md: only the head is ever rendered. */
 const GUIDE_READ_CAP_BYTES = 1_048_576;
@@ -475,7 +476,7 @@ export function readGuideForContext(
   if (opts.maxChars !== undefined && text.length > opts.maxChars) {
     const marker = '\n\n<!-- … truncated to fit -->';
     const room = Math.max(0, opts.maxChars - marker.length);
-    text = `${text.slice(0, room).replace(/\s+$/, '')}${marker}`;
+    text = `${truncateSafe(text, room).replace(/\s+$/, '')}${marker}`;
     truncated = true;
   }
   return { exists: true, path, text, truncated };

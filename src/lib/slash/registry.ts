@@ -24,7 +24,8 @@
  *    updates its React state). The core only signals `new-conversation`.
  *  - /clear, /exit - pure view/loop control; the core only recognises them.
  */
-import { existsSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { existsSync, lstatSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
 import { resolveModelSlug, type ModelSlug } from '../models.js';
 import {
@@ -237,6 +238,40 @@ function errMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/** Write `content` to `abs` atomically: temp file in the same dir + rename. */
+function writeSaveAtomic(abs: string, content: string): void {
+  // tmp+rename replaces the PATH, not the file it points at: a symlinked
+  // target must keep being written THROUGH the link (the old direct write
+  // did), and a dangling link must still fail ENOENT instead of silently
+  // becoming a regular file. Random temp name (R3-10 class): a pid-only
+  // name is guessable by another local process.
+  const dest = resolveWriteTarget(abs);
+  const tmp = `${dest}.spycore-${process.pid}-${randomBytes(8).toString('hex')}.tmp`;
+  try {
+    writeFileSync(tmp, content, 'utf8');
+    renameSync(tmp, dest);
+  } catch (err) {
+    try {
+      if (existsSync(tmp)) unlinkSync(tmp);
+    } catch {
+      /* ignore cleanup failure */
+    }
+    throw err;
+  }
+}
+
+/** Resolve a write target through a symlink; absent paths pass through. */
+function resolveWriteTarget(abs: string): string {
+  let st;
+  try {
+    st = lstatSync(abs);
+  } catch {
+    return abs; // absent: the atomic write creates it
+  }
+  if (!st.isSymbolicLink()) return abs;
+  return realpathSync(abs); // throws ENOENT for a dangling link, ELOOP for a loop
+}
+
 /** Split a raw `/command arg…` string into its name + argument tokens. */
 export function parseSlashInput(raw: string): { name: string; args: string[] } {
   const [name, ...args] = raw.replace(/^\//, '').split(/\s+/);
@@ -402,7 +437,9 @@ export async function runSlashCommand(
           `/conversations/${encodeURIComponent(ctx.conversationId)}`,
           { apiUrlOverride: ctx.apiUrl },
         );
-        writeFileSync(path, conversationToMarkdown(convo), 'utf8');
+        // R3-12: atomic tmp+rename (the export.ts pattern) - a crash
+        // mid-write used to leave a truncated export behind.
+        writeSaveAtomic(path, conversationToMarkdown(convo));
         return { kind: 'saved', path };
       } catch (err) {
         return { kind: 'save-error', message: errMessage(err) };

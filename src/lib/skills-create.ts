@@ -12,6 +12,7 @@
  * BYOK adapter (regeneration rides the same conversation: server-side history
  * for SpyCore, adapter-kept history for BYOK).
  */
+import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import {
@@ -24,6 +25,7 @@ import {
 import { officialSkillNames } from './skills-sync.js';
 import type { Provider } from './providers/types.js';
 import { EXIT_USER_ERROR, SpycoreCliError } from './errors.js';
+import { truncateSafe } from './text.js';
 
 /** Hard cap on a skill name (an explicit --name may use the full length). */
 export const MAX_NAME_LENGTH = 64;
@@ -46,7 +48,7 @@ function truncateWithMarker(text: string, max: number): string {
   const MARKER = '[... truncated: input exceeds the generation budget ...]';
   if (text.length <= max) return text;
   const keep = Math.max(0, max - MARKER.length - 2);
-  return `${text.slice(0, keep)}\n${MARKER}`;
+  return `${truncateSafe(text, keep)}\n${MARKER}`;
 }
 
 /**
@@ -131,7 +133,10 @@ export function skillTargetFile(name: string, cwd: string, project: boolean): st
 /** Atomic write (tmp + rename), creating the skill dir. Ensures a trailing newline. */
 export function writeSkillFileAtomic(file: string, content: string): void {
   mkdirSync(dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.tmp`;
+  // R3-10: random temp name (the R3-15 pattern) - a pid-only name is
+  // guessable by another local process, which could plant a symlink the
+  // plain write would follow.
+  const tmp = `${file}.${process.pid}-${randomBytes(8).toString('hex')}.tmp`;
   writeFileSync(tmp, content.endsWith('\n') ? content : `${content}\n`, 'utf8');
   renameSync(tmp, file);
 }

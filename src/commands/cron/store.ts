@@ -14,7 +14,7 @@
  * prompts yet. A follow-up should add execution (e.g. a `run-due` check that
  * fires prompts through the chat pipeline, or a crontab/launchd installer).
  */
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { getConfigPath } from '../../lib/config.js';
@@ -121,7 +121,8 @@ function saveCronEntries(entries: CronEntry[]): void {
   // used to leave a torn cron.json, and then every cron command errored
   // "not valid JSON". The direct writeFileSync is only the fallback when
   // the rename itself fails.
-  const tmp = `${path}.tmp-${process.pid}`;
+  // R3-10: random temp name (the R3-15 pattern) - a pid-only name is guessable.
+  const tmp = `${path}.tmp-${process.pid}-${randomBytes(8).toString('hex')}`;
   writeFileSync(tmp, `${JSON.stringify(all, null, 2)}\n`, { mode: 0o600 });
   try {
     renameSync(tmp, path);
