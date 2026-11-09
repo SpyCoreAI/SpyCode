@@ -34,7 +34,13 @@ const NOTICE = fileURLToPath(new URL('../THIRD-PARTY-LICENSES', import.meta.url)
 const SEP = `\n${'='.repeat(78)}\n`;
 
 function blockFor(nameAtVersion: string): string {
-  const content = readFileSync(NOTICE, 'utf8');
+  // R4-CI1: normalise CRLF before splitting on the LF separator. A Windows
+  // checkout converts THIRD-PARTY-LICENSES to CRLF (the repo had no
+  // .gitattributes), which made the split find 0 blocks and failed all 4
+  // tests on the Windows CI legs while Ubuntu/macOS stayed green.
+  // .gitattributes now forces LF for this file; the normalisation stays as
+  // defence in depth, so a CRLF copy still reads.
+  const content = readFileSync(NOTICE, 'utf8').replace(/\r\n/g, '\n');
   const blocks = content.split(SEP).slice(1);
   // The file must be non-trivial, or every lookup below holds vacuously.
   expect(blocks.length).toBeGreaterThanOrEqual(100);

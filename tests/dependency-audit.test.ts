@@ -15,7 +15,7 @@ import { describe, expect, test } from 'vitest';
  * import-analysis can only rewrite a literal (see
  * tests/resolved-install-audit.test.ts for why a computed specifier fails).
  */
-import { buildCmdCommandLine, buildPnpmSpawn, evaluateAuditReport, resolvePnpmCommand } from '../scripts/dependency-audit.mjs';
+import { AUDIT_TIMEOUT_MS, buildCmdCommandLine, buildPnpmSpawn, evaluateAuditReport, resolvePnpmCommand } from '../scripts/dependency-audit.mjs';
 
 const SCRIPT = fileURLToPath(new URL('../scripts/dependency-audit.mjs', import.meta.url));
 
@@ -46,6 +46,37 @@ describe('evaluateAuditReport - the non-vacuous guard', () => {
   test('a real clean audit - advisories key present but empty - passes', () => {
     expect(evaluateAuditReport({ advisories: {} })).toEqual({ scanned: 0, waived: 0, blocked: 0 });
     expect(evaluateAuditReport({ advisories: [] })).toEqual({ scanned: 0, waived: 0, blocked: 0 });
+  });
+
+  test('a MALFORMED per-advisory entry fails loudly, never passes as clean (R4-2)', () => {
+    // The old form read `a.severity` off whatever the entry was, so a
+    // string, number, or boolean entry yielded severity '' and was skipped -
+    // a payload whose EVERY entry was malformed verdicted clean. Only a null
+    // entry failed, and only by accident (an unhandled TypeError).
+    for (const malformed of ['high', 5, true, null]) {
+      expect(() => evaluateAuditReport({ advisories: { X: malformed } })).toThrow(
+        /not an object|no readable severity/,
+      );
+    }
+    // An array is not an advisory object either.
+    expect(() => evaluateAuditReport({ advisories: { X: [] } })).toThrow(/not an object/);
+    // An object with no severity at all is unreadable, not low.
+    expect(() => evaluateAuditReport({ advisories: { X: {} } })).toThrow(/no readable severity/);
+  });
+
+  test('an UNKNOWN severity fails loudly, never passes as clean (R4-2)', () => {
+    // 'severe' is not in npm's severity domain; the old form skipped it as
+    // not-high, so a payload carrying only unknown severities verdicted clean.
+    expect(() => evaluateAuditReport({ advisories: { X: { severity: 'severe' } } })).toThrow(
+      /unknown severity `severe`/,
+    );
+    expect(() => evaluateAuditReport({ advisories: { X: { severity: '' } } })).toThrow(
+      /unknown severity ``/,
+    );
+  });
+
+  test('the pnpm audit spawn is bounded at 300 s, matching the sibling instrument (R4-5)', () => {
+    expect(AUDIT_TIMEOUT_MS).toBe(300_000);
   });
 
   test('a low-severity advisory passes; a high one blocks', () => {

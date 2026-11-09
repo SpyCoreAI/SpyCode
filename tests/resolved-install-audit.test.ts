@@ -58,7 +58,7 @@ describe('audit-resolved-install - the published-manifest advisory instrument', 
     // three instruments printing PASS over zero executed assertions because
     // nothing ratcheted the case count. This asserts the number, not the word.
     const ran = Number(/SELF-TEST OK - (\d+) cases/.exec(out)?.[1] ?? '0');
-    expect(ran).toBeGreaterThanOrEqual(16);
+    expect(ran).toBeGreaterThanOrEqual(19);
   });
 
   /**
@@ -89,6 +89,16 @@ describe('audit-resolved-install - the published-manifest advisory instrument', 
       const v = mod.verdictFrom(malformed);
       expect(v.ok, `must refuse per-entry malformed ${JSON.stringify(malformed)}`).toBe(false);
       expect(v.reason, `must SAY why it refused ${JSON.stringify(malformed)}`).not.toBeNull();
+    }
+    // R4-3: a severity outside npm's domain is the same refusal, one step
+    // further down. 'severe' is not a severity, 'High' is a casing change
+    // npm never emits, and '' is no severity at all - each used to read as
+    // clean, because the string check passed and the high/critical compare
+    // did not match.
+    for (const unknown of ['severe', 'High', 'banana', '']) {
+      const v = mod.verdictFrom({ vulnerabilities: { x: { severity: unknown } } });
+      expect(v.ok, `must refuse unknown severity ${JSON.stringify(unknown)}`).toBe(false);
+      expect(v.reason, `must SAY why it refused unknown severity ${JSON.stringify(unknown)}`).not.toBeNull();
     }
     // …and the control: a well-formed clean payload is genuinely clean, so the
     // refusal above is a discrimination and not a constant.

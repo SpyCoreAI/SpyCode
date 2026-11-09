@@ -90,10 +90,11 @@
 #   -  The blocked-string scan uses `grep -I`, so a denied string inside a BINARY
 #     packed member is invisible. No member is binary today; that is a property
 #     of the current artifact, not of the check.
-#   -  The `files` re-grounding proves the packed set agrees with the
-#     DECLARATION. It cannot prove the declaration is the right one - that is
-#     `tests/pack-verification.test.ts` P1's job, and the two are deliberately
-#     different questions.
+#   -  The `files` re-grounding (directions 1 and 2) proves the packed set
+#     agrees with the DECLARATION. It cannot prove the declaration is the
+#     right one - that is direction 3's job (the expected-set check in
+#     section 2b, pinned again by `tests/pack-verification.test.ts` P1),
+#     and the two are deliberately different questions.
 #
 # USAGE
 #   sh scripts/pack-verify.sh              pack, install and exercise
@@ -239,13 +240,17 @@ list_members() { # $1 = package dir
 
 # Every entry point the MANIFEST declares - read from the manifest, never from a
 # hand-list, so a new bin or a renamed main is covered without anyone
-# remembering to update this script.
+# remembering to update this script. `bin` is normalised first: npm accepts
+# it as a STRING for a single binary ("bin": "bin/spycore.js"), and
+# Object.values on a string yields its CHARACTERS (R4-6) - a valid manifest
+# then reddened on a dozen single-character "entry points".
 entry_points() { # $1 = package dir
   node -e '
 const p = require(process.argv[1] + "/package.json");
 const out = new Set();
 if (p.main) out.add(String(p.main).replace(/^\.\//, ""));
-for (const v of Object.values(p.bin || {})) out.add(String(v).replace(/^\.\//, ""));
+const bins = typeof p.bin === "string" ? [p.bin] : Object.values(p.bin || {});
+for (const v of bins) out.add(String(v).replace(/^\.\//, ""));
 process.stdout.write([...out].join("\n"));
 ' "$1"
 }
@@ -285,7 +290,8 @@ const p = require(process.argv[1] + "/package.json");
 const files = (p.files || []).map(String)
   .map((s) => s.replace(/^\.\//, "").replace(/\/$/, ""));
 const forced = new Set(["package.json"]);
-for (const v of Object.values(p.bin || {})) forced.add(String(v).replace(/^\.\//, ""));
+const bins = typeof p.bin === "string" ? [p.bin] : Object.values(p.bin || {});
+for (const v of bins) forced.add(String(v).replace(/^\.\//, ""));
 let s = "";
 process.stdin.on("data", (c) => { s += c; }).on("end", () => {
   const members = s.split("\n").filter(Boolean);
@@ -315,6 +321,31 @@ process.stdin.on("data", (c) => { s += c; }).on("end", () => {
   const out = files.filter((f) => !members.some((m) => m === f || m.startsWith(f + "/")));
   process.stdout.write(out.join("\n"));
 });
+' "$1"
+}
+
+#  THE RE-GROUNDING, DIRECTION 3 - the DECLARATION against the EXPECTED set.
+# Directions 1 and 2 compare members against the declaration; neither can
+# see an entry silently REMOVED from the declaration. Dropping SECURITY.md
+# and THIRD-PARTY-LICENSES from `files[]` passed both silently (R4-1): the
+# members would not even contain the two docs, so there was no signal
+# anywhere, while the artifact shipped without its security policy and its
+# legal notice. This compares the declaration against the expected set, so
+# a removal fails loudly here. The set is pinned twice - here, and in
+# tests/pack-verification.test.ts P1, which reads it from package.json -
+# and the two must agree. An EXTRA entry is reported too: a new shipped
+# file is a deliberate decision, and the expected set (here and in the
+# test) is updated with it, not silently absorbed.
+expected_files_drift() { # $1 = package dir
+  node -e '
+const p = require(process.argv[1] + "/package.json");
+const expected = ["build", "bin", "README.md", "CHANGELOG.md", "LICENSE", "NOTICE", "THIRD-PARTY-LICENSES", "SECURITY.md"];
+const files = (p.files || []).map(String)
+  .map((s) => s.replace(/^\.\//, "").replace(/\/$/, ""));
+const out = [];
+for (const e of expected) if (!files.includes(e)) out.push("missing: " + e);
+for (const f of files) if (!expected.includes(f)) out.push("extra: " + f);
+process.stdout.write(out.join("\n"));
 ' "$1"
 }
 
@@ -414,6 +445,13 @@ self_test() {
   printf '%s\n' '{"name":"x"}' >"$T/none/package.json"
   st 'E3  a manifest declaring NEITHER main NOR bin derives ZERO entry points (the vacuity the guard below refuses)' \
     "$(entry_points "$T/none")" ''
+  #  R4-6: npm accepts `bin` as a STRING for a single binary. Object.values
+  # on a string yields its characters, so the old form derived a dozen
+  # single-character "entry points" from a valid manifest and reddened it.
+  mkdir -p "$T/strbin"
+  printf '%s\n' '{"name":"x","main":"./build/index.js","bin":"bin/spycore.js","files":["build","bin"]}' >"$T/strbin/package.json"
+  st 'E4  a STRING-form bin is ONE entry point, not one per character (R4-6)' \
+    "$(printf '%s' "$(entry_points "$T/strbin")" | tr '\n' ' ')" 'build/index.js bin/spycore.js'
 
   # ── M-forms: the member count ────────────────────────────────────────────
   st 'M1 three members count as 3' "$(member_count 'a
@@ -488,6 +526,32 @@ bin/spycore.js')" 'README.md'
     "$(files_allowlist "$T/none")" ''
   st 'A7 the allowlist is read from the manifest, trailing slashes normalised' \
     "$(files_allowlist "$T/pkg" | tr '\n' ' ')" 'build bin README.md'
+  #  R4-6, second site: the forced set in uncovered_members had the same
+  # string-bin shape. A string-form bin target is npm-forced, so it must
+  # not be reported as uncovered.
+  st 'A8  a STRING-form bin target is in the forced set, not uncovered (R4-6)' \
+    "$(uncovered_members "$T/strbin" 'build/index.js
+bin/spycore.js
+package.json')" ''
+
+  # ── F-forms: the DECLARATION itself against the EXPECTED set (R4-1) ─────
+  #  Directions 1 and 2 above cannot see a `files` entry silently REMOVED:
+  # dropping SECURITY.md and THIRD-PARTY-LICENSES passed both. These cases
+  # prove direction 3 sees exactly that removal - and that it also sees an
+  # entry ADDED without updating the expected set.
+  mkdir -p "$T/full"
+  printf '%s\n' '{"name":"x","files":["build","bin","README.md","CHANGELOG.md","LICENSE","NOTICE","THIRD-PARTY-LICENSES","SECURITY.md"]}' >"$T/full/package.json"
+  mkdir -p "$T/dropped"
+  printf '%s\n' '{"name":"x","files":["build","bin","README.md","CHANGELOG.md","LICENSE","NOTICE"]}' >"$T/dropped/package.json"
+  mkdir -p "$T/added"
+  printf '%s\n' '{"name":"x","files":["build","bin","README.md","CHANGELOG.md","LICENSE","NOTICE","THIRD-PARTY-LICENSES","SECURITY.md","EXTRA.md"]}' >"$T/added/package.json"
+  st 'F1  a declaration that DROPPED two docs reports both as missing (R4-1)' \
+    "$(expected_files_drift "$T/dropped")" 'missing: THIRD-PARTY-LICENSES
+missing: SECURITY.md'
+  st 'F2  a declaration with an EXTRA entry reports it (R4-1)' \
+    "$(expected_files_drift "$T/added")" 'extra: EXTRA.md'
+  st 'F3  the exact expected declaration drifts NOWHERE (R4-1)' \
+    "$(expected_files_drift "$T/full")" ''
 
   # ── D-forms: the denylist loader ─────────────────────────────────────────
   printf '%s\n' '# a comment' '' 'alpha' '   indented   ' '# another' 'beta' >"$T/deny.txt"
@@ -752,6 +816,13 @@ else
     bad "\`files\` entries that shipped NOTHING (a declared file stopped shipping):"; printf '%s\n' "$BARREN"
   else
     ok "every \`files\` entry contributes at least one packed member"
+  fi
+
+  DRIFT="$(expected_files_drift "$PKGDIR")"
+  if [ -n "$DRIFT" ]; then
+    bad "\`files\` declaration drifted from the expected set (an entry was removed, or a new one added without updating the expected set in scripts/pack-verify.sh and tests/pack-verification.test.ts):"; printf '%s\n' "$DRIFT"
+  else
+    ok "the \`files\` declaration matches the expected set (build, bin, six docs)"
   fi
 fi
 

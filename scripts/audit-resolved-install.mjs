@@ -106,6 +106,14 @@ export function verdictFrom(payload) {
     if (typeof severity !== 'string') {
       return { ok: false, reason: `vulnerability entry for \`${name}\` has no readable severity - the measurement failed`, findings: [] };
     }
+    // R4-3: the string check above is not enough - a severity outside npm's
+    // domain ({low, moderate, high, critical}) is a payload this verdict
+    // cannot read, and the old form silently skipped it as clean. npm emits
+    // lowercase severities, so the membership check is case-SENSITIVE
+    // deliberately: 'High' is a shape change, not a known severity.
+    if (severity !== 'low' && severity !== 'moderate' && severity !== 'high' && severity !== 'critical') {
+      return { ok: false, reason: `vulnerability entry for \`${name}\` has unknown severity \`${severity}\` - the measurement failed`, findings: [] };
+    }
     if (severity !== 'high' && severity !== 'critical') continue;
     const via = info && Array.isArray(info.via) ? info.via : [];
     const titles = via.filter((v) => v && typeof v === 'object').map((v) => `${v.title ?? '?'} (${v.url ?? '?'})`);
@@ -210,6 +218,21 @@ const SELF_TEST_CASES = [
     want: { ok: false, findings: 0 },
   },
   {
+    name: 'R4-3: an UNKNOWN severity FAILS - it is not a clean zero',
+    payload: { vulnerabilities: { x: { severity: 'severe' } } },
+    want: { ok: false, findings: 0 },
+  },
+  {
+    name: 'R4-3: a NON-LOWERCASE severity FAILS - npm emits lowercase, so `High` is a shape change, not a known severity',
+    payload: { vulnerabilities: { x: { severity: 'High' } } },
+    want: { ok: false, findings: 0 },
+  },
+  {
+    name: 'R4-3: an EMPTY severity FAILS - it is not a clean zero',
+    payload: { vulnerabilities: { x: { severity: '' } } },
+    want: { ok: false, findings: 0 },
+  },
+  {
     name: 'the published manifest carries ONLY prod + optional deps',
     manifest: { dependencies: { a: '^1' }, optionalDependencies: { b: '^2' }, devDependencies: { c: '^3' } },
     wantManifest: { deps: ['a'], opt: ['b'], hasDev: false },
@@ -251,7 +274,7 @@ function selfTest() {
   // three instruments reported PASS over zero executed assertions, because
   // nothing ratcheted the CASE count. This refuses to report success on an
   // empty run, and the floor is a literal so it cannot be silently lowered.
-  const FLOOR = 16;
+  const FLOOR = 19;
   if (ran < FLOOR) {
     console.error(`SELF-TEST INVALID - ${ran} cases ran, floor is ${FLOOR}. A green over an empty run is not a green.`);
     return 1;

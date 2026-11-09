@@ -46,6 +46,13 @@ const KNOWN = {
   patchFile: 'patches/braces@3.0.3.patch',
 };
 
+// R4-5: the `pnpm audit` spawn is bounded, matching the sibling instrument
+// (audit-resolved-install.mjs: 300_000 on both of its network calls). An
+// audit that never returns is not a clean audit - without this the only
+// bound was the CI job's 30-minute timeout, and locally the gate hung
+// `prepublishOnly` with no output at all.
+export const AUDIT_TIMEOUT_MS = 300_000;
+
 function fail(msg) {
   console.error(`[dependency-audit] FAIL: ${msg}`);
   process.exit(1);
@@ -189,9 +196,15 @@ function runFromCli() {
     cwd: ROOT,
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
+    timeout: AUDIT_TIMEOUT_MS,
     windowsVerbatimArguments: target.windowsVerbatimArguments,
   });
-  if (res.error) fail(`pnpm audit did not run: ${res.error.message}`);
+  if (res.error) {
+    if (res.error.code === 'ETIMEDOUT') {
+      fail(`pnpm audit did not run: timed out after ${AUDIT_TIMEOUT_MS / 1000}s - the registry or pnpm hung; refusing a vacuous pass`);
+    }
+    fail(`pnpm audit did not run: ${res.error.message}`);
+  }
   const raw = res.stdout || '';
   if (!raw.trim()) {
     fail(`pnpm audit produced no output${res.stderr ? `: ${String(res.stderr).slice(0, 500)}` : ''}`);
@@ -264,10 +277,30 @@ export function evaluateAuditReport(data) {
   const list = Array.isArray(adv) ? adv : Object.values(adv);
 
   const HIGH = new Set(['high', 'critical']);
+  // npm's severity domain. A severity outside it is a payload this gate
+  // cannot read - R4-2: the old form lowercased whatever it was given and
+  // skipped anything not high/critical, so a malformed entry or an unknown
+  // severity ('severe') verdicted clean.
+  const KNOWN_SEVERITIES = new Set(['low', 'moderate', 'high', 'critical']);
   let blocked = 0;
   let waived = 0;
   for (const a of list) {
-    const severity = String(a.severity || '').toLowerCase();
+    if (a === null || typeof a !== 'object' || Array.isArray(a)) {
+      throw new Error(
+        'advisory entry is not an object - cannot tell a clean audit from a changed/error payload; refusing a vacuous pass',
+      );
+    }
+    if (typeof a.severity !== 'string') {
+      throw new Error(
+        'advisory entry has no readable severity - cannot tell a clean audit from a changed/error payload; refusing a vacuous pass',
+      );
+    }
+    const severity = a.severity.toLowerCase();
+    if (!KNOWN_SEVERITIES.has(severity)) {
+      throw new Error(
+        `advisory entry has unknown severity \`${a.severity}\` - cannot tell a clean audit from a changed/error payload; refusing a vacuous pass`,
+      );
+    }
     if (!HIGH.has(severity)) continue;
     const id = a.id || a.ghsaId || a.advisoryId || '';
     const pkg = a.package_name || a.packageName || a.module_name || '';

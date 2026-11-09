@@ -242,7 +242,16 @@ const blocks = entries.map((e) => {
 const output = `${header}${sep}${blocks.join(sep)}\n`;
 
 if (process.argv.includes('--check')) {
-  const current = existsSync(OUT_FILE) ? readFileSync(OUT_FILE, 'utf8') : '';
+  // R4-CI1: the committed file is compared against LF output. A Windows
+  // checkout converts it to CRLF (the repo had no .gitattributes), which
+  // failed this comparison - and the test's LF split - on both Windows CI
+  // legs, 4/4 tests, while Ubuntu/macOS stayed green. Normalise CRLF here
+  // so the check compares CONTENT, not checkout line endings. .gitattributes
+  // now also forces LF for this file; the normalisation stays as defence in
+  // depth, so a CRLF copy still verifies.
+  const current = existsSync(OUT_FILE)
+    ? readFileSync(OUT_FILE, 'utf8').replace(/\r\n/g, '\n')
+    : '';
   if (current !== output) {
     console.error('THIRD-PARTY-LICENSES is out of date - run: node scripts/gen-third-party-licenses.mjs');
     process.exit(1);
