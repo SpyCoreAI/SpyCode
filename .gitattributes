@@ -1,0 +1,6 @@
+# THIRD-PARTY-LICENSES is compared byte-for-byte by
+# `node scripts/gen-third-party-licenses.mjs --check` and split on LF
+# separators by `tests/third-party-licenses.test.ts`. A Windows checkout with
+# no .gitattributes converted it to CRLF and failed both on the Windows CI
+# legs (R4-CI1) while Ubuntu/macOS stayed green. Force LF.
+THIRD-PARTY-LICENSES text eol=lf

@@ -1,0 +1,317 @@
+import { describe, expect, test } from 'vitest';
+import {
+  isSecretKey,
+  REDACTED,
+  redactConfigDump,
+  redactFreeText,
+  redactSecrets,
+} from '../src/lib/redact.js';
+
+describe('redact', () => {
+  test('isSecretKey flags __token__ and secret-ish names, not normal keys', () => {
+    expect(isSecretKey('__token__')).toBe(true);
+    expect(isSecretKey('apiKey')).toBe(true);
+    expect(isSecretKey('api_key')).toBe(true);
+    expect(isSecretKey('PASSWORD')).toBe(true);
+    expect(isSecretKey('bearerToken')).toBe(true);
+    expect(isSecretKey('clientSecret')).toBe(true);
+    // A *_PRIVATE_KEY value IS the secret, and a *CREDENTIALS* name points
+    // at a credential file - both used to pass the screen verbatim.
+    expect(isSecretKey('MY_PRIVATE_KEY')).toBe(true);
+    expect(isSecretKey('GOOGLE_APPLICATION_CREDENTIALS')).toBe(true);
+    expect(isSecretKey('AWS_SHARED_CREDENTIALS_FILE')).toBe(true);
+    expect(isSecretKey('apiUrl')).toBe(false);
+    expect(isSecretKey('defaultModel')).toBe(false);
+    expect(isSecretKey('theme')).toBe(false);
+  });
+
+  test('redactSecrets replaces secret values with the placeholder', () => {
+    const out = redactSecrets({
+      apiUrl: 'https://x',
+      __token__: 'spycli_secret',
+    }) as Record<string, unknown>;
+    expect(out.apiUrl).toBe('https://x');
+    expect(out.__token__).toBe(REDACTED);
+    expect(JSON.stringify(out)).not.toContain('spycli_secret');
+  });
+
+  test('redactSecrets recurses into nested objects and arrays', () => {
+    const out = redactSecrets({
+      nested: { apiKey: 'k', safe: 1 },
+      list: [{ password: 'p' }, { ok: true }],
+    }) as { nested: Record<string, unknown>; list: Array<Record<string, unknown>> };
+    expect(out.nested.apiKey).toBe(REDACTED);
+    expect(out.nested.safe).toBe(1);
+    expect(out.list[0]?.password).toBe(REDACTED);
+    expect(out.list[1]?.ok).toBe(true);
+  });
+
+  test('redactSecrets does not mutate the input', () => {
+    const input = { __token__: 'spycli_secret', apiUrl: 'x' };
+    const out = redactSecrets(input) as Record<string, unknown>;
+    expect(input.__token__).toBe('spycli_secret');
+    expect(out.__token__).toBe(REDACTED);
+  });
+
+  test('redactSecrets passes primitives through unchanged', () => {
+    expect(redactSecrets('hello')).toBe('hello');
+    expect(redactSecrets(42)).toBe(42);
+    expect(redactSecrets(null)).toBe(null);
+    expect(redactSecrets(true)).toBe(true);
+  });
+});
+
+describe('redactFreeText (S2: transcript export)', () => {
+  test('redacts Bearer tokens, keeping the scheme', () => {
+    const out = redactFreeText('Authorization: Bearer abcdef1234567890XYZ');
+    expect(out).toBe(`Authorization: Bearer ${REDACTED}`);
+    expect(out).not.toContain('abcdef1234567890XYZ');
+  });
+
+  test('redacts common API key prefixes', () => {
+    expect(redactFreeText('key is sk-abcdefghijklmnop1234')).toBe(
+      `key is ${REDACTED}`,
+    );
+    expect(redactFreeText('token ghp_abcdefghijklmnop1234 here')).toBe(
+      `token ${REDACTED} here`,
+    );
+    expect(redactFreeText('AKIAIOSFODNN7EXAMPLE here')).toBe(
+      `${REDACTED} here`,
+    );
+  });
+
+  test('redacts labeled secrets in key=value form', () => {
+    const out = redactFreeText('api_key=supersecret123');
+    expect(out).not.toContain('supersecret123');
+    expect(out).toContain(REDACTED);
+    const out2 = redactFreeText('password: "hunter2"');
+    expect(out2).not.toContain('hunter2');
+  });
+
+  test('redacts full PEM private key blocks', () => {
+    const pem =
+      '-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA7b\n-----END RSA PRIVATE KEY-----';
+    const out = redactFreeText(`here is the key:\n${pem}\ndone`);
+    expect(out).not.toContain('MIIEpAIBAAKCAQEA7b');
+    expect(out).toContain(REDACTED);
+  });
+
+  test('redacts credentials embedded in URLs', () => {
+    const out = redactFreeText('see https://user:s3cr3t@example.com/path');
+    expect(out).not.toContain('s3cr3t');
+    expect(out).toContain('user:');
+    expect(out).toContain('@example.com');
+  });
+
+  test('leaves ordinary text untouched', () => {
+    const plain = 'The quick brown fox jumps over the lazy dog. 12345.';
+    expect(redactFreeText(plain)).toBe(plain);
+  });
+
+  test('redacts Anthropic sk-ant- keys (R1 finding)', () => {
+    const out = redactFreeText('my key: sk-ant-api03-abcdefghijklmnop1234');
+    expect(out).not.toContain('sk-ant-api03');
+    expect(out).toContain(REDACTED);
+  });
+
+  test('redacts OpenAI sk-proj- keys (R1 finding)', () => {
+    const out = redactFreeText('key sk-proj-abcdefghijklmnop12345678 here');
+    expect(out).not.toContain('sk-proj-');
+    expect(out).toContain(REDACTED);
+  });
+
+  test('redacts Google AIza keys (R1 finding)', () => {
+    const out = redactFreeText('AIzaSyAbcDefGhIjKlMnOpQrStUvWx1234567');
+    expect(out).toBe(REDACTED);
+  });
+
+  test('does not mangle innocent "secret:" prose (R1 finding)', () => {
+    const prose = 'The secret: to good code is simplicity';
+    expect(redactFreeText(prose)).toBe(prose);
+  });
+
+  test('does not mangle "pwd:" paths (R1 finding)', () => {
+    const prose = 'run pwd: /home/user to see the directory';
+    expect(redactFreeText(prose)).toBe(prose);
+  });
+
+  test('redacts credentials in non-HTTP URLs (R1 finding)', () => {
+    const out = redactFreeText('connect to postgres://admin:s3cr3t@db:5432/app');
+    expect(out).not.toContain('s3cr3t');
+    expect(out).toContain('admin:');
+    expect(out).toContain('@db:5432');
+  });
+
+  test('still redacts password= and api_key with values', () => {
+    expect(redactFreeText('password=hunter2')).not.toContain('hunter2');
+    expect(redactFreeText('api_key: "abc123xyz"')).not.toContain('abc123xyz');
+  });
+
+  test('M-1: redacts bare secret= and token= labels', () => {
+    expect(redactFreeText('secret=hunter2')).toBe(`secret: ${REDACTED}`);
+    expect(redactFreeText('token="abc123xyz"')).toBe(`token: ${REDACTED}`);
+    expect(redactFreeText("export token='tok_456'")).toBe(`export token: ${REDACTED}`);
+    // `=` only: the colon form stays prose (pinned by the R1 test above).
+    expect(redactFreeText('token: to good code')).toBe('token: to good code');
+    // No false positive inside longer identifiers.
+    expect(redactFreeText('my_secretary=ann')).toBe('my_secretary=ann');
+  });
+
+  test('redacts additional vendor key prefixes (R2 findings)', () => {
+    expect(redactFreeText('ghs_abcdefghijklmnop1234')).toBe(REDACTED);
+    expect(redactFreeText('ghu_abcdefghijklmnop1234')).toBe(REDACTED);
+    expect(redactFreeText('glpat-abcdefghijklmnop12')).toBe(REDACTED);
+    expect(redactFreeText('sk_live_abcdefghijklmnop')).toBe(REDACTED);
+    expect(redactFreeText('sk_test_abcdefghijklmnop')).toBe(REDACTED);
+    expect(redactFreeText('npm_abcdefghijklmnop12')).toBe(REDACTED);
+    expect(redactFreeText('hf_abcdefghijklmnop1234')).toBe(REDACTED);
+    expect(redactFreeText('xoxe-abcdefghijklmnop12')).toBe(REDACTED);
+  });
+
+  test('redacts ENCRYPTED PRIVATE KEY and PGP blocks (R2 findings)', () => {
+    const enc =
+      '-----BEGIN ENCRYPTED PRIVATE KEY-----\nMIIBvTBXBgkqhkiG9w0BBQ0wSjApBgkq\n-----END ENCRYPTED PRIVATE KEY-----';
+    expect(redactFreeText(enc)).toBe(REDACTED);
+    const pgp =
+      '-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQdGBF...\n-----END PGP PRIVATE KEY BLOCK-----';
+    expect(redactFreeText(pgp)).toBe(REDACTED);
+  });
+
+  test('redacts camelCase apiSecret= (R2 finding)', () => {
+    expect(redactFreeText('apiSecret=mysecretvalue123')).not.toContain(
+      'mysecretvalue123',
+    );
+  });
+
+  test('redacts empty-username URL credentials like redis://:pass@host (R2 finding)', () => {
+    const out = redactFreeText('redis://:s3cr3t@localhost:6379/0');
+    expect(out).not.toContain('s3cr3t');
+    expect(out).toContain(REDACTED);
+  });
+
+  test('ReDoS guard: 100KB plain text redacts byte-identically (R2 finding)', () => {
+    // Was a wall-clock assertion (under 1s) - a loaded CI runner can miss
+    // any tight bound, and a bound loose enough never to flake catches
+    // nothing. The deterministic property is what a ReDoS bug would
+    // actually break: plain text with no secret-shaped run must come back
+    // byte-identical, which a catastrophically backtracking pattern cannot
+    // deliver in any bounded time. The 10s bound is a backstop against a
+    // hang, not the assertion - it is 10x the old bound and 100x the
+    // measured ~100ms on this runner.
+    const big = 'lorem ipsum dolor sit amet '.repeat(4000); // ~108KB
+    const start = Date.now();
+    const out = redactFreeText(big);
+    expect(out, 'plain text must survive redaction byte-identically').toBe(big);
+    expect(Date.now() - start).toBeLessThan(10_000);
+  });
+});
+
+describe('redactConfigDump - MCP server command/args', () => {
+  const TOKEN = 'sk-ant-testtoken-1234567890abcdef';
+  test('a literal token in command/args is redacted, the command shape survives', () => {
+    const out = redactConfigDump({
+      mcpServers: [
+        {
+          name: 'srv',
+          transport: 'stdio',
+          command: `node server.js --token ${TOKEN}`,
+          args: ['--api-key', TOKEN, '--plain', 'value'],
+        },
+      ],
+    }) as { mcpServers: Array<{ command: string; args: string[] }> };
+    const server = out.mcpServers[0]!;
+    expect(server.command).not.toContain(TOKEN);
+    expect(server.command).toContain('node server.js');
+    expect(server.args.join(' ')).not.toContain(TOKEN);
+    expect(server.args).toContain('--plain');
+    expect(server.args).toContain('value');
+  });
+
+  test('a non-secret command/args passes through unchanged', () => {
+    const out = redactConfigDump({
+      mcpServers: [{ name: 'srv', transport: 'stdio', command: 'node server.js', args: ['--port', '8080'] }],
+    }) as { mcpServers: Array<{ command: string; args: string[] }> };
+    expect(out.mcpServers[0]).toEqual({
+      name: 'srv',
+      transport: 'stdio',
+      command: 'node server.js',
+      args: ['--port', '8080'],
+    });
+  });
+});
+
+describe('redact (4a2 pins: access keys, Map/Set, short bearer tokens)', () => {
+  test('isSecretKey flags accessKey / accessKeyId', () => {
+    expect(isSecretKey('accessKey')).toBe(true);
+    expect(isSecretKey('accessKeyId')).toBe(true);
+    expect(isSecretKey('AWS_ACCESS_KEY_ID')).toBe(true);
+  });
+
+  test('redactSecrets preserves Map and Set instead of returning {}', () => {
+    const map = redactSecrets(
+      new Map<string, unknown>([
+        ['apiKey', 'k1'],
+        ['safe', 1],
+      ]),
+    ) as Map<string, unknown>;
+    expect(map).toBeInstanceOf(Map);
+    expect(map.get('apiKey')).toBe(REDACTED);
+    expect(map.get('safe')).toBe(1);
+    const set = redactSecrets(new Set<unknown>([{ apiKey: 'k2' }, 'plain'])) as Set<unknown>;
+    expect(set).toBeInstanceOf(Set);
+    expect([...set]).toContainEqual({ apiKey: REDACTED });
+    expect([...set]).toContain('plain');
+    // Nested inside a plain object, and the input is not mutated.
+    const input = { creds: new Map<string, unknown>([['password', 'p']]) };
+    const out = redactSecrets(input) as { creds: Map<string, unknown> };
+    expect(out.creds).toBeInstanceOf(Map);
+    expect(out.creds.get('password')).toBe(REDACTED);
+    expect(input.creds.get('password')).toBe('p');
+  });
+
+  test('redactFreeText redacts short bearer tokens (8+ chars)', () => {
+    expect(redactFreeText('Authorization: Bearer aB3dEfGh9')).toBe(`Authorization: Bearer ${REDACTED}`);
+    // Below the 8-char floor a bare word after Bearer is prose, not a token.
+    expect(redactFreeText('Authorization: Bearer abcdefg')).toBe('Authorization: Bearer abcdefg');
+  });
+
+  // R3-4: `modelMaxTokens` is a plain per-model cap, not a credential -
+  // the `token` substring in the pattern used to flag it, so `config get
+  // modelMaxTokens` printed ***redacted*** for the user's own setting.
+  test('R3-4 · modelMaxTokens is not a secret key', () => {
+    expect(isSecretKey('modelMaxTokens')).toBe(false);
+    const out = redactSecrets({ modelMaxTokens: { hermes: 4000 } }) as {
+      modelMaxTokens: Record<string, number>;
+    };
+    expect(out.modelMaxTokens).toEqual({ hermes: 4000 });
+    const dump = redactConfigDump({ modelMaxTokens: { hermes: 4000 } }) as {
+      modelMaxTokens: Record<string, number>;
+    };
+    expect(dump.modelMaxTokens).toEqual({ hermes: 4000 });
+  });
+
+  // R3-3: the hook/command-rule approval stores hold free-text command
+  // strings that can embed a credential - the bulk dump must screen them
+  // like the MCP command/args it already screens.
+  test('R3-3 · redactConfigDump screens hook commands and command-rule entries', () => {
+    const sentinel = `sk-${'A'.repeat(20)}`;
+    const dump = redactConfigDump({
+      approvedProjectHooks: [
+        { workspace: '/w', command: `curl -H "Authorization: Bearer ${sentinel}" https://x` },
+        { workspace: '/w', command: 'echo hi' },
+      ],
+      approvedProjectCommandRules: [
+        { workspace: '/w', kind: 'allow', entry: `run ${sentinel}` },
+        { workspace: '/w', kind: 'deny', entry: 'rm -rf /' },
+      ],
+    }) as {
+      approvedProjectHooks: Array<{ workspace: string; command: string }>;
+      approvedProjectCommandRules: Array<{ workspace: string; kind: string; entry: string }>;
+    };
+    const blob = JSON.stringify(dump);
+    expect(blob).not.toContain(sentinel);
+    expect(dump.approvedProjectHooks[0]?.workspace).toBe('/w');
+    expect(dump.approvedProjectHooks[1]?.command).toBe('echo hi');
+    expect(dump.approvedProjectCommandRules[1]?.entry).toBe('rm -rf /');
+  });
+});
