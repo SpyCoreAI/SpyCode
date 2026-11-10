@@ -39,6 +39,9 @@ const ALLOWED_TOKENS = new Set<string>([
   'claude.md', // the Claude Code project file (README) - not a model id
   'claude-code-class', // the Claude Code product, as a compound noun (CHANGELOG)
   'openai-compatible', // the documented BYOK provider type (README, CHANGELOG, spec)
+  's6-envdir', // the s6 supervision-suite utility, named in the 0.9.10 CHANGELOG launcher census - not a model id
+  's6-softlimit', // the s6 supervision-suite utility, named in the 0.9.10 CHANGELOG launcher census - not a model id
+  'utf-16', // the Unicode encoding, named in the 0.9.10 CHANGELOG surrogate-safe UI bullet - not a model id
 ]);
 
 /**
