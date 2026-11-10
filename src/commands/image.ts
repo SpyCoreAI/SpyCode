@@ -538,6 +538,10 @@ export function registerImageCommand(program: Command): void {
             await api.patch(`/conversations/${encodeURIComponent(conversation.id)}/settings`, {
               apiUrlOverride: parentOpts.apiUrl,
               body: { imageParams: { styleVariance: opts.style } },
+              // R3-18: best-effort call whose payload is discarded - the
+              // server may answer a bare `{success:true}`; a null `data`
+              // must not turn an applied setting into a spurious warning.
+              allowEmptyData: true,
             });
           } catch {
             warn('Could not apply the requested style; generating with defaults.');

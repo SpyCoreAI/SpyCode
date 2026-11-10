@@ -5,7 +5,7 @@ import type { Ora } from 'ora';
 import { createSpinner } from '../../lib/spinner.js';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
-import { api } from '../../lib/api.js';
+import { api, unexpectedServerResponse } from '../../lib/api.js';
 import { getOutputOptions, json, success, warn } from '../../lib/output.js';
 import { readSingleLineInput } from '../../lib/prompt.js';
 import {
@@ -110,6 +110,20 @@ export function registerFilesDownloadCommand(program: Command): void {
           }
         }
 
+        // R3-21: the declared size is the expected byte count the
+        // truncation check below enforces - a non-numeric size used to
+        // make `Math.max(0, 'abc')` NaN, which silently disabled the
+        // check and saved truncated deliveries as complete. Validate
+        // up front, mirroring upload.ts (lib/upload.ts): the size must
+        // be a finite, non-negative number, or the record is malformed.
+        if (
+          typeof file.size !== 'number' ||
+          !Number.isFinite(file.size) ||
+          file.size < 0
+        ) {
+          throw unexpectedServerResponse('file record has a non-numeric size');
+        }
+
         const expectedBytes = Math.max(0, file.size ?? 0);
         const useSpinner =
           !getOutputOptions().json && process.stdout.isTTY === true;
@@ -181,8 +195,10 @@ export function registerFilesDownloadCommand(program: Command): void {
           // Size verification: a cleanly truncated stream used to be
           // renamed into place and reported as complete. The metadata size
           // is the expected byte count - refuse a short (or long) delivery
-          // instead of saving it.
-          if (expectedBytes > 0 && received !== expectedBytes) {
+          // instead of saving it. R3-21: gated on finiteness, not `> 0`,
+          // so a declared size of 0 with a non-empty body also refuses
+          // (the old `> 0` gate waved it through).
+          if (Number.isFinite(expectedBytes) && received !== expectedBytes) {
             try {
               unlinkSync(tmpPath);
             } catch {

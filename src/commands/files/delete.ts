@@ -70,6 +70,9 @@ export function registerFilesDeleteCommand(program: Command): void {
 
       await api.delete(`/api/files/${encodeURIComponent(id)}`, {
         apiUrlOverride: parentOpts.apiUrl,
+        // R3-18: the server answers a successful delete with a bare
+        // `{success:true}` (no `data` key) - a payload-less success.
+        allowEmptyData: true,
       });
       success(
         file?.filename

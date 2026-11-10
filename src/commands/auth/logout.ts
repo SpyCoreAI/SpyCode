@@ -34,7 +34,13 @@ export function registerLogoutCommand(program: Command): void {
       await clearToken();
       let revokeError: string | null = null;
       try {
-        await api.post('/auth/cli/logout', { apiUrlOverride: parentOpts.apiUrl, authToken: token });
+        await api.post('/auth/cli/logout', {
+          apiUrlOverride: parentOpts.apiUrl,
+          authToken: token,
+          // R3-18: the server answers a successful revoke with a bare
+          // `{success:true}` (no `data` key) - a payload-less success.
+          allowEmptyData: true,
+        });
       } catch (err) {
         revokeError = err instanceof Error ? err.message : 'Server revoke failed';
       }

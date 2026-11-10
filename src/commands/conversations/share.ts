@@ -106,7 +106,12 @@ export function registerConversationsShareCommand(program: Command): void {
             throw err;
           }
           try {
-            await api.delete(`/conversations/${encodeURIComponent(id)}/share`, apiOpts);
+            await api.delete(`/conversations/${encodeURIComponent(id)}/share`, {
+              ...apiOpts,
+              // R3-18: the server answers a successful unshare with a bare
+              // `{success:true}` (no `data` key) - a payload-less success.
+              allowEmptyData: true,
+            });
           } catch (err) {
             fail(shareUnsupportedError(err, id));
           }

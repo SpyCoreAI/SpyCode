@@ -148,8 +148,14 @@ export function registerUsageCommand(program: Command): void {
       // already does for unknown keys via displayName().
       const planLabel = data.planDisplay || data.plan;
       if (planLabel) {
+        // R3-19: `data.plan` / `data.planDisplay` are server-controlled
+        // and typed `string` only by declaration - a numeric `plan`
+        // used to crash `.toLowerCase()` before the sanitizer was ever
+        // reached. Compare only when both sides are actually strings.
         const rawTail =
-          data.plan && data.planDisplay && data.plan.toLowerCase() !== data.planDisplay.toLowerCase()
+          typeof data.plan === 'string' &&
+          typeof data.planDisplay === 'string' &&
+          data.plan.toLowerCase() !== data.planDisplay.toLowerCase()
             ? `  (${sanitizeForDisplay(data.plan)})`
             : '';
         lines.push(`Plan: ${sanitizeForDisplay(planLabel)}${rawTail}`);

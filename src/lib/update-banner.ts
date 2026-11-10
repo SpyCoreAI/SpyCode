@@ -2,6 +2,7 @@ import chalk from 'chalk';
 import { checkForUpdates } from './version-check.js';
 import { getOutputOptions } from './output.js';
 import { sanitizeForDisplay } from './sanitize-display.js';
+import { truncateSafe } from './text.js';
 
 /**
  * Background check + deferred banner. Designed to be:
@@ -76,8 +77,12 @@ const BOX_TEXT_WIDTH = BOX_INNER_WIDTH - 2;
 const MAX_VERSION_CHARS = 16;
 
 function capVersion(v: string): string {
+  // R3-20: the version strings come from the remote registry and are free
+  // text - a raw `.slice()` cut an astral character straddling the cap
+  // and left a lone surrogate in the banner. truncateSafe (the R3-17
+  // fix) backs the cut off a split surrogate pair.
   return v.length > MAX_VERSION_CHARS
-    ? `${v.slice(0, MAX_VERSION_CHARS - 1)}…`
+    ? `${truncateSafe(v, MAX_VERSION_CHARS - 1)}…`
     : v;
 }
 

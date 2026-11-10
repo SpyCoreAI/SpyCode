@@ -25,6 +25,16 @@ export interface ApiOptions {
   authToken?: string | undefined;
   /** Body for POST/PUT/DELETE; serialised as JSON. */
   body?: unknown;
+  /**
+   * R3-18: a 2xx `{success:true}` envelope whose `data` is null/undefined
+   * is rejected with `unexpectedServerResponse` unless this is set.
+   * Only fire-and-forget calls pass it - endpoints whose success the
+   * server reports with no payload at all (`{success:true}`, no `data`
+   * key): the DELETEs, the logout revoke, the best-effort image
+   * settings PATCH. Every caller that reads the payload keeps the
+   * default, so a null envelope can never reach a dereference again.
+   */
+  allowEmptyData?: boolean;
   /** Extra headers to merge with defaults. */
   headers?: Record<string, string>;
   /** ms - defaults to 30s. */
@@ -154,6 +164,16 @@ export async function apiRequest<T>(
   const parsed = (await readCappedJson(res.body)) as ApiResponse<T> | null;
 
   if (status >= 200 && status < 300 && parsed && parsed.success) {
+    // R3-18: a success envelope with a null/missing `data` used to sail
+    // through and crash each caller with a raw TypeError on the first
+    // dereference (nine commands + /compact + image). Reject it here,
+    // once, so every present and future caller is covered. Callers that
+    // legitimately expect no payload pass `allowEmptyData` (deletes,
+    // logout revoke, best-effort settings PATCH - the server answers
+    // those with a bare `{success:true}`).
+    if ((parsed.data === null || parsed.data === undefined) && !opts.allowEmptyData) {
+      throw unexpectedServerResponse('the server returned no data');
+    }
     return parsed.data;
   }
 
@@ -225,7 +245,10 @@ function hintFor404(path: string): string {  if (/\/conversations\//.test(path))
  * through apiRequest and crash each caller with a raw TypeError on the
  * first dereference. Callers that need a field validate the shape and
  * throw this instead - a clean "unexpected server response" error, never
- * an unhandled TypeError.
+ * an unhandled TypeError. R3-18 enforces it centrally in apiRequest
+ * (null/missing `data` on a success envelope throws this unless the
+ * caller passed `allowEmptyData`); the per-caller checks below it stay
+ * as defence in depth for malformed-but-present payloads.
  */
 export function unexpectedServerResponse(what: string): SpycoreCliError {
   return new SpycoreCliError(

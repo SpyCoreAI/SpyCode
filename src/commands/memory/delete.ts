@@ -49,6 +49,9 @@ export function registerMemoryDeleteCommand(program: Command): void {
           await api.delete('/api/memory', {
             apiUrlOverride: parentOpts.apiUrl,
             body: { confirm: 'delete everything' },
+            // R3-18: the server answers a successful delete with a bare
+            // `{success:true}` (no `data` key) - a payload-less success.
+            allowEmptyData: true,
           });
           success('All memories cleared');
           return;
@@ -85,6 +88,9 @@ export function registerMemoryDeleteCommand(program: Command): void {
 
         await api.delete(`/api/memory/${encodeURIComponent(id)}`, {
           apiUrlOverride: parentOpts.apiUrl,
+          // R3-18: the server answers a successful delete with a bare
+          // `{success:true}` (no `data` key) - a payload-less success.
+          allowEmptyData: true,
         });
         success(`Deleted ${id}`);
       },
