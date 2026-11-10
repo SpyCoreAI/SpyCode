@@ -190,16 +190,42 @@ describe('R1 pass 3 - truncation never splits a surrogate pair', () => {
     expect(e!.match).toBe('needle');
   });
 
+  test('buildShellSpawn wraps the command for cmd /s and passes argv verbatim on Windows', async () => {
+    const { buildShellSpawn } = await import('../src/ui/tui/shell.js');
+    // The /c argument carries its own outer pair: cmd.exe /s strips exactly
+    // the first and last quote, so the strip removes the outer pair and the
+    // user's command survives intact. Without the wrap the strip eats the
+    // command's own first and last quotes and `"exe" "script"` fails.
+    const win = buildShellSpawn('"C:\\node\\node.exe" "C:\\tmp\\probe.js"', 'win32');
+    expect(win.file).toBe('cmd.exe');
+    expect(win.args).toEqual(['/d', '/s', '/c', '""C:\\node\\node.exe" "C:\\tmp\\probe.js""']);
+    expect(win.windowsVerbatimArguments).toBe(true);
+    // An unquoted command gets the same wrap: the /s strip removes exactly
+    // the outer pair, so the command reaches cmd.exe unchanged.
+    expect(buildShellSpawn('echo hi', 'win32').args[3]).toBe('"echo hi"');
+  });
+
+  test('buildShellSpawn keeps the POSIX spawn unchanged', async () => {
+    const { buildShellSpawn } = await import('../src/ui/tui/shell.js');
+    expect(buildShellSpawn('echo hi', 'linux')).toEqual({
+      file: 'sh',
+      args: ['-c', 'echo hi'],
+      windowsVerbatimArguments: false,
+    });
+  });
+
   test('TUI shell output: a UTF-8 sequence split across chunk events decodes whole', async () => {
     const workDir = mkdtempSync(join(tmpdir(), 'r1p3-shell-'));
     try {
-      // A script file, not inline `node -e`: `cmd /d /s /c` strips the
-      // outermost quotes, so the nested quotes (and parentheses) of an
-      // inline script do not survive on Windows - the probe never ran and
-      // the output came back empty on both Windows CI legs, while the
-      // same command passes on Ubuntu/macOS. The single-level quoting
-      // below (`"node" "probe.js"`) needs no cmd.exe quote handling.
-      // Same pattern as tests/builtin-tools-edges.test.ts.
+      // A script file, not inline `node -e`: the nested quotes (and
+      // parentheses) of an inline script do not survive `cmd /d /s /c`
+      // on Windows. The single-level quoting below (`"node" "probe.js"`)
+      // is the everyday shape a Windows user types; the product's
+      // buildShellSpawn carries it through cmd.exe intact (outer pair +
+      // verbatim argv - the R1-CI1 fix changed only the command and left
+      // the transport broken, so this test still failed on both Windows
+      // legs at head a9cfc03). Same pattern as
+      // tests/builtin-tools-edges.test.ts.
       const probe = join(workDir, 'split-utf8.mjs');
       writeFileSync(
         probe,

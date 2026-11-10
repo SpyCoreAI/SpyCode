@@ -153,6 +153,14 @@ function tryWmicBootTimeMs(): number | null {
 /**
  * PowerShell CIM fallback: `(Get-CimInstance Win32_OperatingSystem)
  * .LastBootUpTime` rendered as ISO-8601 UTC. Same no-shell argv discipline.
+ *
+ * 20 s, not 10 s: the PowerShell cold start is ~5 s on a GitHub
+ * windows-2025 runner (the win22 leg of head a9cfc03 took 5016 ms for
+ * this probe alone - wmic is absent on that image, disabled by default
+ * on Windows Server 2025), and the win24 leg of the same head hit the
+ * old 10 s bound exactly (test took 10060 ms, probe returned null).
+ * 20 s is 4x the measured typical and 2x the observed exceedance;
+ * wmic stays at 5 s, so the worst case is 25 s.
  */
 function tryPowerShellBootTimeMs(): number | null {
   try {
@@ -164,7 +172,7 @@ function tryPowerShellBootTimeMs(): number | null {
         '-Command',
         '(Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().ToString("o")',
       ],
-      { encoding: 'utf-8', timeout: 10_000 },
+      { encoding: 'utf-8', timeout: 20_000 },
     );
     const ms = Date.parse(out.trim());
     return Number.isFinite(ms) ? ms : null;

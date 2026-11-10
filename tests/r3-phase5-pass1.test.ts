@@ -168,10 +168,12 @@ describe('M3 Windows boot-time parsing', () => {
     expect(parseWmicBootTime('LastBootUpTime=\r\n')).toBeNull();
   });
 
-  // 30 s budget: on Windows the probes are synchronous with a bounded
-  // 15 s worst case (5 s wmic + 10 s PowerShell cold start), so the
-  // 10 s default would trip on a slow runner. Runs on every platform.
-  test('getSystemBootTimeMs returns a plausible value on this platform', { timeout: 30_000 }, async () => {
+  // 60 s budget: on Windows the probes are synchronous with a bounded
+  // 25 s worst case (5 s wmic + 20 s PowerShell cold start), so the
+  // 10 s default would trip on a slow runner. 60 s is 2x the bounded
+  // implementation worst case, the same ratio the 30 s budget kept
+  // against the old 15 s worst case. Runs on every platform.
+  test('getSystemBootTimeMs returns a plausible value on this platform', { timeout: 60_000 }, async () => {
     const { getSystemBootTimeMs } = await import('../src/commands/runs.js');
     const ms = getSystemBootTimeMs();
     expect(typeof ms).toBe('number');

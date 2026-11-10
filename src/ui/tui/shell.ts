@@ -24,6 +24,57 @@ const DEFAULT_TIMEOUT_MS = 120_000;
 /** Hard cap on raw bytes accumulated from child stdio (maxBuffer is dead without a callback). */
 const MAX_RAW_BYTES = 256 * 1024;
 
+/** What to spawn for one shell command: the file, its argv, and whether
+ * Node must pass argv verbatim on Windows. */
+export interface ShellSpawnTarget {
+  file: string;
+  args: string[];
+  windowsVerbatimArguments: boolean;
+}
+
+/**
+ * Build the spawn for a shell command.
+ *
+ * Windows needs two transport rules, both load-bearing. The TUI executor
+ * had neither, so any command starting and ending with a quote - the
+ * everyday `"exe" "script"` shape - failed on Windows with `ok: false`
+ * while the identical command passed through the agent executor, which
+ * spawns with `shell: true` and gets both rules from Node itself:
+ *
+ * 1. The `/c` argument carries its own outer pair of quotes around the
+ *    command. `cmd.exe /s` strips exactly the first and last quote of
+ *    the string and leaves the rest unchanged (Microsoft cmd docs), so
+ *    the strip removes the outer pair and the user's command survives
+ *    intact. Without it the strip eats the command's own first and last
+ *    quotes: `"node.exe" "probe.js"` becomes the single token
+ *    `node.exe" "probe.js` - "not recognized", exit 1, in ~30 ms. (Same
+ *    rule as `src/lib/gh.ts` `buildGhSpawn`.)
+ * 2. Node must NOT re-quote the `/c` argument.
+ *    `windowsVerbatimArguments: true` disables its default argv quoting,
+ *    which escapes each inner `"` as `\"`; `cmd.exe` does not unescape
+ *    `\"`, so the command name arrives literally `\"...\"` - again "not
+ *    recognized" (measured in branch CI run 42501464919, documented in
+ *    `src/lib/gh.ts`).
+ *
+ * The wrap is identity-preserving under the `/s` strip for every other
+ * command too: an unquoted `echo hi` comes back as `echo hi`. The
+ * `platform` override exists so the win32 shape is unit-testable on
+ * Linux, as `buildGhSpawn` does.
+ */
+export function buildShellSpawn(
+  command: string,
+  platform: NodeJS.Platform = process.platform,
+): ShellSpawnTarget {
+  if (platform !== 'win32') {
+    return { file: 'sh', args: ['-c', command], windowsVerbatimArguments: false };
+  }
+  return {
+    file: process.env.ComSpec ?? 'cmd.exe',
+    args: ['/d', '/s', '/c', `"${command}"`],
+    windowsVerbatimArguments: true,
+  };
+}
+
 export function runShellCommand(
   command: string,
   cwd: string,
@@ -37,16 +88,17 @@ export function runShellCommand(
     try {
       // The user's own shell: inherit nothing, capture everything.
       // Windows has no `sh` — use the system command interpreter there.
-      const shellCmd =
-        process.platform === 'win32'
-          ? { file: process.env.ComSpec ?? 'cmd.exe', args: ['/d', '/s', '/c', command] }
-          : { file: 'sh', args: ['-c', command] };
-      child = execFile(shellCmd.file, shellCmd.args, {
+      // The spawn shape (outer quotes + verbatim argv) is buildShellSpawn's
+      // job: the bare `['/d', '/s', '/c', command]` form mangled quoted
+      // commands on Windows, see there.
+      const spawn = buildShellSpawn(command);
+      child = execFile(spawn.file, spawn.args, {
         cwd,
         timeout: timeoutMs,
         maxBuffer: 10 * 1024 * 1024,
         windowsHide: true,
         signal,
+        ...(spawn.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
         // Raw bytes, not pre-decoded strings: with the default `utf8`
         // encoding Node decodes each chunk through its own StringDecoder
         // and hands this code strings, so a byte budget counted in
