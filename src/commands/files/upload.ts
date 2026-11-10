@@ -12,7 +12,7 @@ import type { Ora } from 'ora';
 import { createSpinner } from '../../lib/spinner.js';
 import { api } from '../../lib/api.js';
 import { getToken } from '../../lib/auth.js';
-import { isTrustedTokenHost, resolveApiUrl } from '../../lib/config.js';
+import { isTrustedTokenHost, normalizeApiBase, resolveApiUrl } from '../../lib/config.js';
 import { detectMime, formatFileSize, createExclusiveTempWriteStream } from '../../lib/files.js';
 import { getOutputOptions, json, success, warn } from '../../lib/output.js';
 import { uploadFile } from '../../lib/upload.js';
@@ -177,8 +177,11 @@ export function registerFilesUploadCommand(program: Command): void {
           }
 
           const mime = opts.mime?.trim() || detectMime(remoteName);
-          const apiUrl = resolveApiUrl(parentOpts.apiUrl).replace(/\/+$/, '');
-          // `apiUrl` already ends in `/api`; the route is `/api/files/upload`.
+          // R3-15: normalize like the rest of the CLI (api.ts/sse.ts,
+          // ping) - `normalizeApiBase` guarantees exactly one trailing
+          // `/api`, so a supported no-`/api` base still reaches
+          // `/api/files/upload` instead of 404ing on `/files/upload`.
+          const apiUrl = normalizeApiBase(resolveApiUrl(parentOpts.apiUrl));
           const url = `${apiUrl}/files/upload`;
           const headers: Record<string, string> = {
             'user-agent': '@spycore/cli',

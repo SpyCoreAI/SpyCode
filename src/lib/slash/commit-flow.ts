@@ -34,6 +34,7 @@ import {
 import { isSpycoreCliError } from '../errors.js';
 import type { ModelSlug } from '../models.js';
 import { sanitizeForDisplay } from '../sanitize-display.js';
+import { truncateSafe } from '../text.js';
 
 export interface CommitFlowIo {
   /** Session-idiom notice (the Ink session pushes a Notice item). */
@@ -90,7 +91,7 @@ export async function runCommitFlow(opts: CommitFlowOpts): Promise<CommitFlowRes
     }
     io.notify(
       'info',
-      `Nothing staged. Unstaged changes:\n${sanitizeForDisplay(status).slice(0, STATUS_ECHO_CAP)}`,
+      `Nothing staged. Unstaged changes:\n${truncateSafe(sanitizeForDisplay(status), STATUS_ECHO_CAP)}`,
     );
     const answer = (await io.ask('Stage all changes? [y/N] ')).trim().toLowerCase();
     if (answer !== 'y' && answer !== 'yes') {
