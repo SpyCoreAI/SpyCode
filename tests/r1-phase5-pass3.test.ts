@@ -197,7 +197,9 @@ describe('R1 pass 3 - truncation never splits a surrogate pair', () => {
     // user's command survives intact. Without the wrap the strip eats the
     // command's own first and last quotes and `"exe" "script"` fails.
     const win = buildShellSpawn('"C:\\node\\node.exe" "C:\\tmp\\probe.js"', 'win32');
-    expect(win.file).toBe('cmd.exe');
+    // The file is the system command interpreter: ComSpec on Windows
+    // (C:\Windows\system32\cmd.exe on GitHub runners), 'cmd.exe' elsewhere.
+    expect(win.file).toBe(process.env.ComSpec ?? 'cmd.exe');
     expect(win.args).toEqual(['/d', '/s', '/c', '""C:\\node\\node.exe" "C:\\tmp\\probe.js""']);
     expect(win.windowsVerbatimArguments).toBe(true);
     // An unquoted command gets the same wrap: the /s strip removes exactly
