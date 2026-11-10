@@ -21,6 +21,7 @@ import {
   parseEditorSpec,
   pastePlaceholder,
   stripPlaceholders,
+  splitAtCursor,
   moveCursorWord,
   updateComposerState,
 } from '../src/ui/tui/editing.js';
@@ -223,6 +224,16 @@ describe('surrogate pairs (emoji)', () => {
     expect(fwd.cursor).toBe(3); // skips the pair
     const back = stepCursor({ value: 'a😀b', cursor: 3 }, -1);
     expect(back.cursor).toBe(1); // skips back over the pair
+  });
+
+  // P6-5: the block cursor takes the whole code point at the cursor — the
+  // old `slice(cursor, cursor + 1)` took one code unit and rendered a lone
+  // surrogate as two U+FFFD glyphs when the cursor sat before an emoji.
+  test('splitAtCursor takes the whole code point at the cursor', () => {
+    expect(splitAtCursor('a😀b', 1)).toEqual({ before: 'a', at: '😀', after: 'b' });
+    expect(splitAtCursor('a😀b', 3)).toEqual({ before: 'a😀', at: 'b', after: '' });
+    expect(splitAtCursor('a😀b', 4)).toEqual({ before: 'a😀b', at: ' ', after: '' });
+    expect(splitAtCursor('', 0)).toEqual({ before: '', at: ' ', after: '' });
   });
 });
 

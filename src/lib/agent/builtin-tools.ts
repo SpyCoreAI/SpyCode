@@ -722,6 +722,136 @@ function topLanguages(extCount: Map<string, number>): Array<{ lang: string; coun
  */
 const MAX_PATTERN_CHARS = 1000;
 
+/**
+ * P6-6 - nested quantifiers are a ReDoS surface a length cap cannot bound:
+ * `(a+)+$` (6 chars) against a 31-char line did not finish in 10s, and the
+ * grep loop tests synchronously per line with the abort signal checked only
+ * per file. Reject the shape up front: a quantifier applied to an atom that
+ * itself contains a quantifier (a group with one at any depth, or an
+ * already-quantified atom like `a++`).
+ *
+ * The walk understands the pattern language well enough not to misread it:
+ * escapes (`\.`, `\d`, `\1`) are literal atoms; quantifiers inside a
+ * character class are literals; group prefixes (`(?:`, `(?=`, `(?!`,
+ * `(?<name>`, `(?<=`, `(?<!`) are syntax, not quantifiers; a `?` right
+ * after a quantifier is a lazy marker (`*?`, `+?`, `??`, `{m,n}?`), not a
+ * nested one; a `{` is a quantifier only when it parses as `{m,n}`.
+ *
+ * Residual, stated: alternation ambiguity with NO nested quantifier
+ * (e.g. `(a|aa)+`) is not caught by this heuristic — it is not the
+ * measured repro shape, and closing it needs a different mechanism
+ * (a worker-thread timeout around the test loop).
+ */
+export function hasNestedQuantifier(source: string): boolean {
+  // Frames for open groups; hasQuant = a quantifier has appeared anywhere
+  // inside this group (any depth — a quantifier in a nested group counts
+  // for every enclosing group, since it is inside them too).
+  const frames: Array<{ hasQuant: boolean }> = [];
+  // The atom a following quantifier would apply to, if any.
+  let prev: 'group' | 'other' | 'quant' | null = null;
+  let prevGroupHasQuant = false;
+  const markQuant = (): void => {
+    if (frames.length > 0) frames[frames.length - 1]!.hasQuant = true;
+  };
+  let i = 0;
+  const n = source.length;
+  while (i < n) {
+    const ch = source[i]!;
+    if (ch === '\\') {
+      i += 2; // escaped char: a literal atom
+      prev = 'other';
+      continue;
+    }
+    if (ch === '[') {
+      // Character class: quantifiers inside are literals. Skip to the
+      // closing bracket (a `]` first after `[` or `[^` is literal).
+      i += 1;
+      if (source[i] === '^') i += 1;
+      if (source[i] === ']') i += 1;
+      while (i < n && source[i] !== ']') {
+        if (source[i] === '\\') i += 1;
+        i += 1;
+      }
+      i += 1; // past the `]` (or past the end on unterminated)
+      prev = 'other';
+      continue;
+    }
+    if (ch === '(') {
+      // Group prefixes are syntax, not quantifiers — consume them so the
+      // `?` in `(?:` / `(?=` / `(?<name>` is never read as one.
+      let j = i + 1;
+      if (source[j] === '?') {
+        const next = source[j + 1];
+        if (next === ':' || next === '=' || next === '!') j += 2;
+        else if (next === '<') {
+          const after = source[j + 2];
+          if (after === '=' || after === '!') j += 3;
+          else {
+            const close = source.indexOf('>', j + 2);
+            if (close !== -1) j = close + 1;
+          }
+        }
+      }
+      frames.push({ hasQuant: false });
+      i = j;
+      prev = null;
+      continue;
+    }
+    if (ch === ')') {
+      const frame = frames.pop();
+      // A quantifier inside this group is inside every enclosing group.
+      if (frame?.hasQuant) markQuant();
+      prev = 'group';
+      prevGroupHasQuant = frame?.hasQuant ?? false;
+      i += 1;
+      continue;
+    }
+    if (ch === '*' || ch === '+') {
+      if (prev === 'group' && prevGroupHasQuant) return true;
+      if (prev === 'quant') return true; // quantifier on a quantified atom (`a++`, `a+*`)
+      markQuant();
+      prev = 'quant';
+      i += 1;
+      continue;
+    }
+    if (ch === '?') {
+      if (prev === 'quant') {
+        i += 1; // lazy marker (`*?`, `+?`, `??`, `{m,n}?`) — part of the quantifier
+        continue;
+      }
+      if (prev === 'group' && prevGroupHasQuant) return true;
+      markQuant();
+      prev = 'quant';
+      i += 1;
+      continue;
+    }
+    if (ch === '{') {
+      // A `{m,n}` quantifier only when it parses as one; otherwise a literal.
+      const m = /^\{\d+(,\d*)?\}/.exec(source.slice(i));
+      if (m) {
+        if (prev === 'group' && prevGroupHasQuant) return true;
+        if (prev === 'quant') return true;
+        markQuant();
+        prev = 'quant';
+        i += m[0].length;
+        continue;
+      }
+      prev = 'other';
+      i += 1;
+      continue;
+    }
+    if (ch === '|') {
+      prev = null;
+      i += 1;
+      continue;
+    }
+    // Any other char (literal, '.', '^', '$', anchor): a plain atom.
+    prev = 'other';
+    i += 1;
+  }
+  return false;
+}
+
 /** Compile a regex from a bare source or a `/pattern/flags` literal.
  *
  * The `g` and `y` flags are stripped: both make `RegExp.prototype.test`
@@ -738,6 +868,14 @@ function compileRegex(input: string): RegExp {
     );
   }
   const literal = /^\/(.+)\/([gimsuy]*)$/s.exec(input);
+  const source = literal ? (literal[1] as string) : input;
+  // P6-6: nested quantifiers hang the synchronous per-line test loop —
+  // refuse them before compiling, with a message the model can act on.
+  if (hasNestedQuantifier(source)) {
+    throw new ToolError(
+      'pattern rejected: nested quantifier (a quantifier on a group that already contains one, e.g. `(a+)+`) can hang the search - flatten the pattern or match the repetition once',
+    );
+  }
   try {
     if (literal) {
       const flags = (literal[2] as string).replace(/[gy]/g, '');

@@ -1,6 +1,7 @@
 import { Box, Text } from 'ink';
 import type { ReactNode } from 'react';
 import { useTheme } from '../theme/theme.js';
+import { splitAtCursor } from '../tui/editing.js';
 
 export interface ChatInputProps {
   value: string;
@@ -40,9 +41,10 @@ export function ChatInput({ value, cursor, placeholder, disabled }: ChatInputPro
     );
   }
 
-  const before = value.slice(0, cursor);
-  const at = value.slice(cursor, cursor + 1) || ' ';
-  const after = value.slice(cursor + 1);
+  // P6-5: the block cursor takes the whole code point at the cursor
+  // (splitAtCursor), never one code unit — a lone surrogate rendered as
+  // two U+FFFD glyphs when the cursor sat before an emoji.
+  const { before, at, after } = splitAtCursor(value, cursor);
   return (
     <Box marginTop={1}>
       <Text color={colors.accent} bold>

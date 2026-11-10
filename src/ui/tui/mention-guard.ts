@@ -10,15 +10,19 @@
  * protection that `read_file` enforces via `safeResolve` + the realpath-based
  * secret guard.
  *
- * This helper judges the RESOLVED path: `lstatSync` to see the link, then
- * `realpathSync`, containment of the resolved path under the resolved cwd,
- * a dotfile check over the resolved segments, and the sync secret guard
+ * This helper judges the RESOLVED path: the resolved target is computed
+ * UNCONDITIONALLY (P6-4 — the old code realpath'd only when the FINAL
+ * component was itself a symlink, so a symlinked PARENT directory sailed
+ * through on its lexical spelling and the caller read a file outside the
+ * workspace), containment of the resolved path under the resolved cwd, a
+ * dotfile check over the resolved segments, and the sync secret guard
  * (built-in denylist + `.spycoreignore`) over the resolved target. A
  * non-symlink file goes through the same guard. The caller reads the
  * RESOLVED target, never the lexical spelling.
  */
-import { lstatSync, realpathSync, statSync } from 'node:fs';
+import { statSync } from 'node:fs';
 import { isAbsolute, relative, sep } from 'node:path';
+import { canonicalize, realRoot } from '../../lib/path-containment.js';
 import { loadSecretGuardSync, type SecretGuard } from '../../lib/agent/secrets.js';
 
 /** A mention target that passed every check: read `realAbs`, not `abs`. */
@@ -59,24 +63,16 @@ export function resolveMentionTarget(
     const rel = relative(cwd, abs);
     if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) return null;
     if (hasDotPart(rel)) return null;
-    const lst = lstatSync(abs);
-    let realAbs = abs;
-    if (lst.isSymbolicLink()) {
-      let realCwd: string;
-      try {
-        realCwd = realpathSync(cwd);
-      } catch {
-        realCwd = cwd;
-      }
-      try {
-        realAbs = realpathSync(abs);
-      } catch {
-        return null; // dangling link - nothing to read
-      }
-      const realRel = relative(realCwd, realAbs);
-      if (realRel === '' || realRel.startsWith('..') || isAbsolute(realRel)) return null;
-      if (hasDotPart(realRel)) return null;
-    }
+    // P6-4: judge the RESOLVED path UNCONDITIONALLY. `canonicalize`
+    // resolves every link on the path — including a symlinked PARENT
+    // directory, which the old final-component-only check missed — and
+    // dereferences dangling links by hand (F-2c-40). `null` means nothing
+    // on the path exists, so there is nothing to read.
+    const realAbs = canonicalize(abs);
+    if (realAbs === null) return null;
+    const realRel = relative(realRoot(cwd), realAbs);
+    if (realRel === '' || realRel.startsWith('..') || isAbsolute(realRel)) return null;
+    if (hasDotPart(realRel)) return null;
     // The secret guard judges the resolved path too (denylist + ignore
     // layer), so a link to a denylisted or ignored file is refused even
     // when its spelling looks innocent.

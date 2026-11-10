@@ -33,8 +33,12 @@ export function formatElapsed(ms: number): string {
 export function displayCwd(cwd: string): string {
   const home = homedir();
   const rel = cwd.startsWith(home) ? `~${cwd.slice(home.length)}` : cwd;
-  if (rel.length <= 40) return rel;
-  return `…${rel.slice(-39)}`;
+  // P6-2: code-point aware — a raw `rel.slice(-39)` cut code units and
+  // split a surrogate pair (an astral char in a >40-char cwd rendered as
+  // a lone surrogate). Check and slice both on code points.
+  const cps = [...rel];
+  if (cps.length <= 40) return rel;
+  return `…${cps.slice(-39).join('')}`;
 }
 
 /** Turn a unified patch into DiffLine rows (headers dropped, capped). The

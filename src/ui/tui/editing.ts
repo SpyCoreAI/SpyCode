@@ -128,6 +128,20 @@ export function moveCursorWord(state: ComposerState, dir: -1 | 1): ComposerState
 }
 
 /**
+ * Split text at a code-unit cursor for the block cursor: `at` is the whole
+ * code point at the cursor — never half a surrogate pair — `after` starts
+ * past it, and at end of text `at` is a blank. P6-5: the old
+ * `slice(cursor, cursor + 1)` took exactly one code unit, so with the
+ * cursor before an emoji the pair rendered as two U+FFFD glyphs.
+ */
+export function splitAtCursor(text: string, cursor: number): { before: string; at: string; after: string } {
+  const before = text.slice(0, cursor);
+  const at = [...text.slice(cursor)][0] ?? ' ';
+  const after = text.slice(cursor + at.length);
+  return { before, at, after };
+}
+
+/**
  * Locate the cursor: logical line index + column. Pure helper so the
  * renderer and the up/down handler agree on where the cursor is.
  */

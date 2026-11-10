@@ -56,6 +56,7 @@ import {
   type LoadedUserCommand,
 } from '../../lib/slash/user-commands.js';
 import { runCommitFlow } from '../../lib/slash/commit-flow.js';
+import { deleteBackward, stepCursor } from '../tui/editing.js';
 import {
   fireHookEvent,
   hasHooksFor,
@@ -1081,24 +1082,23 @@ export function ChatApp({ model: initialModel, effort: initialEffort, conversati
       return;
     }
     if (key.leftArrow) {
-      const f = inputRef.current;
-      inputRef.current = { value: f.value, cursor: Math.max(0, f.cursor - 1) };
+      // P6-1: stepCursor skips the pair — a raw ±1 landed inside an emoji.
+      inputRef.current = stepCursor(inputRef.current, -1);
       forceRender();
       return;
     }
     if (key.rightArrow) {
-      const f = inputRef.current;
-      inputRef.current = { value: f.value, cursor: Math.min(f.value.length, f.cursor + 1) };
+      inputRef.current = stepCursor(inputRef.current, 1);
       forceRender();
       return;
     }
     if (key.backspace || key.delete) {
+      // P6-1: deleteBackward removes the full pair. `delete` keeps its
+      // existing direction (backward, as in TuiApp) — only the splitting
+      // is fixed.
       const f = inputRef.current;
       if (f.cursor > 0) {
-        inputRef.current = {
-          value: f.value.slice(0, f.cursor - 1) + f.value.slice(f.cursor),
-          cursor: f.cursor - 1,
-        };
+        inputRef.current = deleteBackward(f);
         forceRender();
       }
       return;

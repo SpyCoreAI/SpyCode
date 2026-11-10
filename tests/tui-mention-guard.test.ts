@@ -70,4 +70,32 @@ describe('resolveMentionTarget', () => {
   test('an oversize file is refused', () => {
     expect(resolveMentionTarget(ws, join(ws, 'notes.txt'), { maxBytes: 5 })).toBeNull();
   });
+
+  // P6-4: the old guard realpath'd only when the FINAL component was
+  // itself a symlink, so a file reached through a SYMLINKED PARENT
+  // directory sailed through on its lexical spelling and the caller read
+  // a file outside the workspace into the prompt context.
+  test('a file reached through a symlinked PARENT directory is refused', () => {
+    symlinkSync(outside, join(ws, 'linked-dir'));
+    expect(check(join(ws, 'linked-dir', 'secret.txt'))).toBeNull();
+  });
+
+  test('a file through a symlinked parent INSIDE the workspace passes, resolved', () => {
+    mkdirSync(join(ws, 'real-dir'));
+    writeFileSync(join(ws, 'real-dir', 'inner.txt'), 'inner\n');
+    symlinkSync(join(ws, 'real-dir'), join(ws, 'linked-dir'));
+    const t = check(join(ws, 'linked-dir', 'inner.txt'));
+    expect(t).not.toBeNull();
+    expect(t!.realAbs).toBe(join(ws, 'real-dir', 'inner.txt'));
+  });
+
+  test('a dot-dir reached only via the RESOLVED path is refused', () => {
+    // Lexical spelling has no dot part ('linked-dir/file.txt'); the
+    // resolved path does ('.secret-dir/file.txt') — only the resolved
+    // check can see it.
+    mkdirSync(join(outside, '.secret-dir'));
+    writeFileSync(join(outside, '.secret-dir', 'file.txt'), 'hidden\n');
+    symlinkSync(join(outside, '.secret-dir'), join(ws, 'linked-dir'));
+    expect(check(join(ws, 'linked-dir', 'file.txt'))).toBeNull();
+  });
 });

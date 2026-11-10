@@ -29,7 +29,7 @@ import type { ReactNode } from 'react';
 import { useTheme } from '../theme/theme.js';
 import type { Theme } from '../theme/theme.js';
 import { sanitizeForDisplay } from '../../lib/sanitize-display.js';
-import { locateCursor } from './editing.js';
+import { locateCursor, splitAtCursor } from './editing.js';
 
 export type ComposerMode = 'normal' | 'shell';
 
@@ -259,9 +259,13 @@ export function TuiComposer({
       <Box flexDirection="column" marginTop={fieldMarginTop}>
         {lines.map((line, i) => {
           const isCursorLine = i === cursorLine;
-          const before = isCursorLine ? line.slice(0, cursorCol) : line;
-          const at = isCursorLine ? line.slice(cursorCol, cursorCol + 1) || ' ' : null;
-          const after = isCursorLine ? line.slice(cursorCol + 1) : null;
+          // P6-5: the block cursor takes the whole code point at the cursor
+          // (splitAtCursor), never one code unit — a lone surrogate rendered
+          // as two U+FFFD glyphs when the cursor sat before an emoji.
+          const split = isCursorLine ? splitAtCursor(line, cursorCol) : null;
+          const before = split?.before ?? line;
+          const at = split?.at ?? null;
+          const after = split?.after ?? null;
           return (
             <Box key={i}>
               {i === 0 ? (

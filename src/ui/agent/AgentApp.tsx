@@ -325,10 +325,13 @@ export function AgentApp({ task, model, provider, maxTurns, maxToolCallsPerTurn,
                 mutation: { outcome: 'blocked', added: 0, removed: 0, isNew: false },
               });
             } else {
-              push({ kind: 'tool', tool: e.tool, arg, ok: e.ok, summary: e.summary });
+              // P6-3: sanitize the summary like every other branch —
+              // ItemView renders it with no sanitizer at render time.
+              push({ kind: 'tool', tool: e.tool, arg, ok: e.ok, summary: sanitizeForDisplay(e.summary) });
             }
           } else {
-            push({ kind: 'tool', tool: e.tool, arg, ok: e.ok, summary: e.summary });
+            // P6-3: sanitize the summary like every other branch.
+            push({ kind: 'tool', tool: e.tool, arg, ok: e.ok, summary: sanitizeForDisplay(e.summary) });
           }
           liveToolRef.current = null;
           forceRender();

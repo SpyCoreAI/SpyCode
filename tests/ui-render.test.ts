@@ -193,6 +193,19 @@ describe('chat components', () => {
     expect(disabled).toContain('streaming…');
   });
 
+  test('ChatInput keeps an emoji whole when the cursor sits before it (P6-5)', () => {
+    const frame = renderFrame(
+      React.createElement(ChatInput, {
+        value: 'a😀b',
+        cursor: 1,
+        placeholder: 'Ask…',
+        disabled: false,
+      }),
+    );
+    expect(frame).toContain('😀');
+    expect(frame).not.toContain('\uFFFD');
+  });
+
   test('MessageView renders user, assistant, error and notice items', () => {
     const user: ChatItem = { kind: 'user', id: 1, text: 'rename the User type' };
     expect(renderFrame(React.createElement(MessageView, { item: user, width: 80 }))).toContain(
@@ -390,6 +403,21 @@ describe('TUI pickers and panels', () => {
       }),
     );
     expect(disabled).toContain('running…');
+  });
+
+  test('TuiComposer keeps an emoji whole when the cursor sits before it (P6-5)', () => {
+    const frame = renderFrame(
+      React.createElement(TuiComposer, {
+        value: 'a😀b',
+        cursor: 1,
+        placeholder: 'Ask…',
+        mode: 'normal',
+        disabled: false,
+        disabledHint: '',
+      }),
+    );
+    expect(frame).toContain('😀');
+    expect(frame).not.toContain('\uFFFD');
   });
 
   test('TuiSessionSidebar renders the title and file stats', () => {
