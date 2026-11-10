@@ -171,6 +171,28 @@ hash_stdin() {
   fi
 }
 
+# Hash a build tree's file CONTENTS in canonical (sorted path) order.
+# `find` yields files in readdir order, which is NOT a content order: tsup's
+# `clean: true` deletes and recreates build/ on every prepack, and the
+# recreated directory's readdir order differs - so the old
+# `find … -exec cat {} +` concatenation changed hash while every file's bytes
+# stayed identical, and the drift branch cried wolf on every clean rerun
+# (R4-2, phase 5 pass 5). Sorting the paths first makes the hash a function
+# of content only.
+# The construction keeps the two properties the old form had: an EMPTY tree
+# hashes empty input WITHOUT blocking - the read loop simply runs zero
+# times, so `cat` is never invoked with no file arguments (a bare
+# `xargs cat` would read stdin instead) - and it stays portable to macOS:
+# no GNU-only `sort -z` / `xargs -r`, only POSIX `find`, `sort`, and a read
+# loop. `LC_ALL=C` makes the order bytewise and locale-independent.
+# Filenames under build/ are bundler-generated chunk names (no newlines),
+# the same newline-delimited assumption the census (`list_members`) already
+# makes. One implementation: both drift call sites and the self-test call
+# this, never a transcribed copy.
+build_hash() { # $1 = build dir
+  find "$1" -type f | LC_ALL=C sort | while IFS= read -r f; do cat "$f"; done | hash_stdin
+}
+
 #  PORTABLE PER-COMMAND DEADLINE. This script runs on the HOST, and macOS
 # ships no `timeout` and no `gtimeout` - the source-build harness runs its
 # `timeout` calls INSIDE a Debian container, where the binary exists. Assuming
@@ -630,6 +652,36 @@ build/z.js:9:ccc')" \
   if PATH="$T/emptybin" hash_stdin </dev/null >/dev/null 2>&1; then _r=ok; else _r=refused; fi
   st 'H5 no hasher at all is REFUSED (fail closed, never an empty hash)' "$_r" 'refused'
 
+  # ── G-forms: the drift hash is order-independent (R4-2) ──────────────────
+  #  `find` yields readdir order, and tsup's `clean: true` recreates build/
+  #  on every prepack, so the same content hashed in readdir order changed
+  #  across a rebuild and the drift branch cried wolf on a clean tree.
+  #  build_hash sorts the paths first: two trees with the same files created
+  #  in different orders must hash EQUAL (G1), a genuinely changed file must
+  #  still hash DIFFERENT (G2 - the alarm still fires), and an empty tree
+  #  must hash the empty input without blocking on stdin (G3). The G1
+  #  fixture is a proven negative control: the OLD unsorted concatenation
+  #  hashes these two creation orders differently on this machine.
+  mkdir -p "$T/drift-a" "$T/drift-b"
+  printf 'aaa' >"$T/drift-a/a.js"
+  printf 'bbb' >"$T/drift-a/b.js"
+  printf 'ccc' >"$T/drift-a/c.js"
+  printf 'ccc' >"$T/drift-b/c.js"
+  printf 'bbb' >"$T/drift-b/b.js"
+  printf 'aaa' >"$T/drift-b/a.js"
+  st 'G1 the drift hash is IDENTICAL for the same tree created in a different order (R4-2)' \
+    "$(build_hash "$T/drift-a")" "$(build_hash "$T/drift-b")"
+  mkdir -p "$T/drift-c"
+  printf 'aaa' >"$T/drift-c/a.js"
+  printf 'bbb' >"$T/drift-c/b.js"
+  printf 'CHANGED' >"$T/drift-c/c.js"
+  if [ "$(build_hash "$T/drift-a")" = "$(build_hash "$T/drift-c")" ]; then _r=same; else _r=differs; fi
+  st 'G2 a genuinely CHANGED file still hashes DIFFERENT (the drift alarm still fires) (R4-2)' \
+    "$_r" 'differs'
+  mkdir -p "$T/drift-empty"
+  st 'G3 an EMPTY build tree hashes the empty input (never blocks on stdin) (R4-2)' \
+    "$(build_hash "$T/drift-empty")" 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
+
   # ── W-forms: the deadline fallback reaps the whole tree ─────────────────
   #  These force the FALLBACK branch (TIMEOUT_BIN="") - on Linux the GNU
   # branch would otherwise answer, and the cases would prove nothing about
@@ -696,7 +748,7 @@ absent'
   st 'C2  bad() increments the case counter too' "$((CHECKS - _before))" '1'
   FAIL="$FAIL_SAVED"
   st 'C3  the floor is a LITERAL, not a variable compared with itself' \
-    "$([ "$CHECK_FLOOR" -ge 19 ] && echo pinned || echo loose)" 'pinned'
+    "$([ "$CHECK_FLOOR" -eq 20 ] && echo pinned || echo loose)" 'pinned'
 
   printf 'pack-verify self-test: %s/%s\n' "$((ST_RAN - ST_FAIL))" "$ST_RAN"
   if [ "$ST_FAIL" -gt 0 ]; then
@@ -706,12 +758,14 @@ absent'
   #  A PASS MUST BE PROVED ABLE TO SEE A CASE. Without this the self-test
   # could be emptied and would still print a green summary - which is exactly
   # the three routes F-2c-31 measured one level up. The floor is TODAY'S
-  # MEASURED case count (61, measured 2026-11-09): every st() call is
+  # MEASURED case count (64, measured 2026-11-10): every st() call is
   # unconditional, so the count has no legitimate variation - re-pin it in the
   # same commit whenever a case is added. R4-1 (phase 5 pass 4): the floor sat
   # at 30 while 61 cases ran, so 31 cases could vanish before it tripped.
-  if [ "$ST_RAN" -lt 61 ]; then
-    printf '::error::pack-verify self-test ran only %s case(s), floor 61\n' "$ST_RAN"
+  # R4-2 (phase 5 pass 5): 3 G-form cases added for the sorted drift hash,
+  # so the floor moves 61 -> 64, measured 2026-11-10.
+  if [ "$ST_RAN" -lt 64 ]; then
+    printf '::error::pack-verify self-test ran only %s case(s), floor 64\n' "$ST_RAN"
     return 1
   fi
   return 0
@@ -734,7 +788,7 @@ BEFORE_HASH="(no pre-existing build)"
 BUILD_EXISTED=0
 if [ -d "$PKG_ROOT/build" ]; then
   BUILD_EXISTED=1
-  BEFORE_HASH="$(find "$PKG_ROOT/build" -type f -exec cat {} + | hash_stdin)" || {
+  BEFORE_HASH="$(build_hash "$PKG_ROOT/build")" || {
     say "PACK-VERIFY FAIL (stage: no SHA-256 tool available to hash build/)"
     exit 1
   }
@@ -748,7 +802,7 @@ TARBALL="$(ls "$WORK"/*.tgz 2>/dev/null | head -1)"
 [ -n "$TARBALL" ] || { say "PACK-VERIFY FAIL (stage: pack produced no tarball)"; exit 1; }
 say "[pack-verify] tarball: $(basename "$TARBALL") ($(wc -c <"$TARBALL" | tr -d ' ') bytes)"
 
-AFTER_HASH="$(find "$PKG_ROOT/build" -type f -exec cat {} + | hash_stdin)" || {
+AFTER_HASH="$(build_hash "$PKG_ROOT/build")" || {
   say "PACK-VERIFY FAIL (stage: no SHA-256 tool available to hash build/)"
   exit 1
 }
