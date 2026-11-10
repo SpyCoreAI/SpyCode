@@ -200,11 +200,10 @@ check — sandbox path semantics and process-group kill behavior still
 differ, and it prints a warning. Native Windows support is planned
 post-launch.
 
-Linux verified 2026-11-09 (full suite, 3658 tests, on node 24), with the
+Linux verified 2026-11-10 (full suite, 3925 tests, on node 24), with the
 `multi-tool`, `symlink-escape`, `catastrophic-guard` and `config-0600`
-checks green. Coverage was last measured 2026-11-08: lines 73.94%,
-statements 73.44%, functions 77.99%, branches 67.45% (re-stamp at release
-prep). Node 20 is not supported: `engines` requires `>=22.16.0` and the CI
+checks green. Coverage was last measured 2026-11-10: lines 76.72%,
+statements 71.07%, functions 81.12%, branches 77.56%. Node 20 is not supported: `engines` requires `>=22.16.0` and the CI
 matrix runs node 22 and 24, plus the 22.16.0 minimum on Ubuntu.
 
 **amd64 is not verified in this release.** Only emulated amd64 was available

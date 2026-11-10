@@ -4,6 +4,70 @@ All notable changes to `@spycore/cli` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## 0.9.10 - 2026-11-10
+
+Zero-defects review cycle. The full tree was independently re-read seven
+times after the 0.9.9 baseline, and every finding was fixed and re-verified
+before this release: about 220 findings in the first full review (3 Critical,
+21 High, about 60 Medium, 136 Low), then 186 more across the re-review
+passes (68, 41, 34, 18, 19, 6), and a final complete pass that found nothing.
+The suite grew from 3032 to 3925 tests in the same cycle. No flag changes in
+this release.
+
+### Fixed
+
+- **Critical findings.** The SYNC secret guard now carries the project
+  `.spycoreignore` layer: an ignored file could previously be pulled into
+  the prompt context through an `@import`, and a test had pinned that leak
+  as expected behavior — the pin is flipped. `pack-verify` no longer prints
+  leaked content into the CI log. Tests no longer write into the
+  developer's real config directory (the `SPYCORE_TEST_CWD` discipline);
+  they previously stored `trustedWorkspaces` entries in the real
+  `~/.config/spycore` on local runs.
+- **Command-screen coverage.** The launcher census now covers fifteen more
+  operand-executing heads (`softlimit`, `setlock`, `envdir`, `pgrphack`,
+  `s6-softlimit`, `s6-envdir`, `execlineb -c`, `redirfd`, `daemon`,
+  `machinectl shell`, `lxc-attach`, `virsh lxc-enter-namespace`, `ssh`,
+  `mosh`), plus network-to-shell pipes (`openssl s_server`, `wget2`, `xh`,
+  `curlie`), `xargs`/`parallel -I` placeholder operands, command-string
+  operands (`ssh`/`mosh` remote commands, `capsh -c`, `rsync -e`), `socat`
+  `EXEC:`/`SYSTEM:` addresses, `crontab` stdin installs, and `find -ok` /
+  `-okdir`. The fork-bomb pattern covers four more spellings, and the dead
+  `Rscript` interpreter entry is fixed.
+- **Symlink escapes.** The repository scan, the `@`-mention guard, and the
+  file picker all judge the RESOLVED path now: a symlinked parent directory
+  could previously smuggle a file from outside the workspace into the prompt
+  context, and the mention guard only realpath'd the final path component.
+- **Windows named-pipe shutdown.** `child.stdin.end(payload)` in the hooks
+  executor could hang forever on Windows, where a graceful pipe shutdown
+  completes only once the peer reads; the executor now writes and destroys
+  the stream instead.
+- **Symlink-following glob OOM.** The file scanner followed symbolic links
+  with no cycle detection, which could exhaust the vitest worker heap; the
+  four gitignore call sites now pass `followSymbolicLinks: false`.
+- **Browser launch on Windows.** The browser opener built a `cmd.exe /c
+  start` invocation with the URL as an argv element, which cmd.exe could
+  execute as a command; it now goes through the quoted command-line builder.
+- **Undici 6.29.1 option rejection.** `undici` 6.29.1 rejects
+  `maxRedirections: 5`, which broke file downloads and image downloads
+  live; the option is dropped.
+- **Grep ReDoS guard.** A nested-quantifier pattern such as `(a+)+$` hung
+  the synchronous per-line grep loop (a 6-character pattern against a
+  31-character line did not finish in 10 seconds); such patterns are now
+  refused up front with an actionable error.
+- **Surrogate-safe UI.** Cursor movement, backspace, and the block cursor in
+  the chat and TUI composers now move by code point, not by UTF-16 code
+  unit, so an emoji at the cursor is no longer split into lone surrogates;
+  long working-directory display is truncated the same way.
+- **Node floor raised to 22.16.0.** An empirical FTS5 bisect showed Node
+  22.13 and 22.15 ship no FTS5 in their bundled SQLite while 22.16 does
+  (SQLite 3.49.1); `engines` and the CI matrix leg move to `>=22.16.0`.
+  The README documents 22.5+ as before, and the live installer page is
+  unchanged.
+- **Coverage.** Measured 2026-11-10, full suite 3925 tests: lines 76.72%,
+  statements 71.07%, functions 81.12%, branches 77.56%, against the floors
+  68/68/71/63. The floors themselves are unchanged.
+
 ## 0.9.9 - 2026-11-05
 
 CI repair for the 0.9.8 release. Clears the seven high/critical advisories the
