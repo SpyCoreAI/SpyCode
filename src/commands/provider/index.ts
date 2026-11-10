@@ -251,10 +251,17 @@ function registerAdd(group: Command): void {
             const timeoutPromise = new Promise<'timeout'>((resolve) => {
               timer = setTimeout(() => resolve('timeout'), timeoutMs);
             });
-            const result = await Promise.race([streamPromise.then(() => 'done' as const), timeoutPromise]);
-            // clear the timer - a pending handle keeps the event loop alive
-            // and delays process exit by the full timeout.
-            if (timer) clearTimeout(timer);
+            let result: 'done' | 'timeout';
+            try {
+              result = await Promise.race([streamPromise.then(() => 'done' as const), timeoutPromise]);
+            } finally {
+              // R2-13: clear the timer in a finally - it used to sit after
+              // the await, so a streamChat throw skipped it and the
+              // process lingered up to the full timeout. A pending handle
+              // keeps the event loop alive and delays process exit.
+              // (Mirrors `provider test`, which already clears in finally.)
+              if (timer) clearTimeout(timer);
+            }
             // Abort the stream on timeout so the connection doesn't leak.
             if (result === 'timeout') abort.abort();
             if (result === 'timeout') {

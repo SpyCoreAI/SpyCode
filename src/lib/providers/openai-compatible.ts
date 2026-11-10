@@ -293,6 +293,17 @@ export class OpenAICompatibleProvider implements Provider {
           usageOutput = Number(chunk.usage.completion_tokens ?? 0) || 0;
           sawUsage = true;
         }
+        // R2-11: poll the (time) budget after EVERY event, not just text
+        // chunks - a turn streaming only tool calls used to never check
+        // shouldStop and ran past its budget (mirrors spycore.ts). On
+        // trip, settle the turn the same way the text branch does and
+        // return without `done`. (No R2-10 change here: `content: ''` is
+        // valid on this wire, and recording the calls would need tool
+        // result messages the loop never sends - see the fix log.)
+        if (params.shouldStop?.()) {
+          settleErroredTurn();
+          return;
+        }
       }
     } catch (err) {
       if (params.signal?.aborted) {

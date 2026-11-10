@@ -54,16 +54,21 @@ function loadUsage(): ByokUsageMap {
     const raw = readFileSync(usageFilePath(), 'utf-8');
     const parsed = JSON.parse(raw) as unknown;
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      const out: ByokUsageMap = {};
+      // Null-prototype map (R2-15): a provider literally named `__proto__`
+      // would otherwise invoke the prototype setter on a plain `{}` and
+      // never persist - `recordByokUsage` reads it back as
+      // `Object.prototype` and its counts go NaN. `Object.entries` still
+      // lists a stored `__proto__` key, and JSON.stringify still writes it.
+      const out: ByokUsageMap = Object.create(null);
       for (const [name, entry] of Object.entries(parsed as Record<string, unknown>)) {
         const clean = sanitizeEntry(entry);
         if (clean) out[name] = clean;
       }
       return out;
     }
-    return {};
+    return Object.create(null);
   } catch {
-    return {};
+    return Object.create(null);
   }
 }
 

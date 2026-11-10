@@ -25,7 +25,7 @@ import {
   readErrorDetail,
   streamCapErrorMessage,
 } from './wire.js';
-import { pruneByokSessions, trimHistoryMessages } from './history.js';
+import { pruneByokSessions, recordAssistantMessage, trimHistoryMessages } from './history.js';
 import type {
   CreateConversationParams,
   Provider,
@@ -394,6 +394,15 @@ export class GoogleProvider implements Provider {
           usageOutput = Number(u.candidatesTokenCount ?? 0) || usageOutput;
           sawUsage = true;
         }
+        // R2-11: poll the (time) budget after EVERY event, not just text
+        // chunks - a turn streaming only function calls used to never check
+        // shouldStop and ran past its budget (mirrors spycore.ts). On
+        // trip, settle the turn the same way the text branch does and
+        // return without `done`.
+        if (params.shouldStop?.()) {
+          recordAssistantMessage(session.messages, assistantText, functionCalls);
+          return;
+        }
       }
     } catch (err) {
       if (params.signal?.aborted) {
@@ -406,7 +415,11 @@ export class GoogleProvider implements Provider {
     }
 
     // alt=sse has no terminator event - a clean stream end IS completion.
-    session.messages.push({ role: 'assistant', content: assistantText });
+    // R2-10: never record an empty assistant message (`parts: [{text: ''}]`
+    // is the same degenerate shape as Anthropic's `{content: ''}`): a
+    // functionCall-only turn is recorded as its calls, a no-text, no-call
+    // turn as a marker.
+    recordAssistantMessage(session.messages, assistantText, functionCalls);
     if (sawUsage) yield { type: 'usage', input: usageInput, output: usageOutput };
     if (functionCalls.length > 0) {
       yield { type: 'tool_calls', calls: functionCalls };

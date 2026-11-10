@@ -43,21 +43,29 @@ export async function getToken(): Promise<string | null> {
   // SPYCORE_TOKEN takes precedence - primary path for CI / agent invocation
   // where the keychain is unavailable and putting credentials on disk is
   // undesirable. Empty string is treated as unset so `SPYCORE_TOKEN= cmd`
-  // doesn't accidentally authenticate.
-  const envToken = process.env.SPYCORE_TOKEN;
+  // doesn't accidentally authenticate. The value is trimmed (R2-14): a
+  // trailing newline/space from copy-paste or an env file is otherwise sent
+  // verbatim and undici rejects the Authorization header outright
+  // (`InvalidArgumentError: invalid authorization header`) on every call -
+  // the same class the BYOK side already trims keys for. A whitespace-only
+  // value counts as unset, like the empty-string case.
+  const envToken = process.env.SPYCORE_TOKEN?.trim();
   if (envToken && envToken.length > 0) return envToken;
 
   const keytar = await loadKeytar();
   if (keytar) {
     try {
       const v = await keytar.getPassword(SERVICE, ACCOUNT);
-      if (v) return v;
+      const trimmed = v?.trim();
+      if (trimmed) return trimmed;
     } catch {
       // keychain read can fail on Linux when DBus / libsecret isn't running.
       // Fall through to the file backend.
     }
   }
-  return getStoredTokenFromFile();
+  const stored = getStoredTokenFromFile();
+  const trimmedStored = stored?.trim();
+  return trimmedStored && trimmedStored.length > 0 ? trimmedStored : null;
 }
 
 export async function setToken(token: string): Promise<void> {
@@ -89,7 +97,7 @@ export async function clearToken(): Promise<void> {
 
 export async function isAuthenticated(): Promise<boolean> {
   // Any non-empty token authenticates requests - getToken() returns a
-  // SPYCORE_TOKEN verbatim, with no prefix requirement. The old
+  // SPYCORE_TOKEN trimmed, with no prefix requirement. The old
   // `spycli_` prefix check disagreed with that: a token without the
   // prefix authenticated every request while whoami/ping reported
   // "Not logged in". A stored token from another tool is still the

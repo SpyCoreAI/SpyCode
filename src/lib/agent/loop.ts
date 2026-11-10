@@ -473,6 +473,35 @@ function isWarningEvent(event: ProviderEvent): boolean {
   return event.type === 'warning';
 }
 
+/**
+ * Parse native `tool_calls` into dispatchable calls: arguments JSON text →
+ * an args object, malformed arguments → an argError the dispatcher feeds
+ * back instead of dispatching (and without disturbing the batching of its
+ * siblings). Shared by the native branch and the fenced branch's
+ * BYOK-native fallback (R2-12): the fenced branch used to parse calls out
+ * of the reply text only, so a BYOK model answering in wire format had its
+ * calls silently dropped.
+ */
+function parseNativeCallArgs(
+  calls: ProviderToolCallLite[],
+): Array<{ id: string; name: string; args: Record<string, unknown>; argError: string | null }> {
+  return calls.map((call) => {
+    let args: Record<string, unknown> = {};
+    let argError: string | null = null;
+    try {
+      const parsedArgs = JSON.parse(call.arguments && call.arguments.length > 0 ? call.arguments : '{}');
+      if (parsedArgs && typeof parsedArgs === 'object' && !Array.isArray(parsedArgs)) {
+        args = parsedArgs as Record<string, unknown>;
+      } else {
+        argError = 'arguments were not a JSON object';
+      }
+    } catch (err) {
+      argError = `arguments were not valid JSON (${err instanceof Error ? err.message : String(err)})`;
+    }
+    return { id: call.id, name: call.name, args, argError };
+  });
+}
+
 async function streamTurn(input: StreamTurnInput): Promise<TurnResult> {
   let text = '';
   let inputTokens = 0;
@@ -1031,21 +1060,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentResult> {
       // Parse every call's arguments first: a malformed-arguments call feeds an
       // error result back to the model without dispatching, and without
       // disturbing the parallel/serial batching of its siblings.
-      const parsedCalls = replyToolCalls.map((call) => {
-        let args: Record<string, unknown> = {};
-        let argError: string | null = null;
-        try {
-          const parsedArgs = JSON.parse(call.arguments && call.arguments.length > 0 ? call.arguments : '{}');
-          if (parsedArgs && typeof parsedArgs === 'object' && !Array.isArray(parsedArgs)) {
-            args = parsedArgs as Record<string, unknown>;
-          } else {
-            argError = 'arguments were not a JSON object';
-          }
-        } catch (err) {
-          argError = `arguments were not valid JSON (${err instanceof Error ? err.message : String(err)})`;
-        }
-        return { id: call.id, name: call.name, args, argError };
-      });
+      const parsedCalls = parseNativeCallArgs(replyToolCalls);
       const dispatched = await dispatchTurnCalls(
         turn,
         parsedCalls.map((p, index) => ({ tool: p.name, args: p.args, argError: p.argError, index })),
@@ -1091,8 +1106,25 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentResult> {
 
     const parsed = parseTurn(reply);
 
+    // R2-12: a BYOK model may answer in native wire format even in fenced
+    // mode - no tool declarations were sent, but the model can still emit
+    // tool_calls (spontaneously, or via a server-side tool config), and
+    // streamTurn collects them into replyToolCalls. The fenced branch used
+    // to parse calls out of the reply TEXT only and silently drop them, so
+    // the run nudged about an "empty reply" and ended empty. A non-empty
+    // replyToolCalls is actionable the same way parsed calls are, and its
+    // results feed back in the fenced continuation shape below. Native
+    // calls take precedence when both are present: a model answering
+    // natively is speaking the wire protocol, and dispatching the same
+    // intent twice (once per shape) would double-execute it.
+    const nativeParsed = replyToolCalls.length > 0 ? parseNativeCallArgs(replyToolCalls) : null;
+    const calls: Array<{ tool: string; args: Record<string, unknown>; argError: string | null }> =
+      nativeParsed !== null
+        ? nativeParsed.map((c) => ({ tool: c.name, args: c.args, argError: c.argError }))
+        : parsed.calls.map((c) => ({ tool: c.tool, args: c.args, argError: null }));
+
     // No actionable tool call this turn.
-    if (parsed.calls.length === 0) {
+    if (calls.length === 0) {
       const malformed = parsed.errors.length > 0 || parsed.hasUnclosedBlock;
       if (malformed) {
         const detail = parsed.errors[0]?.message ?? 'an incomplete tool block';
@@ -1119,21 +1151,21 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentResult> {
       emit({ type: 'narration', turn, text: parsed.prose });
     }
 
-    const total = parsed.calls.length;
+    const total = calls.length;
     const feedback: string[] = [];
     const fencedResults = await dispatchTurnCalls(
       turn,
-      parsed.calls.map((call, index) => ({ tool: call.tool, args: call.args, argError: null, index })),
+      calls.map((call, index) => ({ tool: call.tool, args: call.args, argError: call.argError, index })),
     );
     if (fencedResults === null) {
       return result({ finalText: '', turns: turn, toolCalls: counters.toolCalls, cancelled: true });
     }
-    for (let i = 0; i < parsed.calls.length; i += 1) {
+    for (let i = 0; i < calls.length; i += 1) {
       const res = fencedResults[i];
       // A `null` slot is a call the per-turn cap skipped - the cap event and
       // the in-band note already fired inside dispatchTurnCalls.
       if (res === null || res === undefined) break;
-      const call = parsed.calls[i]!;
+      const call = calls[i]!;
       feedback.push(formatResultForModel(i, total, call.tool, call.args, res.ok, res.summary, res.content));
     }
 
@@ -1141,7 +1173,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentResult> {
     // lead the next turn's message, a breaker ends the run here.
     const loopCheck = checkLoop(
       turn,
-      parsed.calls.map((call) => ({
+      calls.map((call) => ({
         tool: call.tool,
         args: call.args,
         command:

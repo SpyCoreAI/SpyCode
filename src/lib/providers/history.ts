@@ -15,7 +15,7 @@
  * - Sessions idle longer than BYOK_SESSION_IDLE_MS are dropped, and the
  *   map is capped at MAX_BYOK_SESSIONS (oldest first).
  */
-import type { ProviderMessage } from './types.js';
+import type { ProviderMessage, ProviderToolCall } from './types.js';
 
 /** Most messages kept per BYOK session (50 turns of user + assistant). */
 export const MAX_BYOK_HISTORY_MESSAGES = 100;
@@ -23,6 +23,56 @@ export const MAX_BYOK_HISTORY_MESSAGES = 100;
 export const MAX_BYOK_SESSIONS = 32;
 /** Idle sessions older than this are pruned on the next conversation. */
 export const BYOK_SESSION_IDLE_MS = 60 * 60 * 1000;
+
+/**
+ * Render native tool calls as the fenced `spycore:tool` blocks the agent
+ * loop parses (see protocol.ts) - one block per call, in order. The replayed
+ * assistant message then reads exactly like a fenced turn's own output, so
+ * the next turn can see what the model called. Unparseable arguments (a
+ * stream cut short mid-fragment) fall back to an empty object rather than
+ * breaking the render - the call name itself is the part that must survive.
+ */
+export function formatToolCallsForHistory(calls: ProviderToolCall[]): string {
+  return calls
+    .map((c) => {
+      let args: unknown = {};
+      try {
+        args = JSON.parse(c.arguments && c.arguments.length > 0 ? c.arguments : '{}');
+      } catch {
+        args = {};
+      }
+      if (!args || typeof args !== 'object' || Array.isArray(args)) args = {};
+      return '```spycore:tool\n' + JSON.stringify({ tool: c.name, args }) + '\n```';
+    })
+    .join('\n');
+}
+
+/**
+ * Record a finished assistant turn in a BYOK session history (R2-10).
+ * The Anthropic/Google wires reject an assistant message with empty content
+ * when a user message follows it, so a no-text turn must NEVER be recorded
+ * as `{content: ''}`: a tool-call-only turn is recorded as its calls
+ * (fenced, via formatToolCallsForHistory), and a turn with neither text nor
+ * calls as an explicit `(empty reply)` marker - both keep the history
+ * alternating and non-empty, so the next turn's request stays valid and
+ * the model can see what (if anything) it did. A turn WITH text is
+ * recorded exactly as before.
+ */
+export function recordAssistantMessage(
+  messages: ProviderMessage[],
+  text: string,
+  toolCalls: ProviderToolCall[],
+): void {
+  if (text.length > 0) {
+    messages.push({ role: 'assistant', content: text });
+    return;
+  }
+  if (toolCalls.length > 0) {
+    messages.push({ role: 'assistant', content: formatToolCallsForHistory(toolCalls) });
+    return;
+  }
+  messages.push({ role: 'assistant', content: '(empty reply)' });
+}
 
 /**
  * Trim `messages` in place to at most `max` entries, dropping the oldest

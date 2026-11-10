@@ -23,7 +23,7 @@ import {
   readErrorDetail,
   streamCapErrorMessage,
 } from './wire.js';
-import { pruneByokSessions, trimHistoryMessages } from './history.js';
+import { pruneByokSessions, recordAssistantMessage, trimHistoryMessages } from './history.js';
 import type {
   CreateConversationParams,
   Provider,
@@ -256,6 +256,15 @@ export class AnthropicProvider implements Provider {
               if (id.length > 0 || name.length > 0) {
                 toolCallParts.set(index, { id, name, arguments: '' });
               }
+              // R2-11: poll here too - a no-argument call may never send a
+              // delta, so the block opening is the only trip point on its
+              // path. Text blocks do NOT poll here: tripping before the
+              // first text chunk would change the text path's pinned
+              // behaviour (yield the first chunk, then stop).
+              if (params.shouldStop?.()) {
+                recordAssistantMessage(session.messages, assistantText, toolCalls());
+                return;
+              }
             }
             break;
           }
@@ -284,6 +293,15 @@ export class AnthropicProvider implements Provider {
               }
               cur.arguments += chunk.delta.partial_json;
               toolCallParts.set(index, cur);
+              // R2-11: poll the (time) budget after tool-call fragments, not
+              // only after text - a tool-call-only turn used to never check
+              // shouldStop and ran past its budget (mirrors spycore.ts).
+              // On trip, settle the turn the same way the text branch does
+              // and return without `done`.
+              if (params.shouldStop?.()) {
+                recordAssistantMessage(session.messages, assistantText, toolCalls());
+                return;
+              }
             }
             break;
           }
@@ -305,6 +323,12 @@ export class AnthropicProvider implements Provider {
               sawUsage = true;
             }
             if (typeof chunk.stop_reason === 'string') stopReason = chunk.stop_reason;
+            // R2-11: poll after this usage/metadata event too (a turn whose
+            // only late events are deltas still stops promptly).
+            if (params.shouldStop?.()) {
+              recordAssistantMessage(session.messages, assistantText, toolCalls());
+              return;
+            }
             break;
           }
           case 'error': {
@@ -314,9 +338,13 @@ export class AnthropicProvider implements Provider {
             return;
           }
           case 'message_stop': {
-            session.messages.push({ role: 'assistant', content: assistantText });
-            if (sawUsage) yield { type: 'usage', input: usageInput, output: usageOutput };
+            // R2-10: never record an empty assistant message - the API
+            // rejects it on the next turn, and the error path keeps it, so
+            // the session can never self-heal. A tool-call-only turn is
+            // recorded as its calls; a no-text, no-call turn as a marker.
             const calls = toolCalls();
+            recordAssistantMessage(session.messages, assistantText, calls);
+            if (sawUsage) yield { type: 'usage', input: usageInput, output: usageOutput };
             if (calls.length > 0) {
               yield { type: 'tool_calls', calls };
             }
@@ -344,7 +372,8 @@ export class AnthropicProvider implements Provider {
     }
 
     // Stream ended without message_stop (unusual) - still finish gracefully.
-    session.messages.push({ role: 'assistant', content: assistantText });
+    // R2-10: same guard as message_stop - never record an empty message.
+    recordAssistantMessage(session.messages, assistantText, toolCalls());
     if (sawUsage) yield { type: 'usage', input: usageInput, output: usageOutput };
     const calls = toolCalls();
     if (calls.length > 0) {
