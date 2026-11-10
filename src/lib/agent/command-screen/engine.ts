@@ -24,6 +24,7 @@ import {
   MAX_SCREEN_DEPTH,
   RECURSIVE_FLAG,
   SHELLS,
+  scopedLauncherExecutes,
   type DeviceWriteVerb,
 } from './constants.js';
 import {
@@ -62,8 +63,23 @@ export function isPipeTerminator(t: string | null): boolean {
  * optional `&` is allowed after the pipe. No benign cost: `|&` followed
  * by the same function name inside a `(){…}` definition has no
  * legitimate reading.
+ * R1 pass 5 - the body is a SEQUENCE of self-calls, not one piped pair:
+ * a trailing `;` (`:(){ :|:; };:`), a leading backgrounded self-call
+ * (`f(){f&f|f}` - `&` ends a command, so that is `f & f|f`), or a
+ * second statement (`f(){ f|f; f& }`, `f(){f|f&;}`) all break the old
+ * shape while forking the same way (proved live with `ulimit -u 64`:
+ * `:(){ :|:; };:` hits `fork: Resource temporarily unavailable`). The
+ * body is now one name followed by any run of separators (`|`, `|&`,
+ * `||`, `&&`, `&`, `;`) each followed by the name, with an optional
+ * trailing `&`/`;` - and a lookahead requires at least one REAL pipe,
+ * a `|` neither half of a `||` (so `f(){f||f};f`, sequential
+ * short-circuit recursion with no fork, stays allowed) - so
+ * `f(){f};f` (plain recursion, no fork) and `f(){f&&f};f` stay allowed
+ * too. No benign cost: a function whose body consists only of
+ * (backgrounded) calls to itself through a pipe has no legitimate
+ * reading.
  */
-const FORK_BOMB_RE = /([A-Za-z_:][A-Za-z0-9_:]*)\(\)\s*\{\s*\1\s*\|\&?\s*\1\s*&\s*\}\s*;\s*\1/;
+const FORK_BOMB_RE = /([A-Za-z_:][A-Za-z0-9_:]*)\(\)\{(?=[^}]*[^|]\|(?!\|))\1(?:(?:\|\||&&|\|&?|&|;)\1)+[;&]*\};\1/;
 
 /**
  * F-4 - A POSITIONAL PROPERTY TESTED BY A SCAN OVER ALL OPERANDS
@@ -309,6 +325,250 @@ function tarCommandValues(args: string[]): string[] {
 }
 
 /**
+ * R1 pass 5 - THE REPLACE STRINGS A `xargs`/`parallel` STAGE DECLARES.
+ *
+ * `-I VALUE` / `--replace VALUE` (separate), `-IVALUE` /
+ * `--replace=VALUE` (attached), `-i` (which implies `{}`). The value is
+ * what stdin lines are substituted for - so an operand equal to it is
+ * not a literal target but the stdin-fed one. Read off the stage's RAW
+ * words: `effectiveWords` strips the `-I` flag word, so asking it would
+ * never find the option at all (which is why the M2 branch this
+ * replaces could never fire for `-I`).
+ */
+function replaceStringsOf(words: readonly string[]): string[] {
+  const out: string[] = [];
+  for (let k = 0; k < words.length; k += 1) {
+    const w = words[k] as string;
+    if (w === '-I' || w === '--replace') {
+      const v = words[k + 1];
+      if (v !== undefined) out.push(v);
+    } else if (w.startsWith('-I') && w.length > 2) {
+      out.push(w.slice(2));
+    } else if (w.startsWith('--replace=')) {
+      out.push(w.slice('--replace='.length));
+    } else if (w === '-i') {
+      out.push('{}');
+    } else {
+      // `-i` takes an optional attached argument (`-i{}`).
+      const attached = /^-i(.+)$/.exec(w);
+      if (attached !== null) out.push(attached[1] as string);
+    }
+  }
+  return out;
+}
+
+/** Does this word declare placeholder substitution (flag presence only)? */
+function usesPlaceholderWord(w: string): boolean {
+  return (
+    w === '-I' ||
+    w.startsWith('-I') ||
+    w === '--replace' ||
+    w.startsWith('--replace') ||
+    w === '-i' ||
+    w.startsWith('-i')
+  );
+}
+
+/** Where this candidate argv starts inside its command's raw words, or -1. */
+function candidateStartIndex(cmd: SimpleCommand, words: ShellWord[]): number {
+  const vals = cmd.words.map((w) => w.value);
+  const cand = words.map((w) => w.value);
+  for (let s = 0; s + cand.length <= vals.length; s += 1) {
+    if (cand.every((c, k) => vals[s + k] === c)) return s;
+  }
+  return -1;
+}
+
+/**
+ * R1 pass 5 - IS THIS CANDIDATE THE STAGE'S UTILITY, OR AN OPERAND OF IT?
+ *
+ * `candidateArgvs` offers every suffix, so `xargs -I X echo rm -rf X`
+ * offers `[rm,-rf,X]` exactly like `xargs -I X rm -rf X` does - but in
+ * the first the `rm` is `echo`'s data and in the second it is the
+ * command. The words before the candidate decide: after dropping a
+ * leading run of wrappers and their `NAME=value` assignments, the next
+ * word must be the `xargs`/`parallel` head itself, and everything
+ * between it and the candidate must be an option word or the replace
+ * string (`-I X`: the `X` after `-I`). Anything else in between - an
+ * `echo`, a `1` after `-n` - means the candidate is not the utility.
+ * The `-n 1` shape is a documented miss: teaching this the arity of
+ * every xargs option would be the hand-list this file refuses to keep.
+ */
+function atUtilityPosition(cmd: SimpleCommand, start: number, repls: string[]): boolean {
+  const vals = cmd.words.map((w) => w.value);
+  let pre = vals.slice(0, start);
+  let k = 0;
+  while (k < pre.length) {
+    const w = pre[k] as string;
+    const n = osFold(commandBasename(w));
+    if (n === 'xargs' || n === 'parallel') break;
+    if (COMMAND_WRAPPERS.has(n)) {
+      k += 1;
+      continue;
+    }
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w)) {
+      k += 1;
+      continue;
+    }
+    break;
+  }
+  pre = pre.slice(k);
+  if (pre.length === 0) return false;
+  const headName = osFold(commandBasename(pre[0] as string));
+  if (headName !== 'xargs' && headName !== 'parallel') return false;
+  return pre
+    .slice(1)
+    .every((w) => w.startsWith('-') || repls.includes(w));
+}
+
+/**
+ * R1 pass 5 - the command a `socat` EXEC: / SYSTEM: address carries.
+ *
+ * The address is one argv word: `EXEC:"cmd"` / `EXEC:'cmd'` (either
+ * quote kind, the command is what the quotes wrap) or bare `EXEC:cmd`
+ * (up to the first `,`, which starts socat's `,option` suffixes -
+ * `EXEC:"cmd",pty`). Case-insensitive: lowercase `exec:` executes too
+ * (proven live). A word that is not an EXEC:/SYSTEM: address yields
+ * nothing; the `-` address and `TCP:…` addresses screen as nothing.
+ */
+function socatCommandValues(args: string[]): string[] {
+  const values: string[] = [];
+  for (const a of args) {
+    const m = /^(EXEC|SYSTEM):([\s\S]*)$/i.exec(a);
+    if (m === null) continue;
+    const rest = m[2] as string;
+    if (rest.length === 0) continue;
+    const q = rest[0] as string;
+    if (q === '"' || q === "'") {
+      const close = rest.indexOf(q, 1);
+      values.push(close === -1 ? rest.slice(1) : rest.slice(1, close));
+    } else {
+      const comma = rest.indexOf(',');
+      values.push(comma === -1 ? rest : rest.slice(0, comma));
+    }
+  }
+  return values;
+}
+
+/**
+ * R1 pass 5 - the command a `daemon --command=` option carries
+ * (libslack form), attached and separate spellings.
+ */
+function daemonCommandValues(args: string[]): string[] {
+  const values: string[] = [];
+  for (let k = 0; k < args.length; k += 1) {
+    const a = args[k] as string;
+    const attached = /^--command=(.+)$/.exec(a);
+    if (attached !== null) {
+      values.push(attached[1] as string);
+      continue;
+    }
+    if (a === '--command') {
+      const v = args[k + 1];
+      if (v !== undefined) values.push(v);
+    }
+  }
+  return values;
+}
+
+/**
+ * R1 pass 5 - the remote-shell values of `rsync -e` / `--rsh`
+ * (attached and separate spellings). The value is exactly one word.
+ */
+function rsyncShellValues(args: string[]): string[] {
+  const values: string[] = [];
+  for (let k = 0; k < args.length; k += 1) {
+    const a = args[k] as string;
+    if (a === '-e' || a === '--rsh') {
+      const v = args[k + 1];
+      if (v !== undefined) values.push(v);
+      continue;
+    }
+    const attached = /^--rsh=(.+)$/.exec(a);
+    if (attached !== null) {
+      values.push(attached[1] as string);
+      continue;
+    }
+    const shortAttached = /^-e(.+)$/.exec(a);
+    if (shortAttached !== null) values.push(shortAttached[1] as string);
+  }
+  return values;
+}
+
+/**
+ * R1 pass 5 - DOES THIS `-e` VALUE RE-INTERPRET A STRING ARGUMENT?
+ *
+ * rsync appends its own words to the `-e` command, so a direct verb
+ * (`rm`, `dd`) is broken by them and never executes - while a shell,
+ * carrier, interpreter, or `-c` head (`capsh`, `execlineb`) runs its
+ * string argument verbatim. The value's first command is read the way
+ * the screen always reads one it does not know: every candidate argv,
+ * so `timeout 5 sh -c …` qualifies through the `sh` suffix exactly as
+ * `timeout 5 rm -rf /` fails to through any of its heads. `ssh` is
+ * deliberately NOT here: as an `-e` value it joins its operands into a
+ * remote command, so the appended words pollute it the same way they
+ * break plain `rm` - a plain remote shell (`ssh -p 2222`) stays
+ * allowed, which is the ordinary rsync usage.
+ */
+function rsyncValueReinterprets(value: string): boolean {
+  const parsed = parseShell(value);
+  const first = parsed.commands[0];
+  if (first === undefined) return false;
+  return candidateArgvs(first).some((ws) => {
+    const h = ws[0];
+    if (h === undefined) return false;
+    const n = osFold(commandBasename(h.value));
+    return (
+      SHELLS.has(n) || COMMAND_CARRIERS.has(n) || INTERPRETERS.has(n) || n === 'capsh' || n === 'execlineb'
+    );
+  });
+}
+
+const CRON_MACROS = new Set(['reboot', 'yearly', 'annually', 'monthly', 'weekly', 'daily', 'midnight', 'hourly']);
+const CRON_MONTHS = new Set(['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']);
+const CRON_DAYS = new Set(['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat']);
+
+/** One item of a cron time field: `*`, `5`, `1-5`, `jan`, `mon-fri`, each with an optional `/step`. */
+function isCronFieldItem(item: string): boolean {
+  const m = /^(\*|\d+(?:-\d+)?|[a-z]{3}(?:-[a-z]{3})?)(?:\/\d+)?$/i.exec(item);
+  if (m === null) return false;
+  const base = m[1] as string;
+  if (base === '*' || /^\d/.test(base)) return true;
+  const names = base.split('-');
+  return names.every((n) => CRON_MONTHS.has(n.toLowerCase()) || CRON_DAYS.has(n.toLowerCase()));
+}
+
+/** One cron time field: a comma-separated list of items. */
+function isCronField(field: string): boolean {
+  return field.length > 0 && field.split(',').every(isCronFieldItem);
+}
+
+/**
+ * R1 pass 5 - THE COMMAND PORTION OF ONE CRONTAB LINE, OR NULL.
+ *
+ * A line is a job only with a schedule: five time fields, or an
+ * `@`-macro. Anything else - a bare command, an env assignment
+ * (`SHELL=/bin/sh`), a comment, a short line - is not a job cron
+ * would ever run, so it screens nothing. The field grammar is the
+ * real one (numbers, ranges, lists, steps, month/weekday names), not
+ * "any word": a five-word command (`a b c d e rm -rf /`) must not
+ * read as a schedule.
+ */
+function crontabCommandRemainder(line: string): string | null {
+  const words = line.trim().split(/\s+/).filter((w) => w.length > 0);
+  if (words.length === 0) return null;
+  const first = words[0] as string;
+  if (first.startsWith('@')) {
+    if (!CRON_MACROS.has(first.slice(1).toLowerCase())) return null;
+    if (words.length < 2) return null;
+    return words.slice(1).join(' ');
+  }
+  if (words.length < 6) return null;
+  if (!words.slice(0, 5).every(isCronField)) return null;
+  return words.slice(5).join(' ');
+}
+
+/**
  * Screen `command` and everything it would run. The union of: the parsed simple
  * commands, every `$( … )` interior, every `sh -c` payload, and - ONLY when the
  * parse is not confident - a crude whitespace tokenization as a fallback.
@@ -549,8 +809,16 @@ function screenNested(text: string, depth: number, nested = false): string | nul
  * lift too.
  */
 function headMayExecOperands(cmd: SimpleCommand): boolean {
-  const head = effectiveWords(cmd)[0];
-  if (head !== undefined && COMMAND_LAUNCHERS.has(osFold(commandBasename(stripExpansions(head.value))))) return true;
+  const eff = effectiveWords(cmd);
+  const head = eff[0];
+  if (head !== undefined) {
+    const name = osFold(commandBasename(stripExpansions(head.value)));
+    if (COMMAND_LAUNCHERS.has(name)) return true;
+    // R1 pass 5 - a SCOPED launcher lifts the gate only in its
+    // executing form (`machinectl shell`, `virsh lxc-enter-namespace`,
+    // `execlineb -c`); a plain `machinectl list` stays a mention.
+    if (scopedLauncherExecutes(name, eff.slice(1).map((w) => w.value))) return true;
+  }
   for (const w of cmd.words) {
     const n = osFold(commandBasename(w.value));
     if (COMMAND_WRAPPERS.has(n) || COMMAND_CARRIERS.has(n) || INTERPRETERS.has(n) || SHELLS.has(n)) return true;
@@ -683,19 +951,83 @@ function screenArgv(
       // operand list, so `find . -name '*.log' | xargs rm -f` is untouched.
       // M2: walk back through ALL upstream pipe stages (not just the
       // immediate predecessor) - `echo / | cat | xargs rm -rf` has the
-      // dangerous operand two stages back. Also handle xargs -I/--replace:
-      // the placeholder is substituted at runtime from stdin, so the
-      // operand list is empty but the upstream content is what gets deleted.
-      const piped = operands.length === 0 && i > 0 && isPipeTerminator((commands[i - 1] as SimpleCommand).terminator);
+      // dangerous operand two stages back.
+      //
+      // R1 pass 5 - the M2 placeholder handling covered the HARMLESS
+      // spelling and missed the harmful one, in two different ways:
+      //
+      // (a) A SURVIVING placeholder operand. `echo / | xargs -I X rm -rf
+      // X` keeps `X` as an operand, so the old `operands.length === 0`
+      // precondition never fired and `X` screened as a literal target
+      // (harmless). The operand IS the stdin-fed target: when it equals
+      // the stage's replace string, it is treated as stdin-fed and the
+      // upstream walk runs. The candidate must sit at the UTILITY
+      // position of the stage (`atUtilityPosition`): `xargs -I X echo rm
+      // -rf X` runs `echo`, and the substituted text is its data, so it
+      // stays allowed - the `rm` there is an operand of `echo`, not the
+      // command. A value-taking wrapper between the pipe and the utility
+      // (`timeout 5 xargs -I X ...`) defeats the position check and is a
+      // documented residual; the bare `timeout 5 xargs rm -rf` shape is
+      // still caught by the empty-operand path.
+      //
+      // (b) A SHREDDED placeholder operand. `parseShell` lexes `{`/`}` as
+      // operators, so `xargs -I{} rm -rf {}` becomes TWO fragment
+      // commands - `[xargs,-I]` and `[rm,-rf]`, each terminated by `{` -
+      // and the `{}` operand never survives as a word at all. The rm
+      // fragment has empty operands, but its immediate predecessor is
+      // the xargs fragment, not the pipe, so the old adjacency test
+      // failed. The pipe is found by walking back past `{`-terminated
+      // fragments of this same stage, and the walk skips them the same
+      // way. This is restricted to the PRIMARY reading: a suffix reading
+      // of a neighbouring fragment (`[echo,rm,-rf]` from `xargs -I{}
+      // echo rm -rf {}`) must not inherit the pipe - `echo` is the
+      // command there. A `}`-terminated stage is NOT skipped: it is a
+      // real brace-group command whose operands are genuine upstream
+      // data, collected (and ending the walk) exactly as before.
+      const stageWordValues = cmd.words.map((w) => w.value);
+      const repls = replaceStringsOf(stageWordValues);
+      const primaryWordValues = effectiveWords(cmd).map((w) => w.value);
+      const isPrimary =
+        words.length === primaryWordValues.length &&
+        words.every((w, k) => w.value === primaryWordValues[k]);
+      const start = candidateStartIndex(cmd, words);
+      const placeholderFed =
+        repls.length > 0 &&
+        start >= 0 &&
+        operands.some((op) => repls.some((r) => op === r || op.startsWith(`${r}/`))) &&
+        atUtilityPosition(cmd, start, repls);
+      const directPipe = i > 0 && isPipeTerminator((commands[i - 1] as SimpleCommand).terminator);
+      const skipAllowed = (isPrimary && operands.length === 0) || placeholderFed;
+      let pipeFound = directPipe;
+      if (!pipeFound && skipAllowed) {
+        for (let j = i - 1; j >= 0; j--) {
+          const t = (commands[j] as SimpleCommand).terminator;
+          if (t === '{') continue;
+          pipeFound = isPipeTerminator(t);
+          break;
+        }
+      }
+      const piped = pipeFound && (operands.length === 0 || placeholderFed);
       let targets: string[] = operands;
       if (piped) {
         targets = [];
-        // Check if this is xargs with placeholder substitution
-        const xargsWords = effectiveWords(commands[i] as SimpleCommand).slice(1).map((w) => w.value);
-        const hasPlaceholder = xargsWords.some((w) => w === '-I' || w.startsWith('-I') || w === '--replace' || w.startsWith('--replace='));
+        // The stage declares placeholder substitution if this command or
+        // any brace-shredded piece of it carries -I/--replace/-i. (The
+        // value itself is usually shredded away with the braces, so this
+        // asks about the FLAG, not the value.)
+        let usesPlaceholder = stageWordValues.some(usesPlaceholderWord);
+        for (let j = i - 1; j >= 0 && (commands[j] as SimpleCommand).terminator === '{'; j--) {
+          if ((commands[j] as SimpleCommand).words.some((w) => usesPlaceholderWord(w.value))) {
+            usesPlaceholder = true;
+          }
+        }
         // Walk all upstream stages
         for (let j = i - 1; j >= 0; j--) {
           const stage = commands[j] as SimpleCommand;
+          // A '{'-terminated piece is a brace-shredded fragment of this
+          // same stage, not an upstream producer: skip it without
+          // collecting and without breaking.
+          if (stage.terminator === '{') continue;
           const stageWords = effectiveWords(stage).slice(1).map((w) => w.value);
           const { operands: stageOperands } = splitArgs(stageWords);
           for (const op of stageOperands) {
@@ -708,7 +1040,7 @@ function screenArgv(
         }
         // If xargs uses placeholder substitution, ANY upstream content is
         // dangerous (it gets substituted into the rm command)
-        if (hasPlaceholder && targets.length > 0) {
+        if (usesPlaceholder && targets.length > 0) {
           // The placeholder means stdin content becomes rm's target;
           // if upstream produces dangerous output, block it
           for (const operand of targets) {
@@ -780,14 +1112,122 @@ function screenArgv(
       }
     }
 
+    // ── R1 pass 5 - `socat` EXEC: / SYSTEM: addresses execute a command ──
+    //
+    // `socat EXEC:"cmd"` runs the command with its stdio connected to the
+    // other address; `SYSTEM:"cmd"` runs it via a shell - both proven
+    // live on this VM (`socat EXEC:"echo PROOF-SOCAT-EXEC" -` prints it).
+    // `socat` was in `DOWNLOADERS` for the `| sh` rule only; nothing
+    // modelled its address options. Same family as pass-4 R1-4 (`tar
+    // --to-command`): the command text is literally the option value.
+    // The address may sit in either position, quoted with either quote
+    // kind, or bare (`EXEC:rm`), with `,option` suffixes after the
+    // command (`EXEC:"…",pty`); lowercase `exec:` executes too (proven
+    // live), so the match is case-insensitive. A bare unquoted
+    // multi-word form (`EXEC:rm -rf /`) is NOT screened by joining:
+    // socat itself rejects it ("exactly 2 addresses required"), so
+    // there is no execution to catch - the tar-style join does not apply
+    // to an address, which is one argv word by construction.
+    if (name === 'socat') {
+      for (const value of socatCommandValues(args)) {
+        const inner = screenNested(value, depth);
+        if (inner) return inner;
+      }
+    }
+
+    // ── R1 pass 5 - command-string operands: ssh / mosh / capsh ──
+    //
+    // Three heads, one mechanism: the command hides inside a single
+    // string operand, so no rule ever sees `rm` as a head word.
+    // `ssh host "rm -rf /"` executes on the remote host (ssh(1): "If a
+    // command is specified, it is executed on the remote host instead of
+    // a login shell"); `mosh` takes the same trailing command;
+    // `capsh -- -c STRING` runs the string via a shell (proven live:
+    // `capsh -- -c 'echo PROOF-CAPSH'` prints it). Each operand is
+    // screened as a command string, the way `sh -c` is modelled - the
+    // payload's POSITION never has to be modelled, so `-p`/`-J`/`--ssh=`
+    // option values and the hostname screen harmlessly alongside it.
+    // This is deliberately NOT `COMMAND_CARRIERS` membership: that table
+    // is load-bearing for the differential corpus's launcher census
+    // (`LINUX_UNMODELLED_LAUNCHERS` proves `capsh` is in none of the
+    // four hand tables), and carrier membership would also screen every
+    // SUFFIX - which the nested launcher census already covers for
+    // these heads. The operand reading is the whole of this finding.
+    if (name === 'ssh' || name === 'mosh' || name === 'capsh') {
+      for (const operand of operands) {
+        const inner = screenNested(operand, depth);
+        if (inner) return inner;
+      }
+    }
+
+    // ── R1 pass 5 - `execlineb -c` and `daemon --command=` ──
+    //
+    // Two more string-command sites, one line each. `execlineb -c
+    // SCRIPT` takes the script as a string (`execlineb -c 'rm -rf /'`
+    // is permitted today at top level AND nested - the census alone
+    // cannot see inside the one-word value, so the `-c` value is
+    // screened the way a shell's is, raw spelling included). `daemon`
+    // takes the client command via `--command=` on the libslack form
+    // (attached and separate spellings); its bare operands are a program
+    // argv and stay with the launcher census.
+    if (name === 'execlineb') {
+      const payload = shellPayload(args);
+      if (payload !== undefined) {
+        const inner = screenNested(payload, depth);
+        if (inner) return inner;
+        const rawInner = codeRawPayload(args, rawArgs, payload);
+        if (rawInner !== undefined) {
+          const hit = screenNested(rawInner, depth);
+          if (hit) return hit;
+        }
+      }
+    }
+    if (name === 'daemon') {
+      for (const value of daemonCommandValues(args)) {
+        const inner = screenNested(value, depth);
+        if (inner) return inner;
+      }
+    }
+
+    // ── R1 pass 5 - `rsync -e` / `--rsh`: the remote-shell VALUE executes ──
+    //
+    // rsync executes the `-e` value as the remote-shell command, then
+    // appends its own words (`host rsync --server --sender …`, proven
+    // with an argv-logging wrapper on this VM). Two consequences, both
+    // measured, and the arm models exactly the difference between them:
+    // the shell-wrapped form `rsync -e 'sh -c "rm -rf …"'` DELETES
+    // (the `-c` string runs verbatim; the appended words land as
+    // `$0`/positional parameters), while the plain form `rsync -e 'rm
+    // -rf …'` does NOT (GNU `rm` rejects the appended `--server` as an
+    // unknown option before deleting anything). So the value is screened
+    // as a command ONLY when it re-interprets a string argument -
+    // when some candidate head of it is a shell, a carrier, an
+    // interpreter, or a `-c` head (`capsh`, `execlineb`) - and a direct
+    // verb (`rm`, `dd`, `cat`) or a plain remote shell (`ssh -p 2222`,
+    // the ordinary rsync usage) stays allowed. `--rsync-path` stays out
+    // of scope: it executes on the REMOTE host only. The value is
+    // exactly one word (attached or separate spelling); unlike tar's
+    // options it does not spill into the following words, so no join.
+    if (name === 'rsync') {
+      for (const value of rsyncShellValues(args)) {
+        if (!rsyncValueReinterprets(value)) continue;
+        const inner = screenNested(value, depth);
+        if (inner) return inner;
+      }
+    }
+
     // ── a network download piped into a shell: remote code execution ──
     // R1 pass 4 - `openssl` is scoped to its `s_client` subcommand: only
     // that subcommand streams bytes from the network to stdout, so only
     // it belongs in this rule. The subcommand is the first operand, the
     // way `reg delete` is scoped at the Windows screen.
+    // R1 pass 5 - `s_server` streams the same way in the other direction:
+    // a remote TLS client speaking to `openssl s_server … | sh` gets its
+    // bytes executed (proven live over real TLS on this VM). Both
+    // subcommands are scoped, nothing else under `openssl` is.
     const isNetworkStreamer =
       DOWNLOADERS.has(name) ||
-      (name === 'openssl' && splitArgs(args).operands[0] === 's_client');
+      (name === 'openssl' && (splitArgs(args).operands[0] === 's_client' || splitArgs(args).operands[0] === 's_server'));
     if (isNetworkStreamer && isPipeTerminator(cmd.terminator)) {
       for (let j = i + 1; j < commands.length; j += 1) {
         const stage = commands[j] as SimpleCommand;
@@ -823,10 +1263,16 @@ function screenArgv(
     }
 
     // ── find … -delete / -exec / -execdir rm … aimed at / ~ or a system directory ──
+    // R1 pass 5 - `-ok` / `-okdir` are the same shape with a prompt:
+    // `yes | find / -ok rm -rf {} \;` runs `rm` after a stdin `y`
+    // (proven live with `printf 'y\n' | find … -ok touch …`). The arm
+    // models them exactly like `-exec` / `-execdir` - same `rm` test,
+    // same dangerous-starting-path test. The message keeps the original
+    // wording: the pinned message names the arm, not every flag in it.
     if (name === 'find') {
       const destroys =
         args.includes('-delete') ||
-        ((args.includes('-exec') || args.includes('-execdir')) &&
+        ((args.includes('-exec') || args.includes('-execdir') || args.includes('-ok') || args.includes('-okdir')) &&
           args.some((a) => osFold(commandBasename(a)) === 'rm'));
       if (destroys && operands.some((o) => dangerousTarget(o) !== null)) {
         return 'find -delete/-exec/-execdir rm on / ~ or a system directory';
@@ -938,6 +1384,52 @@ function screenArgv(
       for (const chunk of splitArgs(upstream).operands) {
         const inner = screenNested(chunk, depth);
         if (inner) return inner;
+      }
+    }
+
+    // ── R1 pass 5 - `crontab -` installs piped stdin as a cron job ──
+    //
+    // Same deferred-execution family as `at`: "The first form of this
+    // command is used to install a new crontab from some named file or
+    // standard input if the pseudo-filename '-' is given" (Vixie cron;
+    // POSIX: a bare `crontab` waits for the new entry on standard
+    // input), and the command portion of a crontab line "will be
+    // executed by /bin/sh". The payload reaches execution deferred -
+    // outside the run, outside the timeout, recurring every minute.
+    // Two precision guards, both load-bearing:
+    // - A line is only a job when it carries a SCHEDULE. A bare `rm -rf
+    // /` alone is not a valid crontab line and cron never runs it, so
+    // the five time fields (or an `@`-macro) are stripped first and the
+    // REMAINDER is screened - the `at` arm as-is would read head `*`,
+    // not `rm`. A line with fewer than five valid fields screens
+    // nothing. `crontab /tmp/cronfile` (file operand) stays out of
+    // scope exactly like `at -f`, and `-l`/`-r`/`-e` never install.
+    // - A heredoc body needs no arm here: `crontab - <<EOF` with a
+    // scheduled `rm` line is already blocked (the body line reaches
+    // the screen as a command) and a benign one stays allowed.
+    if (name === 'crontab' && i > 0 && isPipeTerminator((commands[i - 1] as SimpleCommand).terminator)) {
+      const { flags, operands } = splitArgs(args, ['-u']);
+      const installsFromStdin =
+        !flags.some((f) => /^-[A-Za-z]*[lre][A-Za-z]*$/.test(f)) &&
+        (operands.length === 0 || (operands.length === 1 && operands[0] === '-'));
+      if (installsFromStdin) {
+        const upstream = effectiveWords(commands[i - 1] as SimpleCommand)
+          .slice(1)
+          .map((w) => w.value);
+        for (const chunk of splitArgs(upstream).operands) {
+          // The upstream stage usually PRINTS the crontab (`printf '…
+          // \n'`), so its argv carries the line breaks as escape
+          // sequences, not real newlines - unescape them the way the
+          // `rm` arm's upstream walk already does for its targets,
+          // before splitting into lines.
+          const text = chunk.replace(/\\n/g, '\n').replace(/\\t/g, '\t');
+          for (const line of text.split('\n')) {
+            const remainder = crontabCommandRemainder(line);
+            if (remainder === null) continue;
+            const inner = screenNested(remainder, depth);
+            if (inner) return inner;
+          }
+        }
       }
     }
 

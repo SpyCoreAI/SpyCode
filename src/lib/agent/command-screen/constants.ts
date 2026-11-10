@@ -35,8 +35,12 @@ export const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'csh', 'tcsh'
  * the network to stdout exactly the way `curl` does, so piping any of
  * them into a shell executes whatever the remote end sends. `openssl`
  * is deliberately NOT here: only its `s_client` subcommand streams from
- * the network, and the rule scopes to it at the call site. */
-export const DOWNLOADERS = new Set(['curl', 'wget', 'fetch', 'aria2c', 'axel', 'httpie', 'http', 'https', 'nc', 'ncat', 'socat', 'ssh', 'telnet']);
+ * the network, and the rule scopes to it at the call site.
+ * R1 pass 5 - `wget2` (the GNU wget successor, streams with `-O -`),
+ * `xh` and `curlie` (HTTPie-compatible clients that print the response
+ * body to stdout by default) stream the same way, so they belong by the
+ * same conservative logic the `wget` entry already applies. */
+export const DOWNLOADERS = new Set(['curl', 'wget', 'fetch', 'aria2c', 'axel', 'httpie', 'http', 'https', 'nc', 'ncat', 'socat', 'ssh', 'telnet', 'wget2', 'xh', 'curlie']);
 
 /**
  * R1-1 - LAUNCHERS: BINARIES THAT TAKE A COMMAND AS AN OPERAND AND RUN IT.
@@ -74,6 +78,29 @@ export const DOWNLOADERS = new Set(['curl', 'wget', 'fetch', 'aria2c', 'axel', '
  * permitted - the same residue the corpus's own head-axis LIVE leg
  * accepts, which pins object-keyed cores for unlisted executors only.
  * Closing it further needs a wider census, not a wider rule.
+ *
+ * R1 pass 5 - the pass-4 residual, confirmed live and wider than
+ * stated: the daemontools family (`softlimit`, `setlock`, `envdir`,
+ * `pgrphack` - each runs another program via `pathexec_run`/`execvp`
+ * after setting limits, taking a lock, loading env, or moving process
+ * groups) and its s6 rewrite (`s6-softlimit`, `s6-envdir` - "changes
+ * its process limits, then executes into another program"), `redirfd`
+ * ("redirects the file descriptor ... then execs into prog..."),
+ * `daemon` ("detaches itself ... and executes the program specified by
+ * its arguments"), `lxc-attach` ("runs the specified command inside
+ * the container"), `ssh` / `mosh` (execute the operands as a command
+ * on the remote host) each execute their operands unconditionally, so
+ * they join the census as plain heads. Three more execute operands
+ * ONLY in one form and are deliberately NOT here - they are scoped in
+ * `scopedLauncherExecutes` below, so a plain `machinectl list`,
+ * `virsh list` or `execlineb scriptfile` stays a mention:
+ * `machinectl` (only the `shell` subcommand runs a command),
+ * `virsh` (only `lxc-enter-namespace` runs a command),
+ * `execlineb` (only `-c` takes a script; without it the first operand
+ * is a script FILE whose contents are out of scope, like `sh
+ * script.sh`). `envdir` needs no special case for its incidental
+ * lift: `envdir /tmp/env ...` used to block only because the operand's
+ * basename is `env`, a wrapper - the census entry is the real cover.
  */
 export const COMMAND_LAUNCHERS = new Set([
   // macOS census (man1/man8 SYNOPSIS).
@@ -93,7 +120,60 @@ export const COMMAND_LAUNCHERS = new Set([
   // R1 pass 4 - adjacent user-switching launchers, audited the same way
   // (each verified to execute its operands before adding).
   'su-exec', 'setuidgid', 'envuidgid', 'chpst', 's6-setuidgid',
+  // R1 pass 5 - the pass-4 residual, each verified to execute its
+  // operands before adding (see the header note above for the audit).
+  'softlimit', 'setlock', 'envdir', 'pgrphack', 's6-softlimit', 's6-envdir',
+  'redirfd', 'daemon', 'lxc-attach', 'ssh', 'mosh',
 ]);
+
+/**
+ * R1 pass 5 - SCOPED LAUNCHERS: heads that execute their operands ONLY in
+ * one subcommand or option form. A bare census entry would read a mention
+ * as a command (`machinectl list rm -rf /` runs nothing - `list` takes no
+ * command operand), so the gate asks about the form, not just the name.
+ *
+ * `machinectl` runs a command only as its `shell` subcommand
+ * (`machinectl shell [NAME] [COMMAND...]`, verified against this VM's
+ * `machinectl --help`); `virsh` only as `lxc-enter-namespace` (libvirt);
+ * `execlineb` only with `-c`, which takes the script as its value
+ * (execline: "a command launcher ... with `-c`, the script").
+ *
+ * The first-operand scan skips option words, and one word after the
+ * options that take a separate value (`-H host`, `-c uri`) - the same
+ * narrow value-option table `DEVICE_WRITE_VERBS` already uses. An
+ * attached value (`--uid=root`) is one flag word and consumes nothing.
+ * The scan stops at the first non-flag word, so a value it does not
+ * know about can only make it answer about that value, never about a
+ * word further down the line.
+ */
+const SCOPED_LAUNCHER_VALUE_OPTS: Readonly<Record<string, readonly string[]>> = {
+  machinectl: ['-H', '--host', '-M', '--machine', '--uid', '-E', '--setenv'],
+  virsh: ['-c', '--connect', '-d', '--debug', '-l', '--log'],
+};
+
+/** Does this (already osFolded) head, with these args, execute its operands? */
+export function scopedLauncherExecutes(head: string, args: readonly string[]): boolean {
+  if (head === 'execlineb') {
+    // `-c` in any short-option cluster, the way `shellPayload` reads it.
+    return args.some((a) => /^-[A-Za-z]*c[A-Za-z]*$/.test(a));
+  }
+  const want = head === 'machinectl' ? 'shell' : head === 'virsh' ? 'lxc-enter-namespace' : undefined;
+  if (want === undefined) return false;
+  const valueOpts = SCOPED_LAUNCHER_VALUE_OPTS[head] ?? [];
+  let skipNext = false;
+  for (const a of args) {
+    if (skipNext) {
+      skipNext = false;
+      continue;
+    }
+    if (a.startsWith('-') && a.length > 1) {
+      if (valueOpts.includes(a) && !a.includes('=')) skipNext = true;
+      continue;
+    }
+    return a === want;
+  }
+  return false;
+}
 
 /**
  * F-2c-30 - THE CARRIER CLASS: A COMMAND WHOSE OPERAND IS ITSELF A COMMAND.
@@ -678,7 +758,7 @@ export const FALLBACK_REDIRECTS = new Set(['>', '>>', '<', '<<', '2>', '&>', '>&
  */
 export const INTERPRETERS = new Set([
   'python', 'python2', 'python3', 'perl', 'ruby', 'node', 'php', 'bun', 'deno',
-  'awk', 'gawk', 'mawk', 'nawk', 'osascript', 'lua', 'Rscript', 'julia', 'pwsh',
+  'awk', 'gawk', 'mawk', 'nawk', 'osascript', 'lua', 'rscript', 'r', 'julia', 'pwsh',
 ]);
 
 /** The flags those programs use for "the next argument is the program". */

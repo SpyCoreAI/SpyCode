@@ -12,6 +12,7 @@ import {
   INTERPRETERS,
   OPERATOR_SPLIT,
   SHELLS,
+  scopedLauncherExecutes,
 } from './constants.js';
 
 /**
@@ -345,19 +346,27 @@ export function continuationTails(command: string): string[] {
  * drift detector now runs over this batch's own diff.
  */
 function textMayExecOperands(command: string): boolean {
-  for (const w of command.split(/[\s;|&<>()`]+/)) {
-    if (w.length === 0) continue;
-    const n = osFold(commandBasename(w.replace(/['"\\]/g, '')));
+  const words = command
+    .split(/[\s;|&<>()`]+/)
+    .filter((w) => w.length > 0)
+    .map((w) => w.replace(/['"\\]/g, ''));
+  for (let k = 0; k < words.length; k += 1) {
+    const w = words[k] as string;
+    const n = osFold(commandBasename(w));
     // R1 pass 4 - the conservative fallback is the same gate as
     // `headMayExecOperands` and it did not consult the launcher census
     // at all, so an unconfident nested parse with a censused launcher
     // head was suppressed there too. Same set, same reading.
+    // R1 pass 5 - same for the SCOPED launchers: the words after the
+    // head are scanned the same way, so `machinectl list` does not lift
+    // the gate while `machinectl shell …` does.
     if (
       COMMAND_WRAPPERS.has(n) ||
       COMMAND_CARRIERS.has(n) ||
       COMMAND_LAUNCHERS.has(n) ||
       INTERPRETERS.has(n) ||
-      SHELLS.has(n)
+      SHELLS.has(n) ||
+      scopedLauncherExecutes(n, words.slice(k + 1))
     )
       return true;
   }

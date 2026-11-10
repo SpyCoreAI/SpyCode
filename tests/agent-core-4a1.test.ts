@@ -193,7 +193,7 @@ describe('item 23 - flag clusters and command tables', () => {
 
   test('downloaders / interpreters / shells include the missing names', () => {
     for (const d of ['aria2c', 'axel', 'httpie', 'http', 'https']) expect(DOWNLOADERS.has(d)).toBe(true);
-    for (const i of ['osascript', 'lua', 'Rscript', 'julia', 'pwsh']) expect(INTERPRETERS.has(i)).toBe(true);
+    for (const i of ['osascript', 'lua', 'rscript', 'r', 'julia', 'pwsh']) expect(INTERPRETERS.has(i)).toBe(true);
     for (const s of ['ash', 'mksh', 'pwsh']) expect(SHELLS.has(s)).toBe(true);
   });
 });
