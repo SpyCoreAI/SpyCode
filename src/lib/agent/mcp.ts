@@ -364,6 +364,10 @@ function makeWrapper(
         fullName,
         args,
       };
+      // R2-16: stamp the dispatching call's identity (set by the dispatcher
+      // on ctx.currentToolCall) so the ACP bridge correlates this approval
+      // with the right announced tool call.
+      if (ctx.currentToolCall) request.toolCallRef = ctx.currentToolCall;
       const outcome = await resolveApproval(
         ctx.requestApproval ?? bridgeApproval,
         request,

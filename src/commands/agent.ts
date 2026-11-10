@@ -896,12 +896,19 @@ export function registerAgentCommand(program: Command): void {
               const probeTimeout = new Promise<'timeout'>((resolve) => {
                 probeTimer = setTimeout(() => resolve('timeout'), 15_000);
               });
-              const probeResult = await Promise.race([
-                probePromise.then(() => 'done' as const),
-                probeTimeout,
-              ]);
-              // clear the timer to avoid dangling handle delaying exit.
-              if (probeTimer) clearTimeout(probeTimer);
+              let probeResult: 'done' | 'timeout';
+              try {
+                probeResult = await Promise.race([
+                  probePromise.then(() => 'done' as const),
+                  probeTimeout,
+                ]);
+              } finally {
+                // R2-17: clear the timer in a finally - it used to sit after
+                // the await, so a streamChat throw skipped it and the
+                // process lingered up to the full 15 s. (Mirrors `provider
+                // add`, R2-13, which already clears in finally.)
+                if (probeTimer) clearTimeout(probeTimer);
+              }
               // Abort the stream on timeout so the connection doesn't leak.
               if (probeResult === 'timeout') probeAbort.abort();
               if (probeResult === 'timeout') {

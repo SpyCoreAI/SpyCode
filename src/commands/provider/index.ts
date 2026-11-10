@@ -55,6 +55,12 @@ function keySource(p: StoredProviderConfig): string {
       'A stored provider config lists one of: openai, anthropic, google. Re-save it with `spycore provider add`.',
     );
   }
+  // R2-18: an OAuth entry never consults a key - the factory refreshes the
+  // access token whenever oauthRefreshToken is present, even if a key is
+  // also stored (factory.ts: Google branch) - so the key source is OAuth,
+  // not the default env var (or any explicitly stored key, which the run
+  // never reads). Checked first, before the key branches below.
+  if (p.oauthRefreshToken && p.oauthRefreshToken.length > 0) return 'oauth';
   if (p.apiKeyEnv && p.apiKeyEnv.length > 0) return `env:${p.apiKeyEnv}`;
   if (p.apiKey && p.apiKey.length > 0) return 'stored';
   // Key-required types fall back to their default env var at run time; the

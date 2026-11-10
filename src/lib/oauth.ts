@@ -16,6 +16,7 @@ import { createServer, type Server } from 'node:http';
 import { randomBytes, createHash } from 'node:crypto';
 import { openInBrowser } from './browser.js';
 import { ERROR_BODY_MAX_BYTES, readCappedJson } from './sse.js';
+import { truncateSafe } from './text.js';
 
 // Google OAuth endpoints
 const GOOGLE_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
@@ -232,7 +233,14 @@ async function readCappedErrorText(resp: Response): Promise<string> {
   }
   if (typeof resp.text === 'function') {
     try {
-      return (await resp.text()).slice(0, ERROR_BODY_MAX_BYTES);
+      // EXTRA (pass-5 R3 cross-area note, same truncateSafe class as
+      // R3-17/R3-20): a raw .slice(0, …) can split a surrogate pair, and
+      // the lone surrogate then reaches the thrown error message. The
+      // production undici transport takes the streaming branch above (its
+      // body is async-iterable), so this is the documented non-streaming
+      // fallback - but its contract is exactly this input, so the cut
+      // must be pair-safe here too.
+      return truncateSafe(await resp.text(), ERROR_BODY_MAX_BYTES);
     } catch {
       return '';
     }

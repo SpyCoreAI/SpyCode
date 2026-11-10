@@ -19,6 +19,26 @@ export type MutationOutcome = 'applied' | 'rejected' | 'blocked';
 /** UI glyph hint for a tool result (writes share MutationOutcome; commands add 'command'). */
 export type ToolResultKind = MutationOutcome | 'command';
 
+/**
+ * Identity of the tool call whose dispatch raised an approval request:
+ * the turn and the call's index within that turn.
+ *
+ * R2-16: the dispatcher stamps this on every request it raises, so a
+ * consumer that correlates approvals to announced tool calls (the ACP
+ * permission bridge) keys off the DISPATCHING call instead of guessing
+ * from "the last call announced" - which is the previous call in fenced
+ * mode (dispatch approves before it announces) and the last-streamed
+ * call in a native multi-call turn. Absent for approvals raised outside
+ * dispatch (e.g. the verify loop, which runs at the command layer, not
+ * inside a turn). A nested `delegate` run dispatches on its own context,
+ * so its dispatcher stamps the nested call's identity there; the parent
+ * call's identity is never read by the nested run.
+ */
+export interface ToolCallRef {
+  turn: number;
+  index: number;
+}
+
 /** A file write/edit awaiting approval - the diff is what the user approves. */
 export interface WriteApprovalRequest {
   kind: 'write';
@@ -31,6 +51,8 @@ export interface WriteApprovalRequest {
   diff: DiffLine[];
   truncated: boolean;
   hiddenLines: number;
+  /** The dispatching call, when raised from a turn's dispatch (R2-16). */
+  toolCallRef?: ToolCallRef | undefined;
 }
 
 /** A shell command awaiting approval - the command string is what to approve. */
@@ -42,6 +64,8 @@ export interface CommandApprovalRequest {
    * unicode in the command. Informational only; they never auto-approve.
    */
   notices?: string[] | undefined;
+  /** The dispatching call, when raised from a turn's dispatch (R2-16). */
+  toolCallRef?: ToolCallRef | undefined;
 }
 
 /**
@@ -59,6 +83,8 @@ export interface McpApprovalRequest {
   fullName: string;
   /** The arguments the model passed (already parsed JSON). */
   args: Record<string, unknown>;
+  /** The dispatching call, when raised from a turn's dispatch (R2-16). */
+  toolCallRef?: ToolCallRef | undefined;
 }
 
 /** What the model wants to do, awaiting a user decision. */

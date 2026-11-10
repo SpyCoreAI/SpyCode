@@ -442,7 +442,21 @@ export function createRunDispatcher({
       }
       if (!isParallelizable(call.tool)) {
         counters.toolCalls += 1;
-        const res = await dispatchWithHooks(ctx, call.tool, call.args);
+        // R2-16: publish the dispatching call's identity on the context
+        // for this dispatch only (restored after) - the gated tools stamp
+        // it onto the approval request they build, so a consumer that
+        // correlates approvals to announced tool calls (the ACP permission
+        // bridge) keys off the DISPATCHING call. A data field, not a
+        // resolver wrapper: tools must keep seeing the shared context's
+        // own requestApproval (N17 pins that identity).
+        const prevCall = ctx.currentToolCall;
+        ctx.currentToolCall = { turn, index: call.index };
+        let res: ToolResult;
+        try {
+          res = await dispatchWithHooks(ctx, call.tool, call.args);
+        } finally {
+          ctx.currentToolCall = prevCall;
+        }
         emitCallEvents(turn, call.index, call.tool, call.args, res);
         results[i] = res;
         i += 1;
@@ -476,7 +490,16 @@ export function createRunDispatcher({
       const settled = await Promise.all(
         runnable.map((bi) => {
           const c = calls[bi]!;
-          return dispatchWithHooks({ ...ctx }, c.tool, c.args);
+          // R2-16: each batched call gets its own context copy carrying its
+          // own call identity (see the serial path above) - the copies
+          // already exist so the observation window's swaps cannot
+          // interleave, and the identity rides on the copy, never on the
+          // shared context's resolver.
+          return dispatchWithHooks(
+            { ...ctx, currentToolCall: { turn, index: c.index } },
+            c.tool,
+            c.args,
+          );
         }),
       );
       runnable.forEach((bi, k) => {

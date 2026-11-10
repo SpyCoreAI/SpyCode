@@ -211,6 +211,10 @@ async function approveMemoryWrite(
     diff: fd.lines,
     truncated: fd.truncated,
     hiddenLines: fd.hiddenLines,
+    // R2-16: stamp the dispatching call's identity (set by the dispatcher
+    // on ctx.currentToolCall) so the ACP bridge correlates this approval
+    // with the right announced tool call.
+    ...(ctx.currentToolCall ? { toolCallRef: ctx.currentToolCall } : {}),
   });
   return outcome.approved ? { approved: true } : { approved: false, reason: outcome.reason };
 }

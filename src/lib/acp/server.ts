@@ -117,8 +117,23 @@ interface AcpSession {
   loadedSkills: Set<string>;
   /** The currently-dispatching tool call (for permission correlation + cancel). */
   currentTool: { id: string; terminal: boolean; title: string } | null;
+  /**
+   * R2-16: every tool-call id already announced to the client as a
+   * `tool_call` update. The announce check used to be
+   * `currentTool?.id === id`, which never matches while `currentTool` is
+   * last-started-wins - so a native multi-call turn announced every call
+   * twice (once from `tool_call_started`, once from `tool_call`). The set
+   * is keyed by the announced id itself, so each call announces exactly
+   * once however many events name it.
+   */
+  announcedTools: Set<string>;
   /** Cancel requested for the in-flight prompt (drives the stopReason). */
   cancelRequested: boolean;
+}
+
+/** The ACP tool-call id for a dispatched call: `call_t<turn>_<index>`. */
+function acpToolCallId(turn: number, index: number): string {
+  return `call_t${turn}_${index}`;
 }
 
 /** Map a SpyCode tool name to the ACP tool kind taxonomy. */
@@ -268,6 +283,7 @@ export class AcpAgentServer {
       autoApproveAll: false,
       loadedSkills: new Set<string>(),
       currentTool: null,
+      announcedTools: new Set<string>(),
       cancelRequested: false,
     });
     return { sessionId: id };
@@ -437,8 +453,12 @@ export class AcpAgentServer {
 
       // NATIVE mode: the model named a tool mid-stream - announce it early.
       case 'tool_call_started': {
-        const id = `call_t${e.turn}_${e.index}`;
-        if (session.currentTool?.id !== id) {
+        const id = acpToolCallId(e.turn, e.index);
+        // R2-16: dedup against the announced set, not currentTool (which is
+        // last-started-wins and so never matched the first call of a
+        // multi-call turn - every call was announced twice).
+        if (!session.announcedTools.has(id)) {
+          session.announcedTools.add(id);
           session.currentTool = { id, terminal: false, title: e.name };
           this.sendUpdate(session, {
             sessionUpdate: 'tool_call',
@@ -453,11 +473,12 @@ export class AcpAgentServer {
 
       // Dispatch begins (both modes). Announce (if not already) + in_progress.
       case 'tool_call': {
-        const id = `call_t${e.turn}_${e.index}`;
+        const id = acpToolCallId(e.turn, e.index);
         const title = toolTitle(e.tool, e.arg);
-        const announced = session.currentTool?.id === id;
+        const announced = session.announcedTools.has(id);
         session.currentTool = { id, terminal: false, title };
         if (!announced) {
+          session.announcedTools.add(id);
           this.sendUpdate(session, {
             sessionUpdate: 'tool_call',
             toolCallId: id,
@@ -482,7 +503,7 @@ export class AcpAgentServer {
       }
 
       case 'tool_result': {
-        const id = `call_t${e.turn}_${e.index}`;
+        const id = acpToolCallId(e.turn, e.index);
         const rawOutput: Record<string, unknown> = { summary: e.summary };
         if (e.command) rawOutput.command = e.command;
         if (e.outputTail) rawOutput.outputTail = e.outputTail.slice(0, RAW_OUTPUT_CAP);
@@ -531,11 +552,35 @@ export class AcpAgentServer {
       if (signal?.aborted) return { approved: false, reason: 'cancelled' };
 
       const info = permissionToolInfo(request);
-      // Correlate with the current tool call when one is announced (the loop
-      // dispatches sequentially, so the pending approval IS the current call).
-      const toolCall: Record<string, unknown> = session.currentTool
-        ? { toolCallId: session.currentTool.id, title: info.title, kind: info.kind }
-        : { toolCallId: `call_${randomUUID().slice(0, 8)}`, title: info.title, kind: info.kind };
+      // R2-16: correlate with the DISPATCHING call, not the last-announced
+      // one. The dispatcher stamps every approval request with the call's
+      // (turn, index), and the id below is exactly the id the `tool_call`
+      // update carries - or will carry, in fenced mode, where serial
+      // dispatch approves BEFORE it announces, so at approval time the
+      // client has not seen the id yet and the update lands right after
+      // the approval resolves. `session.currentTool` is only a fallback
+      // for approvals raised outside dispatch (the ACP path never does:
+      // the verify loop runs at the command layer, not inside a turn);
+      // with neither, mint an id AND announce it first, so a permission
+      // is never attached to a never-announced id again.
+      const ref = request.toolCallRef;
+      let toolCallId: string;
+      if (ref) {
+        toolCallId = acpToolCallId(ref.turn, ref.index);
+      } else if (session.currentTool) {
+        toolCallId = session.currentTool.id;
+      } else {
+        toolCallId = `call_${randomUUID().slice(0, 8)}`;
+        session.announcedTools.add(toolCallId);
+        this.sendUpdate(session, {
+          sessionUpdate: 'tool_call',
+          toolCallId,
+          title: info.title,
+          kind: info.kind,
+          status: 'pending' satisfies ToolCallStatus,
+        });
+      }
+      const toolCall: Record<string, unknown> = { toolCallId, title: info.title, kind: info.kind };
       if (request.kind === 'mcp') toolCall.rawInput = request.args;
 
       const options: PermissionOption[] = [

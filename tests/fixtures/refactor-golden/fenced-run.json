@@ -369,7 +369,11 @@
             }
           ],
           "truncated": false,
-          "hiddenLines": 0
+          "hiddenLines": 0,
+          "toolCallRef": {
+            "turn": 1,
+            "index": 3
+          }
         }
       ],
       "runStates": [

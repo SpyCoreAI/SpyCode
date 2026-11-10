@@ -584,8 +584,12 @@ async function runByokChat(
   const { createByokProvider } = await import('../lib/providers/factory.js');
   const { withUsageTracking } = await import('../lib/byok-usage.js');
   const rawProvider = await createByokProvider(selection.config);
-  // wrap with usage tracking.
-  const provider = withUsageTracking(rawProvider, opts.provider ?? selection.config.type);
+  // wrap with usage tracking. R2-19: record under the RESOLVED canonical
+  // name (selection.sourceName, the stored entry's own name), not the raw
+  // --provider flag - the flag is case-insensitive, so `--provider foo`
+  // for a saved `Foo` used to open a second usage row for one provider.
+  // (Mirrors agent.ts, which already passes sourceName ?? type.)
+  const provider = withUsageTracking(rawProvider, selection.sourceName ?? selection.config.type);
   const conversationId = await provider.createConversation({
     model: selection.config.model,
   });

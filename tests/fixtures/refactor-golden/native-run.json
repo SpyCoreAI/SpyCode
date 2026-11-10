@@ -641,7 +641,11 @@
             }
           ],
           "truncated": false,
-          "hiddenLines": 0
+          "hiddenLines": 0,
+          "toolCallRef": {
+            "turn": 2,
+            "index": 0
+          }
         }
       ],
       "runStates": [

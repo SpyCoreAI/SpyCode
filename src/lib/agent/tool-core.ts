@@ -19,7 +19,7 @@ import { loadSecretGuard, type SecretGuard } from './secrets.js';
 import { isInsideReal, realRoot } from '../path-containment.js';
 import { RESULT_TRUNC_MARKER_MAX_CHARS, WIRE_MESSAGE_MAX_CHARS } from '../wire-limits.js';
 import { HOOK_FEEDBACK_APPEND_MAX_CHARS } from '../hooks.js';
-import type { RequestApproval, ToolResultKind } from './approval.js';
+import type { RequestApproval, ToolCallRef, ToolResultKind } from './approval.js';
 import type { RecordedChange } from './checkpoint.js';
 import type { DiscoveredSkill } from './skills.js';
 import type { Delegator } from './delegate.js';
@@ -90,6 +90,18 @@ export interface ToolContext {
   signal?: AbortSignal | undefined;
   /** Pause-for-approval hook used by mutating tools + run_command. */
   requestApproval?: RequestApproval | undefined;
+  /**
+   * R2-16: the tool call currently being dispatched (turn + index within
+   * the run), set by the dispatcher for the dispatch only - serial calls
+   * on the shared context, one identity per copy for a parallel batch.
+   * The gated tools stamp it onto the approval request they build, so a
+   * consumer that correlates approvals to announced tool calls (the ACP
+   * permission bridge) keys off the DISPATCHING call. Unset outside a
+   * dispatch (and for approvals raised outside dispatch, e.g. verify).
+   * A plain data field, deliberately NOT a resolver wrapper: tools must
+   * keep seeing the shared context's own requestApproval (N17).
+   */
+  currentToolCall?: ToolCallRef | undefined;
   /** Timeout (ms) for run_command; defaults to 120s when unset. */
   commandTimeoutMs?: number | undefined;
   /**
